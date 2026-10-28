@@ -1,10 +1,9 @@
-import typing as t
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
-from pydantic import BaseModel, PrivateAttr
-from typing import Optional, Dict, Any
-
-if t.TYPE_CHECKING:  # avoid import cycle at runtime
+if TYPE_CHECKING:  # avoid import cycle at runtime
     from .client import Client
+
 from .structs import (
     FoldingRange,
     InlayHint,
@@ -33,153 +32,160 @@ from .structs import (
     ConfigurationItem,
 )
 
-Id = t.Union[int, str]
+Id = Union[int, str]
 
 
-class Event(BaseModel):
+@dataclass
+class Event:
     pass
 
 
+@dataclass
 class MethodResponse(Event):
-    message_id: t.Optional[Id] = None
+    message_id: Optional[Id] = None
 
 
+@dataclass
 class ResponseError(Event):
-    message_id: t.Optional[Id] = None
-    code: int
-    message: str
-    data: t.Optional[t.Union[str, int, float, bool, t.List[t.Any], JSONDict, None]] = None
+    message_id: Optional[Id] = None
+    code: int = 0
+    message: str = ""
+    data: Optional[Union[str, int, float, bool, List[Any], JSONDict, None]] = None
 
 
+@dataclass
 class ServerRequest(Event):
-    _client: "Client" = PrivateAttr()
-    _id: Id = PrivateAttr()
+    _client: Optional['Client'] = field(default=None, repr=False, compare=False)
+    _id: Optional[Id] = field(default=None, repr=False, compare=False)
 
 
+@dataclass
 class ServerNotification(Event):
     pass
 
 
+@dataclass
 class Initialized(Event):
-    capabilities: JSONDict
+    capabilities: JSONDict = field(default_factory=dict)
+    
+    @classmethod
+    def from_dict(cls, data: dict):
+        return cls(capabilities=data)
 
 
+@dataclass
 class Shutdown(Event):
     pass
 
 
+@dataclass
 class ShowMessage(ServerNotification):
-    type: MessageType
-    message: str
+    type: MessageType = MessageType.INFO
+    message: str = ""
 
 
+@dataclass
 class ShowMessageRequest(ServerRequest):
-    type: MessageType
-    message: str
-    actions: t.Optional[t.List[MessageActionItem]] = None
+    type: MessageType = MessageType.INFO
+    message: str = ""
+    actions: Optional[List[MessageActionItem]] = None
 
-    def reply(self, action: t.Optional[MessageActionItem] = None) -> None:
-        """
-        Reply to the ShowMessageRequest with the user's selection.
-
-        No bytes are actually returned from this method, the reply's bytes
-        are added to the client's internal send buffer.
-        """
-        self._client._send_response(
-            id=self._id, result=action.model_dump() if action is not None else None
-        )
+    def reply(self, action: Optional[MessageActionItem] = None) -> None:
+        if self._client:
+            result = {'title': action.title} if action is not None else None
+            self._client._send_response(id=self._id, result=result)
 
 
+@dataclass
 class LogMessage(ServerNotification):
-    type: MessageType
-    message: str
+    type: MessageType = MessageType.INFO
+    message: str = ""
 
 
+@dataclass
 class WorkDoneProgressCreate(ServerRequest):
-    token: ProgressToken
+    token: ProgressToken = ""
 
     def reply(self) -> None:
-        self._client._send_response(id=self._id, result=None)
+        if self._client:
+            self._client._send_response(id=self._id, result=None)
 
 
+@dataclass
 class Progress(ServerNotification):
-    token: ProgressToken
-    value: t.Union[
-        WorkDoneProgressBeginValue,
-        WorkDoneProgressReportValue,
-        WorkDoneProgressEndValue,
-    ]
+    token: ProgressToken = ""
+    value: Union[WorkDoneProgressBeginValue, WorkDoneProgressReportValue, 
+                 WorkDoneProgressEndValue] = None
 
 
+@dataclass
 class WorkDoneProgress(Progress):
     pass
 
 
+@dataclass
 class WorkDoneProgressBegin(WorkDoneProgress):
-    value: WorkDoneProgressBeginValue
+    value: WorkDoneProgressBeginValue = None
 
 
+@dataclass
 class WorkDoneProgressReport(WorkDoneProgress):
-    value: WorkDoneProgressReportValue
+    value: WorkDoneProgressReportValue = None
 
 
+@dataclass
 class WorkDoneProgressEnd(WorkDoneProgress):
-    value: WorkDoneProgressEndValue
+    value: WorkDoneProgressEndValue = None
 
 
-# XXX: should these two be just Events or?
+@dataclass
 class Completion(Event):
-    message_id: Id
-    #completion_list: t.Optional[CompletionList]
-    completion_list: t.Optional[t.Dict[str, t.Any]] = None  # make it raw dict (optimization)
+    message_id: Id = 0
+    completion_list: Optional[Dict[str, Any]] = None
 
 
-# XXX: not sure how to name this event.
+@dataclass
 class WillSaveWaitUntilEdits(Event):
-    edits: t.Optional[t.List[TextEdit]] = None
+    edits: Optional[List[TextEdit]] = None
 
 
+@dataclass
 class PublishDiagnostics(ServerNotification):
-    uri: str
-    diagnostics: t.List[Diagnostic]
+    uri: str = ""
+    diagnostics: List[Diagnostic] = field(default_factory=list)
 
 
+@dataclass
 class WorkspaceProjectInitializationComplete(ServerNotification):
-    """Notification, exclusive to the Roslyn language server to indicate that the solution has been loaded."""
-
     pass
 
 
-""" Hover:
-    * contents: MarkedString | MarkedString[] | MarkupContent;
-    * range?: Range;
-"""
+@dataclass
 class Hover(MethodResponse):
-    contents: t.Union[
-        t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
-    ]
-    range: t.Optional[Range] = None
+    contents: Union[List[Union[MarkedString, str]], MarkedString, MarkupContent, str] = ""
+    range: Optional[Range] = None
 
-    # DBG
     def m_str(self):
         """Return hover contents as markdown-compatible string."""
-        def item_str(item): #SKIP
+        def item_str(item):
             if isinstance(item, MarkedString):
                 return f'[{item.language}]\n{item.value}'
             elif isinstance(item, MarkupContent):
                 return f'[{item.kind}]\n{item.value}'
-            return item # str
+            return item
 
         if isinstance(self.contents, list):
             return '\n'.join((item_str(item) for item in self.contents))
         return item_str(self.contents)
 
-class SignatureHelp(MethodResponse):
-    signatures: t.List[SignatureInformation]
-    activeSignature: t.Optional[int] = None
-    activeParameter: t.Optional[int] = None
 
-    def get_hint_str(self) -> t.Optional[str]:
+@dataclass
+class SignatureHelp(MethodResponse):
+    signatures: List[SignatureInformation] = field(default_factory=list)
+    activeSignature: Optional[int] = None
+    activeParameter: Optional[int] = None
+
+    def get_hint_str(self) -> Optional[str]:
         if len(self.signatures) == 0:
             return None
         active_sig = self.activeSignature or 0
@@ -192,92 +198,103 @@ class SignatureHelp(MethodResponse):
         return self.signatures, self.activeSignature, self.activeParameter
 
 
+@dataclass
 class SemanticTokens(Event):
-    message_id: t.Optional[Id] = None
-    resultId: t.Optional[str] = None
-    data: t.List[int]
-    
+    data: List[int] = field(default_factory=list)
+    message_id: Optional[Id] = None
+    resultId: Optional[str] = None
 
+
+@dataclass
 class Definition(MethodResponse):
-    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
+    result: Union[Location, List[Union[Location, LocationLink]], None] = None
 
 
+@dataclass
 class WorkspaceEdit(MethodResponse):
-    changes: t.Optional[t.Dict[str, t.List[TextEdit]]] = None
-    documentChanges: t.Optional[t.List[TextDocumentEdit]] = None
+    changes: Optional[Dict[str, List[TextEdit]]] = None
+    documentChanges: Optional[List[TextDocumentEdit]] = None
 
 
-# result is a list, so putting in a custom class
+@dataclass
 class References(MethodResponse):
-    result: t.Union[t.List[Location], None]
+    result: Union[List[Location], None] = None
 
 
+@dataclass
 class MCallHierarchItems(Event):
-    result: t.Union[t.List[CallHierarchyItem], None]
+    result: Union[List[CallHierarchyItem], None] = None
 
 
+@dataclass
 class Implementation(MethodResponse):
-    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
+    result: Union[Location, List[Union[Location, LocationLink]], None] = None
 
 
+@dataclass
 class MWorkspaceSymbols(MethodResponse):
-    result: t.Union[t.List[SymbolInformation], None]
+    result: Union[List[SymbolInformation], None] = None
 
 
+@dataclass
 class MFoldingRanges(MethodResponse):
-    result: t.Optional[t.List[FoldingRange]] = None
+    result: Optional[List[FoldingRange]] = None
 
 
+@dataclass
 class MInlayHints(MethodResponse):
-    result: t.Optional[t.List[InlayHint]] = None
+    result: Optional[List[InlayHint]] = None
 
 
+@dataclass
 class MDocumentSymbols(MethodResponse):
-    result: t.Union[t.List[SymbolInformation], t.List[DocumentSymbol], None] = None
+    result: Union[List[SymbolInformation], List[DocumentSymbol], None] = None
 
 
+@dataclass
 class Declaration(MethodResponse):
-    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
+    result: Union[Location, List[Union[Location, LocationLink]], None] = None
 
 
+@dataclass
 class TypeDefinition(MethodResponse):
-    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
+    result: Union[Location, List[Union[Location, LocationLink]], None] = None
 
 
+@dataclass
 class RegisterCapabilityRequest(ServerRequest):
-    registrations: t.List[Registration]
+    registrations: List[Registration] = field(default_factory=list)
 
     def reply(self) -> None:
-        self._client._send_response(id=self._id, result={})
+        if self._client:
+            self._client._send_response(id=self._id, result={})
 
 
+@dataclass
 class DocumentFormatting(MethodResponse):
-    result: t.Union[t.List[TextEdit], None] = None
+    result: Union[List[TextEdit], None] = None
 
 
+@dataclass
 class WorkspaceFolders(ServerRequest):
-    result: t.Optional[t.List[WorkspaceFolder]] = None
+    result: Optional[List[WorkspaceFolder]] = None
 
-    def reply(self, folders: t.Optional[t.List[WorkspaceFolder]] = None) -> None:
-        """
-        Reply to the WorkspaceFolder with workspace folders.
-
-        No bytes are actually returned from this method, the reply's bytes
-        are added to the client's internal send buffer.
-        """
-        self._client._send_response(
-            id=self._id,
-            result=[f.model_dump() for f in folders] if folders is not None else None,
-        )
+    def reply(self, folders: Optional[List[WorkspaceFolder]] = None) -> None:
+        if self._client:
+            result = [f.to_dict() for f in folders] if folders is not None else None
+            self._client._send_response(id=self._id, result=result)
 
 
+@dataclass
 class ConfigurationRequest(ServerRequest):
-    items: t.List[ConfigurationItem]
+    items: List[ConfigurationItem] = field(default_factory=list)
 
-    def reply(self, result: t.List[t.Any]) -> None:
-        self._client._send_response(id=self._id, result=result)
+    def reply(self, result: List[Any]) -> None:
+        if self._client:
+            self._client._send_response(id=self._id, result=result)
 
+
+@dataclass
 class Metadata(Event):
-    message_id: t.Optional[Id] = None
-    result: t.Optional[JSONDict] = None
-    
+    message_id: Optional[Id] = None
+    result: Optional[JSONDict] = None

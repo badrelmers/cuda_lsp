@@ -1,32 +1,26 @@
 import enum
-import typing as t
-from typing_extensions import Literal
+from dataclasses import dataclass, field, asdict
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field
-
-# XXX: Replace the non-commented-out code with what's commented out once nested
-# types become a thing in mypy.
-# JSONValue = t.Union[None, str, int,
-#                     t.List['JSONValue'], t.Dict[str, 'JSONValue']]
-# JSONDict = t.Dict[str, JSONValue]
-JSONDict = t.Dict[str, t.Any]
-JSONList = t.List[t.Any]
-
-Id = t.Union[int, str]
-
-ProgressToken = t.Union[int, str]
+# Type aliases
+JSONDict = Dict[str, Any]
+JSONList = List[Any]
+Id = Union[int, str]
+ProgressToken = Union[int, str]
 
 
-class Request(BaseModel):
+@dataclass
+class Request:
     method: str
-    id: t.Optional[Id] = None
-    params: t.Optional[t.Union[t.List[t.Any], JSONDict]] = None
+    id: Optional[Id] = None
+    params: Optional[Union[List[Any], JSONDict]] = None
 
 
-class Response(BaseModel):
-    id: t.Optional[Id] = None
-    result: t.Optional[t.Union[t.List[t.Any], JSONDict]] = None
-    error: t.Optional[JSONDict] = None
+@dataclass
+class Response:
+    id: Optional[Id] = None
+    result: Optional[Union[List[Any], JSONDict]] = None
+    error: Optional[JSONDict] = None
 
 
 class MessageType(enum.IntEnum):
@@ -37,98 +31,109 @@ class MessageType(enum.IntEnum):
     DEBUG = 5
 
 
-class MessageActionItem(BaseModel):
+@dataclass
+class MessageActionItem:
     title: str
 
 
-class TextDocumentItem(BaseModel):
+@dataclass
+class TextDocumentItem:
     uri: str
     languageId: str
     version: int
     text: str
+    
+    def to_dict(self):
+        return asdict(self)
 
 
-class TextDocumentIdentifier(BaseModel):
+@dataclass
+class TextDocumentIdentifier:
     uri: str
+    
+    def to_dict(self):
+        return asdict(self)
 
 
-class OptionalVersionedTextDocumentIdentifier(TextDocumentIdentifier):
-    version: t.Optional[int] = None
+@dataclass
+class OptionalVersionedTextDocumentIdentifier:
+    uri: str
+    version: Optional[int] = None
 
 
-class VersionedTextDocumentIdentifier(TextDocumentIdentifier):
-    version: t.Optional[int] = None
+@dataclass
+class VersionedTextDocumentIdentifier:
+    uri: str
+    version: Optional[int] = None
+    
+    def to_dict(self):
+        return asdict(self)
 
 
-# Sorting tip:  sorted(positions, key=(lambda p: p.as_tuple()))
-class Position(BaseModel):
-    # NB: These are both zero-based.
+@dataclass
+class Position:
     line: int
     character: int
 
-    def as_tuple(self) -> t.Tuple[int, int]:
+    def as_tuple(self) -> Tuple[int, int]:
         return (self.line, self.character)
     
-    # for sorting
     def __lt__(self, other):
         return (self.character < other.character) if self.line == other.line else (self.line < other.line)
+    
+    def to_dict(self):
+        return {'line': self.line, 'character': self.character}
 
 
-class Range(BaseModel):
+@dataclass
+class Range:
     start: Position
     end: Position
 
     def calculate_length(self, text: str) -> int:
         text_lines = text.splitlines()
-
         if self.end.line == self.start.line:
             line = text_lines[self.start.line]
             return len(line[self.start.character : self.end.character])
         else:
-            total = 0
-
-            total += len(text_lines[self.start.line][self.start.character :])
-
+            total = len(text_lines[self.start.line][self.start.character :])
             for line_number in range(self.start.line + 1, self.end.line):
                 total += len(text_lines[line_number])
-
             total += len(text_lines[self.end.line][: self.end.character])
-
             return total
+    
+    def to_dict(self):
+        return {
+            'start': self.start.to_dict() if hasattr(self.start, 'to_dict') else asdict(self.start),
+            'end': self.end.to_dict() if hasattr(self.end, 'to_dict') else asdict(self.end)
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict):
+        return cls(
+            start=Position(**data['start']),
+            end=Position(**data['end'])
+        )
 
 
-class TextDocumentContentChangeEvent(BaseModel):
+@dataclass
+class TextDocumentContentChangeEvent:
     text: str
-    range: t.Optional[Range] = None
-    rangeLength: t.Optional[int] = None  # deprecated, use .range
+    range: Optional[Range] = None
+    rangeLength: Optional[int] = None
 
-    def model_dump(self, **kwargs: t.Any) -> t.Dict[str, t.Any]:
-        d = super().model_dump(**kwargs)
-
-        # vscode-css server requires un-filled values to be absent
-        # TODO: add vscode-css to tests
-        if self.rangeLength is None:
-            del d["rangeLength"]
-        if self.range is None:
-            del d["range"]
+    def to_dict(self) -> Dict[str, Any]:
+        d = {}
+        d['text'] = self.text
+        if self.range is not None:
+            d['range'] = self.range.to_dict()
+        if self.rangeLength is not None:
+            d['rangeLength'] = self.rangeLength
         return d
 
     @classmethod
-    def range_change(
-        cls,
-        change_start: Position,
-        change_end: Position,
-        change_text: str,
-        old_text: str,
-    ) -> "TextDocumentContentChangeEvent":
-        """
-        Create a TextDocumentContentChangeEvent reflecting the given changes.
-
-        Nota bene: If you're creating a list of
-        TextDocumentContentChangeEvent based on many changes, `old_text` must
-        reflect the state of the text after all previous change events
-        happened.
-        """
+    def range_change(cls, change_start: Position, change_end: Position,
+                     change_text: str, old_text: str):
         change_range = Range(start=change_start, end=change_end)
         return cls(
             range=change_range,
@@ -137,15 +142,20 @@ class TextDocumentContentChangeEvent(BaseModel):
         )
 
     @classmethod
-    def whole_document_change(
-        cls, change_text: str
-    ) -> "TextDocumentContentChangeEvent":
+    def whole_document_change(cls, change_text: str):
         return cls(text=change_text, range=None, rangeLength=None)
 
 
-class TextDocumentPosition(BaseModel):
+@dataclass
+class TextDocumentPosition:
     textDocument: TextDocumentIdentifier
     position: Position
+    
+    def to_dict(self):
+        return {
+            'textDocument': self.textDocument.to_dict(),
+            'position': self.position.to_dict()
+        }
 
 
 class CompletionTriggerKind(enum.IntEnum):
@@ -154,9 +164,17 @@ class CompletionTriggerKind(enum.IntEnum):
     TRIGGER_FOR_INCOMPLETE_COMPLETIONS = 3
 
 
-class CompletionContext(BaseModel):
+@dataclass
+class CompletionContext:
     triggerKind: CompletionTriggerKind
-    triggerCharacter: t.Optional[str] = None
+    triggerCharacter: Optional[str] = None
+    
+    def to_dict(self, exclude_unset=False):
+        d = {'triggerKind': int(self.triggerKind)}
+        if not exclude_unset or self.triggerCharacter is not None:
+            if self.triggerCharacter is not None:
+                d['triggerCharacter'] = self.triggerCharacter
+        return d
 
 
 class MarkupKind(enum.Enum):
@@ -164,26 +182,45 @@ class MarkupKind(enum.Enum):
     MARKDOWN = "markdown"
 
 
-class MarkupContent(BaseModel):
+@dataclass
+class MarkupContent:
     kind: MarkupKind
     value: str
 
 
-class TextEdit(BaseModel):
+@dataclass
+class TextEdit:
     range: Range
     newText: str
-    annotationId: t.Optional[str] = None
+    annotationId: Optional[str] = None
+    
+    @classmethod
+    def from_dict(cls, data: dict):
+        return cls(
+            range=Range.from_dict(data['range']),
+            newText=data['newText'],
+            annotationId=data.get('annotationId')
+        )
 
 
-class TextDocumentEdit(BaseModel):
+@dataclass
+class TextDocumentEdit:
     textDocument: OptionalVersionedTextDocumentIdentifier
-    edits: t.List[TextEdit]
+    edits: List[TextEdit]
+    
+    @classmethod
+    def from_dict(cls, data: dict):
+        return cls(
+            textDocument=OptionalVersionedTextDocumentIdentifier(**data['textDocument']),
+            edits=[TextEdit.from_dict(e) for e in data['edits']]
+        )
 
 
-class Command(BaseModel):
+@dataclass
+class Command:
     title: str
     command: str
-    arguments: t.Optional[t.List[t.Any]] = None
+    arguments: Optional[List[Any]] = None
 
 
 class InsertTextFormat(enum.IntEnum):
@@ -223,28 +260,30 @@ class CompletionItemTag(enum.IntEnum):
     DEPRECATED = 1
 
 
-class CompletionItem(BaseModel):
+@dataclass
+class CompletionItem:
     label: str
-    kind: t.Optional[CompletionItemKind] = None
-    tags: t.Optional[t.List[CompletionItemTag]] = None # according to specification CompletionItemTag type must be a list.
-    detail: t.Optional[str] = None # human string, line symbol info -- None in C#
-    documentation: t.Union[str, MarkupContent, None] = None
-    deprecated: t.Optional[bool] = None # is deprecated
-    preselect: t.Optional[bool] = None #DONE selected item
-    sortText: t.Optional[str] = None # already sorted
-    filterText: t.Optional[str] = None # ?
-    insertText: t.Optional[str] = None #DONE
-    insertTextFormat: t.Optional[InsertTextFormat] = None # {$3:foo} decline capability for now
-    textEdit: t.Optional[TextEdit] = None #DONE text + ranges to replace
-    additionalTextEdits: t.Optional[t.List[TextEdit]] = None #DONE like an import
-    commitCharacters: t.Optional[t.List[str]] = None # api missing
-    command: t.Optional[Command] = None #TODOz later, when added commands
-    data: t.Optional[t.Any] = None # just index in C#
+    kind: Optional[CompletionItemKind] = None
+    tags: Optional[List[CompletionItemTag]] = None
+    detail: Optional[str] = None
+    documentation: Union[str, MarkupContent, None] = None
+    deprecated: Optional[bool] = None
+    preselect: Optional[bool] = None
+    sortText: Optional[str] = None
+    filterText: Optional[str] = None
+    insertText: Optional[str] = None
+    insertTextFormat: Optional[InsertTextFormat] = None
+    textEdit: Optional[TextEdit] = None
+    additionalTextEdits: Optional[List[TextEdit]] = None
+    commitCharacters: Optional[List[str]] = None
+    command: Optional[Command] = None
+    data: Optional[Any] = None
 
 
-class CompletionList(BaseModel):
+@dataclass
+class CompletionList:
     isIncomplete: bool
-    items: t.List[CompletionItem]
+    items: List[CompletionItem]
 
 
 class TextDocumentSaveReason(enum.IntEnum):
@@ -253,19 +292,22 @@ class TextDocumentSaveReason(enum.IntEnum):
     FOCUS_OUT = 3
 
 
-class Location(BaseModel):
+@dataclass
+class Location:
     uri: str
     range: Range
 
 
-class LocationLink(BaseModel):
-    originSelectionRange: t.Optional[Range] = None
-    targetUri: str  # in the spec the type is DocumentUri
+@dataclass
+class LocationLink:
+    targetUri: str
     targetRange: Range
     targetSelectionRange: Range
+    originSelectionRange: Optional[Range] = None
 
 
-class DiagnosticRelatedInformation(BaseModel):
+@dataclass
+class DiagnosticRelatedInformation:
     location: Location
     message: str
 
@@ -278,52 +320,37 @@ class DiagnosticSeverity(enum.IntEnum):
 
     def short_name(self):
         return {self.ERROR:'Err', self.WARNING:'Wrn', self.INFORMATION:'Inf',
-                    self.HINT:'Hint'}[self]
+                self.HINT:'Hint'}[self]
 
 
-class Diagnostic(BaseModel):
+@dataclass
+class Diagnostic:
     range: Range
-    severity: t.Optional[DiagnosticSeverity] = None
-    code: t.Optional[t.Union[int, str]] = None
-    source: t.Optional[str] = None
     message: str
-    relatedInformation: t.Optional[t.List[DiagnosticRelatedInformation]] = None
+    severity: Optional[DiagnosticSeverity] = None
+    code: Optional[Union[int, str]] = None
+    source: Optional[str] = None
+    relatedInformation: Optional[List[DiagnosticRelatedInformation]] = None
 
 
-""" HOVER #################
-Hover:
-    * contents: MarkedString | MarkedString[] | MarkupContent;
-    * range?: Range;
-"""
-#deprecated, use MarkupContent
-class MarkedString(BaseModel):
+@dataclass
+class MarkedString:
     language: str
     value: str
 
 
-""" SignatureHelp
-    * signatures: SignatureInformation[];
-        # SignatureInformation
-        * label: string;
-        * documentation?: string | MarkupContent;
-        * parameters?: ParameterInformation[];
-            # ParameterInformation
-            * label: string | [uinteger, uinteger];
-            * documentation?: string | MarkupContent;
-        * activeParameter?: uinteger;
-    * activeSignature?: uinteger;
-    * activeParameter?: uinteger;
-"""
-class ParameterInformation(BaseModel):
-    label: t.Union[str, t.Tuple[int, int]]
-    documentation: t.Optional[t.Union[str, MarkupContent]] = None
+@dataclass
+class ParameterInformation:
+    label: Union[str, Tuple[int, int]]
+    documentation: Optional[Union[str, MarkupContent]] = None
 
 
-class SignatureInformation(BaseModel):
+@dataclass
+class SignatureInformation:
     label: str
-    documentation: t.Optional[t.Union[MarkupContent, str]] = None
-    parameters: t.Optional[t.List[ParameterInformation]] = None
-    activeParameter: t.Optional[int] = None
+    documentation: Optional[Union[MarkupContent, str]] = None
+    parameters: Optional[List[ParameterInformation]] = None
+    activeParameter: Optional[int] = None
 
 
 class SymbolKind(enum.IntEnum):
@@ -359,25 +386,28 @@ class SymbolTag(enum.IntEnum):
     DEPRECATED = 1
 
 
-class CallHierarchyItem(BaseModel):
+@dataclass
+class CallHierarchyItem:
     name: str
     kind: SymbolKind
-    tags: t.Optional[SymbolTag] = None
-    detail: t.Optional[str] = None
     uri: str
     range: Range
     selectionRange: Range
-    data: t.Optional[t.Any] = None
+    tags: Optional[SymbolTag] = None
+    detail: Optional[str] = None
+    data: Optional[Any] = None
 
 
-class CallHierarchyIncomingCall(BaseModel):
-    from_: CallHierarchyItem = Field(alias="from")
-    fromRanges: t.List[Range]
+@dataclass
+class CallHierarchyIncomingCall:
+    from_: CallHierarchyItem
+    fromRanges: List[Range]
 
 
-class CallHierarchyOutgoingCall(BaseModel):
+@dataclass
+class CallHierarchyOutgoingCall:
     to: CallHierarchyItem
-    fromRanges: t.List[Range]
+    fromRanges: List[Range]
 
 
 class TextDocumentSyncKind(enum.IntEnum):
@@ -386,24 +416,25 @@ class TextDocumentSyncKind(enum.IntEnum):
     INCREMENTAL = 2
 
 
-# Usually in a flat list
-class SymbolInformation(BaseModel):
+@dataclass
+class SymbolInformation:
     name: str
     kind: SymbolKind
-    tags: t.Optional[t.List[SymbolTag]] = None
-    deprecated: t.Optional[bool] = None
     location: Location
-    containerName: t.Optional[str] = None
+    tags: Optional[List[SymbolTag]] = None
+    deprecated: Optional[bool] = None
+    containerName: Optional[str] = None
 
     def mpos(self):
         return self.location.range.start.character, self.location.range.start.line
 
 
-class InlayHintLabelPart(BaseModel):
+@dataclass
+class InlayHintLabelPart:
     value: str
-    tooltip: t.Optional[t.Union[str, MarkupContent]]
-    location: t.Optional[Location] = None
-    command: t.Optional[Command] = None
+    tooltip: Optional[Union[str, MarkupContent]] = None
+    location: Optional[Location] = None
+    command: Optional[Command] = None
 
 
 class InlayHintKind(enum.IntEnum):
@@ -411,89 +442,102 @@ class InlayHintKind(enum.IntEnum):
     PARAMETER = 2
 
 
-class InlayHint(BaseModel):
+@dataclass
+class InlayHint:
     position: Position
-    label: t.Union[str, t.List[InlayHintLabelPart]]
-    kind: t.Optional[InlayHintKind] = None
-    textEdits: t.Optional[t.List[TextEdit]]
-    tooltip: t.Optional[t.Union[str, MarkupContent]]
-    paddingLeft: t.Optional[bool] = None
-    paddingRight: t.Optional[bool] = None
-    data: t.Optional[t.Any] = None
+    label: Union[str, List[InlayHintLabelPart]]
+    kind: Optional[InlayHintKind] = None
+    textEdits: Optional[List[TextEdit]] = None
+    tooltip: Optional[Union[str, MarkupContent]] = None
+    paddingLeft: Optional[bool] = None
+    paddingRight: Optional[bool] = None
+    data: Optional[Any] = None
 
 
-class FoldingRange(BaseModel):
+@dataclass
+class FoldingRange:
     startLine: int
-    startCharacter: t.Optional[int] = None
     endLine: int
-    endCharacter: t.Optional[int] = None
-    kind: t.Optional[str] = None  # comment, imports, region
-    collapsedText: t.Optional[str] = None
+    startCharacter: Optional[int] = None
+    endCharacter: Optional[int] = None
+    kind: Optional[str] = None
+    collapsedText: Optional[str] = None
 
 
-# Usually a hierarchy, e.g. a symbol with kind=SymbolKind.CLASS contains
-# several SymbolKind.METHOD symbols
-class DocumentSymbol(BaseModel):
+@dataclass
+class DocumentSymbol:
     name: str
-    detail: t.Optional[str] = None
     kind: SymbolKind
-    tags: t.Optional[t.List[SymbolTag]] = None
-    deprecated: t.Optional[bool] = None
-    range: Range = Field(..., validate_default=True)
-    selectionRange: Range = Field(
-        ..., validate_default=True
-    )  # Example: symbol.selectionRange.start.as_tuple()
-    # https://stackoverflow.com/questions/36193540
-    children: t.Optional[t.List["DocumentSymbol"]] = None
+    range: Range
+    selectionRange: Range
+    detail: Optional[str] = None
+    tags: Optional[List[SymbolTag]] = None
+    deprecated: Optional[bool] = None
+    children: Optional[List['DocumentSymbol']] = None
 
     def mpos(self):
         return self.selectionRange.start.character, self.selectionRange.start.line
 
-# for `.children` treeness
-DocumentSymbol.model_rebuild()
 
-
-class Registration(BaseModel):
+@dataclass
+class Registration:
     id: str
     method: str
-    registerOptions: t.Optional[t.Any] = None
-    
-class DocumentFilter(BaseModel):
-    language: t.Optional[str] = None
-    scheme: t.Optional[str] = None
-    pattern: t.Optional[str] = None
-
-DocumentSelector = t.List[DocumentFilter]
-
-class CompletionOptionsCompletionItem(BaseModel):
-    labelDetailsSupport: t.Optional[bool] = None
-
-class CompletionRegistrationOptions(BaseModel):
-    documentSelector: t.Union[DocumentSelector, None]           # from TextDocumentRegistrationOptions
-    triggerCharacters: t.Optional[t.List[str]] = None                  # from CompletionOptions
-    allCommitCharacters: t.Optional[t.List[str]] = None                #
-    resolveProvider: t.Optional[bool] = None                           #
-    completionItem: t.Optional[CompletionOptionsCompletionItem] = None #
+    registerOptions: Optional[Any] = None
 
 
-class FormattingOptions(BaseModel):
+@dataclass
+class DocumentFilter:
+    language: Optional[str] = None
+    scheme: Optional[str] = None
+    pattern: Optional[str] = None
+
+
+DocumentSelector = List[DocumentFilter]
+
+
+@dataclass
+class CompletionOptionsCompletionItem:
+    labelDetailsSupport: Optional[bool] = None
+
+
+@dataclass
+class CompletionRegistrationOptions:
+    documentSelector: Union[DocumentSelector, None] = None
+    triggerCharacters: Optional[List[str]] = None
+    allCommitCharacters: Optional[List[str]] = None
+    resolveProvider: Optional[bool] = None
+    completionItem: Optional[CompletionOptionsCompletionItem] = None
+
+
+@dataclass
+class FormattingOptions:
     tabSize: int
     insertSpaces: bool
-    trimTrailingWhitespace: t.Optional[bool] = None
-    insertFinalNewline: t.Optional[bool] = None
-    trimFinalNewlines: t.Optional[bool] = None
+    trimTrailingWhitespace: Optional[bool] = None
+    insertFinalNewline: Optional[bool] = None
+    trimFinalNewlines: Optional[bool] = None
+    
+    def to_dict(self):
+        return asdict(self)
 
 
-class WorkspaceFolder(BaseModel):
+@dataclass
+class WorkspaceFolder:
     uri: str
     name: str
+    
+    def to_dict(self):
+        return asdict(self)
 
 
-class ProgressValue(BaseModel):
+@dataclass
+class ProgressValue:
     pass
 
 
-class WorkDoneProgressValue(ProgressValue):
+@dataclass
+class WorkDoneProgressValue:
     pass
 
 
@@ -503,26 +547,30 @@ class MWorkDoneProgressKind(enum.Enum):
     END = "end"
 
 
-class WorkDoneProgressBeginValue(WorkDoneProgressValue):
-    kind: Literal["begin"]
+@dataclass
+class WorkDoneProgressBeginValue:
+    kind: str  # Literal["begin"]
     title: str
-    cancellable: t.Optional[bool] = None
-    message: t.Optional[str] = None
-    percentage: t.Optional[int] = None
+    cancellable: Optional[bool] = None
+    message: Optional[str] = None
+    percentage: Optional[int] = None
 
 
-class WorkDoneProgressReportValue(WorkDoneProgressValue):
-    kind: Literal["report"]
-    cancellable: t.Optional[bool] = None
-    message: t.Optional[str] = None
-    percentage: t.Optional[int] = None
+@dataclass
+class WorkDoneProgressReportValue:
+    kind: str  # Literal["report"]
+    cancellable: Optional[bool] = None
+    message: Optional[str] = None
+    percentage: Optional[int] = None
 
 
-class WorkDoneProgressEndValue(WorkDoneProgressValue):
-    kind: Literal["end"]
-    message: t.Optional[str] = None
+@dataclass
+class WorkDoneProgressEndValue:
+    kind: str  # Literal["end"]
+    message: Optional[str] = None
 
 
-class ConfigurationItem(BaseModel):
-    scopeUri: t.Optional[str] = None
-    section: t.Optional[str] = None
+@dataclass
+class ConfigurationItem:
+    scopeUri: Optional[str] = None
+    section: Optional[str] = None
