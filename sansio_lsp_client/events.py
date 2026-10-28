@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
+import typing as t
 
-if TYPE_CHECKING:  # avoid import cycle at runtime
+if t.TYPE_CHECKING:  # avoid import cycle at runtime
     from .client import Client
 
 from .structs import (
@@ -32,7 +32,7 @@ from .structs import (
     ConfigurationItem,
 )
 
-Id = Union[int, str]
+Id = t.Union[int, str]
 
 
 @dataclass
@@ -42,21 +42,21 @@ class Event:
 
 @dataclass
 class MethodResponse(Event):
-    message_id: Optional[Id] = None
+    message_id: t.Optional[Id] = None
 
 
 @dataclass
 class ResponseError(Event):
-    message_id: Optional[Id] = None
+    message_id: t.Optional[Id] = None
     code: int = 0
     message: str = ""
-    data: Optional[Union[str, int, float, bool, List[Any], JSONDict, None]] = None
+    data: t.Optional[t.Union[str, int, float, bool, t.List[t.Any], JSONDict, None]] = None
 
 
 @dataclass
 class ServerRequest(Event):
-    _client: Optional['Client'] = field(default=None, repr=False, compare=False)
-    _id: Optional[Id] = field(default=None, repr=False, compare=False)
+    _client: t.Optional['Client'] = field(default=None, repr=False, compare=False)
+    _id: t.Optional[Id] = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -88,9 +88,9 @@ class ShowMessage(ServerNotification):
 class ShowMessageRequest(ServerRequest):
     type: MessageType = MessageType.INFO
     message: str = ""
-    actions: Optional[List[MessageActionItem]] = None
+    actions: t.Optional[t.List[MessageActionItem]] = None
 
-    def reply(self, action: Optional[MessageActionItem] = None) -> None:
+    def reply(self, action: t.Optional[MessageActionItem] = None) -> None:
         if self._client:
             result = {'title': action.title} if action is not None else None
             self._client._send_response(id=self._id, result=result)
@@ -114,7 +114,7 @@ class WorkDoneProgressCreate(ServerRequest):
 @dataclass
 class Progress(ServerNotification):
     token: ProgressToken = ""
-    value: Union[WorkDoneProgressBeginValue, WorkDoneProgressReportValue, 
+    value: t.Union[WorkDoneProgressBeginValue, WorkDoneProgressReportValue, 
                  WorkDoneProgressEndValue] = None
 
 
@@ -141,18 +141,18 @@ class WorkDoneProgressEnd(WorkDoneProgress):
 @dataclass
 class Completion(Event):
     message_id: Id = 0
-    completion_list: Optional[Dict[str, Any]] = None
+    completion_list: t.Optional[t.Dict[str, t.Any]] = None
 
 
 @dataclass
 class WillSaveWaitUntilEdits(Event):
-    edits: Optional[List[TextEdit]] = None
+    edits: t.Optional[t.List[TextEdit]] = None
 
 
 @dataclass
 class PublishDiagnostics(ServerNotification):
     uri: str = ""
-    diagnostics: List[Diagnostic] = field(default_factory=list)
+    diagnostics: t.List[Diagnostic] = field(default_factory=list)
 
 
 @dataclass
@@ -162,8 +162,8 @@ class WorkspaceProjectInitializationComplete(ServerNotification):
 
 @dataclass
 class Hover(MethodResponse):
-    contents: Union[List[Union[MarkedString, str]], MarkedString, MarkupContent, str] = ""
-    range: Optional[Range] = None
+    contents: t.Union[t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str] = ""
+    range: t.Optional[Range] = None
 
     def m_str(self):
         """Return hover contents as markdown-compatible string."""
@@ -188,11 +188,11 @@ class Hover(MethodResponse):
 
 @dataclass
 class SignatureHelp(MethodResponse):
-    signatures: List[SignatureInformation] = field(default_factory=list)
-    activeSignature: Optional[int] = None
-    activeParameter: Optional[int] = None
+    signatures: t.List[SignatureInformation] = field(default_factory=list)
+    activeSignature: t.Optional[int] = None
+    activeParameter: t.Optional[int] = None
 
-    def get_hint_str(self) -> Optional[str]:
+    def get_hint_str(self) -> t.Optional[str]:
         if len(self.signatures) == 0:
             return None
         active_sig = self.activeSignature or 0
@@ -207,70 +207,70 @@ class SignatureHelp(MethodResponse):
 
 @dataclass
 class SemanticTokens(Event):
-    data: List[int] = field(default_factory=list)
-    message_id: Optional[Id] = None
-    resultId: Optional[str] = None
+    data: t.List[int] = field(default_factory=list)
+    message_id: t.Optional[Id] = None
+    resultId: t.Optional[str] = None
 
 
 @dataclass
 class Definition(MethodResponse):
-    result: Union[Location, List[Union[Location, LocationLink]], None] = None
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
 
 
 @dataclass
 class WorkspaceEdit(MethodResponse):
-    changes: Optional[Dict[str, List[TextEdit]]] = None
-    documentChanges: Optional[List[TextDocumentEdit]] = None
+    changes: t.Optional[t.Dict[str, t.List[TextEdit]]] = None
+    documentChanges: t.Optional[t.List[TextDocumentEdit]] = None
 
 
 @dataclass
 class References(MethodResponse):
-    result: Union[List[Location], None] = None
+    result: t.Union[t.List[Location], None] = None
 
 
 @dataclass
 class MCallHierarchItems(Event):
-    result: Union[List[CallHierarchyItem], None] = None
+    result: t.Union[t.List[CallHierarchyItem], None] = None
 
 
 @dataclass
 class Implementation(MethodResponse):
-    result: Union[Location, List[Union[Location, LocationLink]], None] = None
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
 
 
 @dataclass
 class MWorkspaceSymbols(MethodResponse):
-    result: Union[List[SymbolInformation], None] = None
+    result: t.Union[t.List[SymbolInformation], None] = None
 
 
 @dataclass
 class MFoldingRanges(MethodResponse):
-    result: Optional[List[FoldingRange]] = None
+    result: t.Optional[t.List[FoldingRange]] = None
 
 
 @dataclass
 class MInlayHints(MethodResponse):
-    result: Optional[List[InlayHint]] = None
+    result: t.Optional[t.List[InlayHint]] = None
 
 
 @dataclass
 class MDocumentSymbols(MethodResponse):
-    result: Union[List[SymbolInformation], List[DocumentSymbol], None] = None
+    result: t.Union[t.List[SymbolInformation], t.List[DocumentSymbol], None] = None
 
 
 @dataclass
 class Declaration(MethodResponse):
-    result: Union[Location, List[Union[Location, LocationLink]], None] = None
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
 
 
 @dataclass
 class TypeDefinition(MethodResponse):
-    result: Union[Location, List[Union[Location, LocationLink]], None] = None
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
 
 
 @dataclass
 class RegisterCapabilityRequest(ServerRequest):
-    registrations: List[Registration] = field(default_factory=list)
+    registrations: t.List[Registration] = field(default_factory=list)
 
     def reply(self) -> None:
         if self._client:
@@ -279,14 +279,14 @@ class RegisterCapabilityRequest(ServerRequest):
 
 @dataclass
 class DocumentFormatting(MethodResponse):
-    result: Union[List[TextEdit], None] = None
+    result: t.Union[t.List[TextEdit], None] = None
 
 
 @dataclass
 class WorkspaceFolders(ServerRequest):
-    result: Optional[List[WorkspaceFolder]] = None
+    result: t.Optional[t.List[WorkspaceFolder]] = None
 
-    def reply(self, folders: Optional[List[WorkspaceFolder]] = None) -> None:
+    def reply(self, folders: t.Optional[t.List[WorkspaceFolder]] = None) -> None:
         if self._client:
             result = [f.to_dict() for f in folders] if folders is not None else None
             self._client._send_response(id=self._id, result=result)
@@ -294,14 +294,14 @@ class WorkspaceFolders(ServerRequest):
 
 @dataclass
 class ConfigurationRequest(ServerRequest):
-    items: List[ConfigurationItem] = field(default_factory=list)
+    items: t.List[ConfigurationItem] = field(default_factory=list)
 
-    def reply(self, result: List[Any]) -> None:
+    def reply(self, result: t.List[t.Any]) -> None:
         if self._client:
             self._client._send_response(id=self._id, result=result)
 
 
 @dataclass
 class Metadata(Event):
-    message_id: Optional[Id] = None
-    result: Optional[JSONDict] = None
+    message_id: t.Optional[Id] = None
+    result: t.Optional[JSONDict] = None

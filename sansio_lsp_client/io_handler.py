@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, Iterable, Iterator, List, Optional, Union
+import typing as t
 
 from .structs import JSONDict, JSONList, Request, Response, Id
 
@@ -21,8 +21,8 @@ def _make_headers(content_length: int, encoding: str = "utf-8") -> bytes:
 
 def _make_request(
     method: str,
-    params: Optional[JSONDict] = None,
-    id: Optional[Id] = None,
+    params: t.Optional[JSONDict] = None,
+    id: t.Optional[Id] = None,
     *,
     encoding: str = "utf-8",
 ) -> bytes:
@@ -46,9 +46,9 @@ def _make_request(
 
 
 def _make_response(
-    id: Union[int, str],
-    result: Optional[Union[JSONDict, JSONList]] = None,
-    error: Optional[JSONDict] = None,
+    id: t.Union[int, str],
+    result: t.Optional[t.Union[JSONDict, JSONList]] = None,
+    error: t.Optional[JSONDict] = None,
     *,
     encoding: str = "utf-8",
 ) -> bytes:
@@ -87,7 +87,7 @@ def _parse_content_type(header: str) -> tuple:
     return content_type, metadata
 
 
-def _parse_request_or_response(data: JSONDict) -> Union[Request, Response]:
+def _parse_request_or_response(data: JSONDict) -> t.Union[Request, Response]:
     """Parse dict into Request or Response based on presence of 'method' field."""
     del data["jsonrpc"]
     
@@ -109,7 +109,7 @@ def _parse_request_or_response(data: JSONDict) -> Union[Request, Response]:
 
 def _parse_one_message(
     response_buf: bytearray,
-) -> Optional[Iterable[Union[Request, Response]]]:
+) -> t.Optional[t.Iterable[t.Union[Request, Response]]]:
     """Parse a single JSON-RPC message from a bytearray.
 
     Args:
@@ -165,7 +165,7 @@ def _parse_one_message(
         return [_parse_request_or_response(content)]
 
 
-def _parse_messages(response_buf: bytearray) -> Iterator[Union[Response, Request]]:
+def _parse_messages(response_buf: bytearray) -> t.Iterator[t.Union[Response, Request]]:
     """Parse all complete JSON-RPC messages from a bytearray.
 
     Args:

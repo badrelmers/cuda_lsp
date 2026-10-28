@@ -1,26 +1,26 @@
 import enum
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional, Tuple, Union
+import typing as t
 
 # Type aliases
-JSONDict = Dict[str, Any]
-JSONList = List[Any]
-Id = Union[int, str]
-ProgressToken = Union[int, str]
+JSONDict = t.Dict[str, t.Any]
+JSONList = t.List[t.Any]
+Id = t.Union[int, str]
+ProgressToken = t.Union[int, str]
 
 
 @dataclass
 class Request:
     method: str
-    id: Optional[Id] = None
-    params: Optional[Union[List[Any], JSONDict]] = None
+    id: t.Optional[Id] = None
+    params: t.Optional[t.Union[t.List[t.Any], JSONDict]] = None
 
 
 @dataclass
 class Response:
-    id: Optional[Id] = None
-    result: Optional[Union[List[Any], JSONDict]] = None
-    error: Optional[JSONDict] = None
+    id: t.Optional[Id] = None
+    result: t.Optional[t.Union[t.List[t.Any], JSONDict]] = None
+    error: t.Optional[JSONDict] = None
 
 
 class MessageType(enum.IntEnum):
@@ -58,13 +58,13 @@ class TextDocumentIdentifier:
 @dataclass
 class OptionalVersionedTextDocumentIdentifier:
     uri: str
-    version: Optional[int] = None
+    version: t.Optional[int] = None
 
 
 @dataclass
 class VersionedTextDocumentIdentifier:
     uri: str
-    version: Optional[int] = None
+    version: t.Optional[int] = None
     
     def to_dict(self):
         return asdict(self)
@@ -75,7 +75,7 @@ class Position:
     line: int
     character: int
 
-    def as_tuple(self) -> Tuple[int, int]:
+    def as_tuple(self) -> t.Tuple[int, int]:
         return (self.line, self.character)
     
     def __lt__(self, other):
@@ -119,10 +119,10 @@ class Range:
 @dataclass
 class TextDocumentContentChangeEvent:
     text: str
-    range: Optional[Range] = None
-    rangeLength: Optional[int] = None
+    range: t.Optional[Range] = None
+    rangeLength: t.Optional[int] = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> t.Dict[str, t.Any]:
         d = {}
         d['text'] = self.text
         if self.range is not None:
@@ -167,7 +167,7 @@ class CompletionTriggerKind(enum.IntEnum):
 @dataclass
 class CompletionContext:
     triggerKind: CompletionTriggerKind
-    triggerCharacter: Optional[str] = None
+    triggerCharacter: t.Optional[str] = None
     
     def to_dict(self, exclude_unset=False):
         d = {'triggerKind': int(self.triggerKind)}
@@ -192,7 +192,7 @@ class MarkupContent:
 class TextEdit:
     range: Range
     newText: str
-    annotationId: Optional[str] = None
+    annotationId: t.Optional[str] = None
     
     @classmethod
     def from_dict(cls, data: dict):
@@ -206,7 +206,7 @@ class TextEdit:
 @dataclass
 class TextDocumentEdit:
     textDocument: OptionalVersionedTextDocumentIdentifier
-    edits: List[TextEdit]
+    edits: t.List[TextEdit]
     
     @classmethod
     def from_dict(cls, data: dict):
@@ -220,7 +220,7 @@ class TextDocumentEdit:
 class Command:
     title: str
     command: str
-    arguments: Optional[List[Any]] = None
+    arguments: t.Optional[t.List[t.Any]] = None
 
 
 class InsertTextFormat(enum.IntEnum):
@@ -263,27 +263,27 @@ class CompletionItemTag(enum.IntEnum):
 @dataclass
 class CompletionItem:
     label: str
-    kind: Optional[CompletionItemKind] = None
-    tags: Optional[List[CompletionItemTag]] = None
-    detail: Optional[str] = None
-    documentation: Union[str, MarkupContent, None] = None
-    deprecated: Optional[bool] = None
-    preselect: Optional[bool] = None
-    sortText: Optional[str] = None
-    filterText: Optional[str] = None
-    insertText: Optional[str] = None
-    insertTextFormat: Optional[InsertTextFormat] = None
-    textEdit: Optional[TextEdit] = None
-    additionalTextEdits: Optional[List[TextEdit]] = None
-    commitCharacters: Optional[List[str]] = None
-    command: Optional[Command] = None
-    data: Optional[Any] = None
+    kind: t.Optional[CompletionItemKind] = None
+    tags: t.Optional[t.List[CompletionItemTag]] = None
+    detail: t.Optional[str] = None
+    documentation: t.Union[str, MarkupContent, None] = None
+    deprecated: t.Optional[bool] = None
+    preselect: t.Optional[bool] = None
+    sortText: t.Optional[str] = None
+    filterText: t.Optional[str] = None
+    insertText: t.Optional[str] = None
+    insertTextFormat: t.Optional[InsertTextFormat] = None
+    textEdit: t.Optional[TextEdit] = None
+    additionalTextEdits: t.Optional[t.List[TextEdit]] = None
+    commitCharacters: t.Optional[t.List[str]] = None
+    command: t.Optional[Command] = None
+    data: t.Optional[t.Any] = None
 
 
 @dataclass
 class CompletionList:
     isIncomplete: bool
-    items: List[CompletionItem]
+    items: t.List[CompletionItem]
 
 
 class TextDocumentSaveReason(enum.IntEnum):
@@ -303,7 +303,7 @@ class LocationLink:
     targetUri: str
     targetRange: Range
     targetSelectionRange: Range
-    originSelectionRange: Optional[Range] = None
+    originSelectionRange: t.Optional[Range] = None
 
 
 @dataclass
@@ -327,10 +327,10 @@ class DiagnosticSeverity(enum.IntEnum):
 class Diagnostic:
     range: Range
     message: str
-    severity: Optional[DiagnosticSeverity] = None
-    code: Optional[Union[int, str]] = None
-    source: Optional[str] = None
-    relatedInformation: Optional[List[DiagnosticRelatedInformation]] = None
+    severity: t.Optional[DiagnosticSeverity] = None
+    code: t.Optional[t.Union[int, str]] = None
+    source: t.Optional[str] = None
+    relatedInformation: t.Optional[t.List[DiagnosticRelatedInformation]] = None
 
 
 @dataclass
@@ -341,16 +341,16 @@ class MarkedString:
 
 @dataclass
 class ParameterInformation:
-    label: Union[str, Tuple[int, int]]
-    documentation: Optional[Union[str, MarkupContent]] = None
+    label: t.Union[str, t.Tuple[int, int]]
+    documentation: t.Optional[t.Union[str, MarkupContent]] = None
 
 
 @dataclass
 class SignatureInformation:
     label: str
-    documentation: Optional[Union[MarkupContent, str]] = None
-    parameters: Optional[List[ParameterInformation]] = None
-    activeParameter: Optional[int] = None
+    documentation: t.Optional[t.Union[MarkupContent, str]] = None
+    parameters: t.Optional[t.List[ParameterInformation]] = None
+    activeParameter: t.Optional[int] = None
 
 
 class SymbolKind(enum.IntEnum):
@@ -393,21 +393,21 @@ class CallHierarchyItem:
     uri: str
     range: Range
     selectionRange: Range
-    tags: Optional[SymbolTag] = None
-    detail: Optional[str] = None
-    data: Optional[Any] = None
+    tags: t.Optional[SymbolTag] = None
+    detail: t.Optional[str] = None
+    data: t.Optional[t.Any] = None
 
 
 @dataclass
 class CallHierarchyIncomingCall:
     from_: CallHierarchyItem
-    fromRanges: List[Range]
+    fromRanges: t.List[Range]
 
 
 @dataclass
 class CallHierarchyOutgoingCall:
     to: CallHierarchyItem
-    fromRanges: List[Range]
+    fromRanges: t.List[Range]
 
 
 class TextDocumentSyncKind(enum.IntEnum):
@@ -421,9 +421,9 @@ class SymbolInformation:
     name: str
     kind: SymbolKind
     location: Location
-    tags: Optional[List[SymbolTag]] = None
-    deprecated: Optional[bool] = None
-    containerName: Optional[str] = None
+    tags: t.Optional[t.List[SymbolTag]] = None
+    deprecated: t.Optional[bool] = None
+    containerName: t.Optional[str] = None
 
     def mpos(self):
         return self.location.range.start.character, self.location.range.start.line
@@ -432,9 +432,9 @@ class SymbolInformation:
 @dataclass
 class InlayHintLabelPart:
     value: str
-    tooltip: Optional[Union[str, MarkupContent]] = None
-    location: Optional[Location] = None
-    command: Optional[Command] = None
+    tooltip: t.Optional[t.Union[str, MarkupContent]] = None
+    location: t.Optional[Location] = None
+    command: t.Optional[Command] = None
 
 
 class InlayHintKind(enum.IntEnum):
@@ -445,23 +445,23 @@ class InlayHintKind(enum.IntEnum):
 @dataclass
 class InlayHint:
     position: Position
-    label: Union[str, List[InlayHintLabelPart]]
-    kind: Optional[InlayHintKind] = None
-    textEdits: Optional[List[TextEdit]] = None
-    tooltip: Optional[Union[str, MarkupContent]] = None
-    paddingLeft: Optional[bool] = None
-    paddingRight: Optional[bool] = None
-    data: Optional[Any] = None
+    label: t.Union[str, t.List[InlayHintLabelPart]]
+    kind: t.Optional[InlayHintKind] = None
+    textEdits: t.Optional[t.List[TextEdit]] = None
+    tooltip: t.Optional[t.Union[str, MarkupContent]] = None
+    paddingLeft: t.Optional[bool] = None
+    paddingRight: t.Optional[bool] = None
+    data: t.Optional[t.Any] = None
 
 
 @dataclass
 class FoldingRange:
     startLine: int
     endLine: int
-    startCharacter: Optional[int] = None
-    endCharacter: Optional[int] = None
-    kind: Optional[str] = None
-    collapsedText: Optional[str] = None
+    startCharacter: t.Optional[int] = None
+    endCharacter: t.Optional[int] = None
+    kind: t.Optional[str] = None
+    collapsedText: t.Optional[str] = None
 
 
 @dataclass
@@ -470,10 +470,10 @@ class DocumentSymbol:
     kind: SymbolKind
     range: Range
     selectionRange: Range
-    detail: Optional[str] = None
-    tags: Optional[List[SymbolTag]] = None
-    deprecated: Optional[bool] = None
-    children: Optional[List['DocumentSymbol']] = None
+    detail: t.Optional[str] = None
+    tags: t.Optional[t.List[SymbolTag]] = None
+    deprecated: t.Optional[bool] = None
+    children: t.Optional[t.List['DocumentSymbol']] = None
 
     def mpos(self):
         return self.selectionRange.start.character, self.selectionRange.start.line
@@ -483,40 +483,40 @@ class DocumentSymbol:
 class Registration:
     id: str
     method: str
-    registerOptions: Optional[Any] = None
+    registerOptions: t.Optional[t.Any] = None
 
 
 @dataclass
 class DocumentFilter:
-    language: Optional[str] = None
-    scheme: Optional[str] = None
-    pattern: Optional[str] = None
+    language: t.Optional[str] = None
+    scheme: t.Optional[str] = None
+    pattern: t.Optional[str] = None
 
 
-DocumentSelector = List[DocumentFilter]
+DocumentSelector = t.List[DocumentFilter]
 
 
 @dataclass
 class CompletionOptionsCompletionItem:
-    labelDetailsSupport: Optional[bool] = None
+    labelDetailsSupport: t.Optional[bool] = None
 
 
 @dataclass
 class CompletionRegistrationOptions:
-    documentSelector: Union[DocumentSelector, None] = None
-    triggerCharacters: Optional[List[str]] = None
-    allCommitCharacters: Optional[List[str]] = None
-    resolveProvider: Optional[bool] = None
-    completionItem: Optional[CompletionOptionsCompletionItem] = None
+    documentSelector: t.Union[DocumentSelector, None] = None
+    triggerCharacters: t.Optional[t.List[str]] = None
+    allCommitCharacters: t.Optional[t.List[str]] = None
+    resolveProvider: t.Optional[bool] = None
+    completionItem: t.Optional[CompletionOptionsCompletionItem] = None
 
 
 @dataclass
 class FormattingOptions:
     tabSize: int
     insertSpaces: bool
-    trimTrailingWhitespace: Optional[bool] = None
-    insertFinalNewline: Optional[bool] = None
-    trimFinalNewlines: Optional[bool] = None
+    trimTrailingWhitespace: t.Optional[bool] = None
+    insertFinalNewline: t.Optional[bool] = None
+    trimFinalNewlines: t.Optional[bool] = None
     
     def to_dict(self):
         return asdict(self)
@@ -551,26 +551,26 @@ class MWorkDoneProgressKind(enum.Enum):
 class WorkDoneProgressBeginValue:
     kind: str  # Literal["begin"]
     title: str
-    cancellable: Optional[bool] = None
-    message: Optional[str] = None
-    percentage: Optional[int] = None
+    cancellable: t.Optional[bool] = None
+    message: t.Optional[str] = None
+    percentage: t.Optional[int] = None
 
 
 @dataclass
 class WorkDoneProgressReportValue:
     kind: str  # Literal["report"]
-    cancellable: Optional[bool] = None
-    message: Optional[str] = None
-    percentage: Optional[int] = None
+    cancellable: t.Optional[bool] = None
+    message: t.Optional[str] = None
+    percentage: t.Optional[int] = None
 
 
 @dataclass
 class WorkDoneProgressEndValue:
     kind: str  # Literal["end"]
-    message: Optional[str] = None
+    message: t.Optional[str] = None
 
 
 @dataclass
 class ConfigurationItem:
-    scopeUri: Optional[str] = None
-    section: Optional[str] = None
+    scopeUri: t.Optional[str] = None
+    section: t.Optional[str] = None
