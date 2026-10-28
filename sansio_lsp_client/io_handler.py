@@ -2,7 +2,7 @@ import json
 import re
 import typing as t
 
-from pydantic import TypeAdapter
+from .attr_model import TypeAdapter
 
 from .structs import JSONDict, JSONList, Request, Response, Id
 

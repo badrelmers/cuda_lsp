@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import enum
 import typing as t
 from typing_extensions import Literal
 
-from pydantic import BaseModel, Field
+import attrs
+
+from .attr_model import AttrsModel
 
 # XXX: Replace the non-commented-out code with what's commented out once nested
 # types become a thing in mypy.
@@ -17,13 +21,15 @@ Id = t.Union[int, str]
 ProgressToken = t.Union[int, str]
 
 
-class Request(BaseModel):
+@attrs.define(slots=True)
+class Request(AttrsModel):
     method: str
     id: t.Optional[Id] = None
     params: t.Optional[t.Union[t.List[t.Any], JSONDict]] = None
 
 
-class Response(BaseModel):
+@attrs.define(slots=True)
+class Response(AttrsModel):
     id: t.Optional[Id] = None
     result: t.Optional[t.Union[t.List[t.Any], JSONDict]] = None
     error: t.Optional[JSONDict] = None
@@ -37,31 +43,37 @@ class MessageType(enum.IntEnum):
     DEBUG = 5
 
 
-class MessageActionItem(BaseModel):
+@attrs.define(slots=True)
+class MessageActionItem(AttrsModel):
     title: str
 
 
-class TextDocumentItem(BaseModel):
+@attrs.define(slots=True)
+class TextDocumentItem(AttrsModel):
     uri: str
     languageId: str
     version: int
     text: str
 
 
-class TextDocumentIdentifier(BaseModel):
+@attrs.define(slots=True)
+class TextDocumentIdentifier(AttrsModel):
     uri: str
 
 
+@attrs.define(slots=True)
 class OptionalVersionedTextDocumentIdentifier(TextDocumentIdentifier):
     version: t.Optional[int] = None
 
 
+@attrs.define(slots=True)
 class VersionedTextDocumentIdentifier(TextDocumentIdentifier):
     version: t.Optional[int] = None
 
 
 # Sorting tip:  sorted(positions, key=(lambda p: p.as_tuple()))
-class Position(BaseModel):
+@attrs.define(slots=True)
+class Position(AttrsModel):
     # NB: These are both zero-based.
     line: int
     character: int
@@ -74,7 +86,8 @@ class Position(BaseModel):
         return (self.character < other.character) if self.line == other.line else (self.line < other.line)
 
 
-class Range(BaseModel):
+@attrs.define(slots=True)
+class Range(AttrsModel):
     start: Position
     end: Position
 
@@ -97,7 +110,8 @@ class Range(BaseModel):
             return total
 
 
-class TextDocumentContentChangeEvent(BaseModel):
+@attrs.define(slots=True)
+class TextDocumentContentChangeEvent(AttrsModel):
     text: str
     range: t.Optional[Range] = None
     rangeLength: t.Optional[int] = None  # deprecated, use .range
@@ -143,7 +157,8 @@ class TextDocumentContentChangeEvent(BaseModel):
         return cls(text=change_text, range=None, rangeLength=None)
 
 
-class TextDocumentPosition(BaseModel):
+@attrs.define(slots=True)
+class TextDocumentPosition(AttrsModel):
     textDocument: TextDocumentIdentifier
     position: Position
 
@@ -154,7 +169,8 @@ class CompletionTriggerKind(enum.IntEnum):
     TRIGGER_FOR_INCOMPLETE_COMPLETIONS = 3
 
 
-class CompletionContext(BaseModel):
+@attrs.define(slots=True)
+class CompletionContext(AttrsModel):
     triggerKind: CompletionTriggerKind
     triggerCharacter: t.Optional[str] = None
 
@@ -164,23 +180,27 @@ class MarkupKind(enum.Enum):
     MARKDOWN = "markdown"
 
 
-class MarkupContent(BaseModel):
+@attrs.define(slots=True)
+class MarkupContent(AttrsModel):
     kind: MarkupKind
     value: str
 
 
-class TextEdit(BaseModel):
+@attrs.define(slots=True)
+class TextEdit(AttrsModel):
     range: Range
     newText: str
     annotationId: t.Optional[str] = None
 
 
-class TextDocumentEdit(BaseModel):
+@attrs.define(slots=True)
+class TextDocumentEdit(AttrsModel):
     textDocument: OptionalVersionedTextDocumentIdentifier
     edits: t.List[TextEdit]
 
 
-class Command(BaseModel):
+@attrs.define(slots=True)
+class Command(AttrsModel):
     title: str
     command: str
     arguments: t.Optional[t.List[t.Any]] = None
@@ -223,26 +243,28 @@ class CompletionItemTag(enum.IntEnum):
     DEPRECATED = 1
 
 
-class CompletionItem(BaseModel):
+@attrs.define(slots=True)
+class CompletionItem(AttrsModel):
     label: str
     kind: t.Optional[CompletionItemKind] = None
-    tags: t.Optional[t.List[CompletionItemTag]] = None # according to specification CompletionItemTag type must be a list.
-    detail: t.Optional[str] = None # human string, line symbol info -- None in C#
+    tags: t.Optional[t.List[CompletionItemTag]] = None
+    detail: t.Optional[str] = None
     documentation: t.Union[str, MarkupContent, None] = None
-    deprecated: t.Optional[bool] = None # is deprecated
-    preselect: t.Optional[bool] = None #DONE selected item
-    sortText: t.Optional[str] = None # already sorted
-    filterText: t.Optional[str] = None # ?
-    insertText: t.Optional[str] = None #DONE
-    insertTextFormat: t.Optional[InsertTextFormat] = None # {$3:foo} decline capability for now
-    textEdit: t.Optional[TextEdit] = None #DONE text + ranges to replace
-    additionalTextEdits: t.Optional[t.List[TextEdit]] = None #DONE like an import
-    commitCharacters: t.Optional[t.List[str]] = None # api missing
-    command: t.Optional[Command] = None #TODOz later, when added commands
-    data: t.Optional[t.Any] = None # just index in C#
+    deprecated: t.Optional[bool] = None
+    preselect: t.Optional[bool] = None
+    sortText: t.Optional[str] = None
+    filterText: t.Optional[str] = None
+    insertText: t.Optional[str] = None
+    insertTextFormat: t.Optional[InsertTextFormat] = None
+    textEdit: t.Optional[TextEdit] = None
+    additionalTextEdits: t.Optional[t.List[TextEdit]] = None
+    commitCharacters: t.Optional[t.List[str]] = None
+    command: t.Optional[Command] = None
+    data: t.Optional[t.Any] = None
 
 
-class CompletionList(BaseModel):
+@attrs.define(slots=True)
+class CompletionList(AttrsModel):
     isIncomplete: bool
     items: t.List[CompletionItem]
 
@@ -253,19 +275,22 @@ class TextDocumentSaveReason(enum.IntEnum):
     FOCUS_OUT = 3
 
 
-class Location(BaseModel):
+@attrs.define(slots=True)
+class Location(AttrsModel):
     uri: str
     range: Range
 
 
-class LocationLink(BaseModel):
+@attrs.define(slots=True)
+class LocationLink(AttrsModel):
     originSelectionRange: t.Optional[Range] = None
-    targetUri: str  # in the spec the type is DocumentUri
+    targetUri: str
     targetRange: Range
     targetSelectionRange: Range
 
 
-class DiagnosticRelatedInformation(BaseModel):
+@attrs.define(slots=True)
+class DiagnosticRelatedInformation(AttrsModel):
     location: Location
     message: str
 
@@ -281,7 +306,8 @@ class DiagnosticSeverity(enum.IntEnum):
                     self.HINT:'Hint'}[self]
 
 
-class Diagnostic(BaseModel):
+@attrs.define(slots=True)
+class Diagnostic(AttrsModel):
     range: Range
     severity: t.Optional[DiagnosticSeverity] = None
     code: t.Optional[t.Union[int, str]] = None
@@ -296,7 +322,8 @@ Hover:
     * range?: Range;
 """
 #deprecated, use MarkupContent
-class MarkedString(BaseModel):
+@attrs.define(slots=True)
+class MarkedString(AttrsModel):
     language: str
     value: str
 
@@ -314,12 +341,14 @@ class MarkedString(BaseModel):
     * activeSignature?: uinteger;
     * activeParameter?: uinteger;
 """
-class ParameterInformation(BaseModel):
+@attrs.define(slots=True)
+class ParameterInformation(AttrsModel):
     label: t.Union[str, t.Tuple[int, int]]
     documentation: t.Optional[t.Union[str, MarkupContent]] = None
 
 
-class SignatureInformation(BaseModel):
+@attrs.define(slots=True)
+class SignatureInformation(AttrsModel):
     label: str
     documentation: t.Optional[t.Union[MarkupContent, str]] = None
     parameters: t.Optional[t.List[ParameterInformation]] = None
@@ -359,7 +388,8 @@ class SymbolTag(enum.IntEnum):
     DEPRECATED = 1
 
 
-class CallHierarchyItem(BaseModel):
+@attrs.define(slots=True)
+class CallHierarchyItem(AttrsModel):
     name: str
     kind: SymbolKind
     tags: t.Optional[SymbolTag] = None
@@ -370,12 +400,14 @@ class CallHierarchyItem(BaseModel):
     data: t.Optional[t.Any] = None
 
 
-class CallHierarchyIncomingCall(BaseModel):
-    from_: CallHierarchyItem = Field(alias="from")
+@attrs.define(slots=True)
+class CallHierarchyIncomingCall(AttrsModel):
+    from_: CallHierarchyItem = attrs.field(metadata={"alias": "from"})
     fromRanges: t.List[Range]
 
 
-class CallHierarchyOutgoingCall(BaseModel):
+@attrs.define(slots=True)
+class CallHierarchyOutgoingCall(AttrsModel):
     to: CallHierarchyItem
     fromRanges: t.List[Range]
 
@@ -387,7 +419,8 @@ class TextDocumentSyncKind(enum.IntEnum):
 
 
 # Usually in a flat list
-class SymbolInformation(BaseModel):
+@attrs.define(slots=True)
+class SymbolInformation(AttrsModel):
     name: str
     kind: SymbolKind
     tags: t.Optional[t.List[SymbolTag]] = None
@@ -399,7 +432,8 @@ class SymbolInformation(BaseModel):
         return self.location.range.start.character, self.location.range.start.line
 
 
-class InlayHintLabelPart(BaseModel):
+@attrs.define(slots=True)
+class InlayHintLabelPart(AttrsModel):
     value: str
     tooltip: t.Optional[t.Union[str, MarkupContent]]
     location: t.Optional[Location] = None
@@ -411,72 +445,74 @@ class InlayHintKind(enum.IntEnum):
     PARAMETER = 2
 
 
-class InlayHint(BaseModel):
+@attrs.define(slots=True)
+class InlayHint(AttrsModel):
     position: Position
     label: t.Union[str, t.List[InlayHintLabelPart]]
     kind: t.Optional[InlayHintKind] = None
-    textEdits: t.Optional[t.List[TextEdit]]
-    tooltip: t.Optional[t.Union[str, MarkupContent]]
+    textEdits: t.Optional[t.List[TextEdit]] = None
+    tooltip: t.Optional[t.Union[str, MarkupContent]] = None
     paddingLeft: t.Optional[bool] = None
     paddingRight: t.Optional[bool] = None
     data: t.Optional[t.Any] = None
 
 
-class FoldingRange(BaseModel):
+@attrs.define(slots=True)
+class FoldingRange(AttrsModel):
     startLine: int
     startCharacter: t.Optional[int] = None
     endLine: int
     endCharacter: t.Optional[int] = None
-    kind: t.Optional[str] = None  # comment, imports, region
+    kind: t.Optional[str] = None
     collapsedText: t.Optional[str] = None
 
 
 # Usually a hierarchy, e.g. a symbol with kind=SymbolKind.CLASS contains
 # several SymbolKind.METHOD symbols
-class DocumentSymbol(BaseModel):
+@attrs.define(slots=True)
+class DocumentSymbol(AttrsModel):
     name: str
     detail: t.Optional[str] = None
     kind: SymbolKind
     tags: t.Optional[t.List[SymbolTag]] = None
     deprecated: t.Optional[bool] = None
-    range: Range = Field(..., validate_default=True)
-    selectionRange: Range = Field(
-        ..., validate_default=True
-    )  # Example: symbol.selectionRange.start.as_tuple()
-    # https://stackoverflow.com/questions/36193540
+    range: Range
+    selectionRange: Range
     children: t.Optional[t.List["DocumentSymbol"]] = None
 
     def mpos(self):
         return self.selectionRange.start.character, self.selectionRange.start.line
 
 # for `.children` treeness
-DocumentSymbol.model_rebuild()
-
-
-class Registration(BaseModel):
+@attrs.define(slots=True)
+class Registration(AttrsModel):
     id: str
     method: str
     registerOptions: t.Optional[t.Any] = None
     
-class DocumentFilter(BaseModel):
+@attrs.define(slots=True)
+class DocumentFilter(AttrsModel):
     language: t.Optional[str] = None
     scheme: t.Optional[str] = None
     pattern: t.Optional[str] = None
 
 DocumentSelector = t.List[DocumentFilter]
 
-class CompletionOptionsCompletionItem(BaseModel):
+@attrs.define(slots=True)
+class CompletionOptionsCompletionItem(AttrsModel):
     labelDetailsSupport: t.Optional[bool] = None
 
-class CompletionRegistrationOptions(BaseModel):
-    documentSelector: t.Union[DocumentSelector, None]           # from TextDocumentRegistrationOptions
-    triggerCharacters: t.Optional[t.List[str]] = None                  # from CompletionOptions
-    allCommitCharacters: t.Optional[t.List[str]] = None                #
-    resolveProvider: t.Optional[bool] = None                           #
-    completionItem: t.Optional[CompletionOptionsCompletionItem] = None #
+@attrs.define(slots=True)
+class CompletionRegistrationOptions(AttrsModel):
+    documentSelector: t.Union[DocumentSelector, None]
+    triggerCharacters: t.Optional[t.List[str]] = None
+    allCommitCharacters: t.Optional[t.List[str]] = None
+    resolveProvider: t.Optional[bool] = None
+    completionItem: t.Optional[CompletionOptionsCompletionItem] = None
 
 
-class FormattingOptions(BaseModel):
+@attrs.define(slots=True)
+class FormattingOptions(AttrsModel):
     tabSize: int
     insertSpaces: bool
     trimTrailingWhitespace: t.Optional[bool] = None
@@ -484,15 +520,18 @@ class FormattingOptions(BaseModel):
     trimFinalNewlines: t.Optional[bool] = None
 
 
-class WorkspaceFolder(BaseModel):
+@attrs.define(slots=True)
+class WorkspaceFolder(AttrsModel):
     uri: str
     name: str
 
 
-class ProgressValue(BaseModel):
+@attrs.define(slots=True)
+class ProgressValue(AttrsModel):
     pass
 
 
+@attrs.define(slots=True)
 class WorkDoneProgressValue(ProgressValue):
     pass
 
@@ -503,6 +542,7 @@ class MWorkDoneProgressKind(enum.Enum):
     END = "end"
 
 
+@attrs.define(slots=True)
 class WorkDoneProgressBeginValue(WorkDoneProgressValue):
     kind: Literal["begin"]
     title: str
@@ -511,6 +551,7 @@ class WorkDoneProgressBeginValue(WorkDoneProgressValue):
     percentage: t.Optional[int] = None
 
 
+@attrs.define(slots=True)
 class WorkDoneProgressReportValue(WorkDoneProgressValue):
     kind: Literal["report"]
     cancellable: t.Optional[bool] = None
@@ -518,11 +559,13 @@ class WorkDoneProgressReportValue(WorkDoneProgressValue):
     percentage: t.Optional[int] = None
 
 
+@attrs.define(slots=True)
 class WorkDoneProgressEndValue(WorkDoneProgressValue):
     kind: Literal["end"]
     message: t.Optional[str] = None
 
 
-class ConfigurationItem(BaseModel):
+@attrs.define(slots=True)
+class ConfigurationItem(AttrsModel):
     scopeUri: t.Optional[str] = None
     section: t.Optional[str] = None

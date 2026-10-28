@@ -2,7 +2,7 @@ import enum
 #import pprint
 import typing as t
 
-from pydantic import ValidationError, TypeAdapter
+from .attr_model import TypeAdapter, ValidationError
 
 from .events import (
     Completion,

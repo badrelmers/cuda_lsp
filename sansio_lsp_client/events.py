@@ -1,7 +1,8 @@
 import typing as t
 
-from pydantic import BaseModel, PrivateAttr
-from typing import Optional, Dict, Any
+import attrs
+
+from .attr_model import AttrsModel
 
 if t.TYPE_CHECKING:  # avoid import cycle at runtime
     from .client import Client
@@ -36,43 +37,52 @@ from .structs import (
 Id = t.Union[int, str]
 
 
-class Event(BaseModel):
+@attrs.define(slots=True)
+class Event(AttrsModel):
     pass
 
 
+@attrs.define(slots=True)
 class MethodResponse(Event):
     message_id: t.Optional[Id] = None
 
 
+@attrs.define(slots=True)
 class ResponseError(Event):
     message_id: t.Optional[Id] = None
-    code: int
-    message: str
+    code: int = attrs.field()
+    message: str = attrs.field()
     data: t.Optional[t.Union[str, int, float, bool, t.List[t.Any], JSONDict, None]] = None
 
 
+@attrs.define(slots=True)
 class ServerRequest(Event):
-    _client: "Client" = PrivateAttr()
-    _id: Id = PrivateAttr()
+    _client: "Client" = attrs.field(default=None, init=False, repr=False, metadata={"private": True})
+    _id: Id = attrs.field(default=None, init=False, repr=False, metadata={"private": True})
 
 
+@attrs.define(slots=True)
 class ServerNotification(Event):
     pass
 
 
+@attrs.define(slots=True)
 class Initialized(Event):
     capabilities: JSONDict
 
 
+@attrs.define(slots=True)
 class Shutdown(Event):
     pass
 
 
+@attrs.define(slots=True)
 class ShowMessage(ServerNotification):
     type: MessageType
     message: str
 
 
+@attrs.define(slots=True)
 class ShowMessageRequest(ServerRequest):
     type: MessageType
     message: str
@@ -90,11 +100,13 @@ class ShowMessageRequest(ServerRequest):
         )
 
 
+@attrs.define(slots=True)
 class LogMessage(ServerNotification):
     type: MessageType
     message: str
 
 
+@attrs.define(slots=True)
 class WorkDoneProgressCreate(ServerRequest):
     token: ProgressToken
 
@@ -102,6 +114,7 @@ class WorkDoneProgressCreate(ServerRequest):
         self._client._send_response(id=self._id, result=None)
 
 
+@attrs.define(slots=True)
 class Progress(ServerNotification):
     token: ProgressToken
     value: t.Union[
@@ -111,39 +124,46 @@ class Progress(ServerNotification):
     ]
 
 
+@attrs.define(slots=True)
 class WorkDoneProgress(Progress):
     pass
 
 
+@attrs.define(slots=True)
 class WorkDoneProgressBegin(WorkDoneProgress):
     value: WorkDoneProgressBeginValue
 
 
+@attrs.define(slots=True)
 class WorkDoneProgressReport(WorkDoneProgress):
     value: WorkDoneProgressReportValue
 
 
+@attrs.define(slots=True)
 class WorkDoneProgressEnd(WorkDoneProgress):
     value: WorkDoneProgressEndValue
 
 
 # XXX: should these two be just Events or?
+@attrs.define(slots=True)
 class Completion(Event):
     message_id: Id
-    #completion_list: t.Optional[CompletionList]
-    completion_list: t.Optional[t.Dict[str, t.Any]] = None  # make it raw dict (optimization)
+    completion_list: t.Optional[t.Dict[str, t.Any]] = None
 
 
 # XXX: not sure how to name this event.
+@attrs.define(slots=True)
 class WillSaveWaitUntilEdits(Event):
     edits: t.Optional[t.List[TextEdit]] = None
 
 
+@attrs.define(slots=True)
 class PublishDiagnostics(ServerNotification):
     uri: str
     diagnostics: t.List[Diagnostic]
 
 
+@attrs.define(slots=True)
 class WorkspaceProjectInitializationComplete(ServerNotification):
     """Notification, exclusive to the Roslyn language server to indicate that the solution has been loaded."""
 
@@ -154,6 +174,7 @@ class WorkspaceProjectInitializationComplete(ServerNotification):
     * contents: MarkedString | MarkedString[] | MarkupContent;
     * range?: Range;
 """
+@attrs.define(slots=True)
 class Hover(MethodResponse):
     contents: t.Union[
         t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
@@ -174,6 +195,7 @@ class Hover(MethodResponse):
             return '\n'.join((item_str(item) for item in self.contents))
         return item_str(self.contents)
 
+@attrs.define(slots=True)
 class SignatureHelp(MethodResponse):
     signatures: t.List[SignatureInformation]
     activeSignature: t.Optional[int] = None
@@ -192,58 +214,71 @@ class SignatureHelp(MethodResponse):
         return self.signatures, self.activeSignature, self.activeParameter
 
 
+@attrs.define(slots=True)
 class SemanticTokens(Event):
     message_id: t.Optional[Id] = None
     resultId: t.Optional[str] = None
     data: t.List[int]
     
 
+@attrs.define(slots=True)
 class Definition(MethodResponse):
     result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
 
 
+@attrs.define(slots=True)
 class WorkspaceEdit(MethodResponse):
     changes: t.Optional[t.Dict[str, t.List[TextEdit]]] = None
     documentChanges: t.Optional[t.List[TextDocumentEdit]] = None
 
 
 # result is a list, so putting in a custom class
+@attrs.define(slots=True)
 class References(MethodResponse):
     result: t.Union[t.List[Location], None]
 
 
+@attrs.define(slots=True)
 class MCallHierarchItems(Event):
     result: t.Union[t.List[CallHierarchyItem], None]
 
 
+@attrs.define(slots=True)
 class Implementation(MethodResponse):
     result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
 
 
+@attrs.define(slots=True)
 class MWorkspaceSymbols(MethodResponse):
     result: t.Union[t.List[SymbolInformation], None]
 
 
+@attrs.define(slots=True)
 class MFoldingRanges(MethodResponse):
     result: t.Optional[t.List[FoldingRange]] = None
 
 
+@attrs.define(slots=True)
 class MInlayHints(MethodResponse):
     result: t.Optional[t.List[InlayHint]] = None
 
 
+@attrs.define(slots=True)
 class MDocumentSymbols(MethodResponse):
     result: t.Union[t.List[SymbolInformation], t.List[DocumentSymbol], None] = None
 
 
+@attrs.define(slots=True)
 class Declaration(MethodResponse):
     result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
 
 
+@attrs.define(slots=True)
 class TypeDefinition(MethodResponse):
     result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
 
 
+@attrs.define(slots=True)
 class RegisterCapabilityRequest(ServerRequest):
     registrations: t.List[Registration]
 
@@ -251,10 +286,12 @@ class RegisterCapabilityRequest(ServerRequest):
         self._client._send_response(id=self._id, result={})
 
 
+@attrs.define(slots=True)
 class DocumentFormatting(MethodResponse):
     result: t.Union[t.List[TextEdit], None] = None
 
 
+@attrs.define(slots=True)
 class WorkspaceFolders(ServerRequest):
     result: t.Optional[t.List[WorkspaceFolder]] = None
 
@@ -271,12 +308,14 @@ class WorkspaceFolders(ServerRequest):
         )
 
 
+@attrs.define(slots=True)
 class ConfigurationRequest(ServerRequest):
     items: t.List[ConfigurationItem]
 
     def reply(self, result: t.List[t.Any]) -> None:
         self._client._send_response(id=self._id, result=result)
 
+@attrs.define(slots=True)
 class Metadata(Event):
     message_id: t.Optional[Id] = None
     result: t.Optional[JSONDict] = None
