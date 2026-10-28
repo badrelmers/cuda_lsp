@@ -2,6 +2,8 @@ import json
 import re
 import typing as t
 
+from pydantic import TypeAdapter
+
 from .structs import JSONDict, JSONList, Request, Response, Id
 
 _CONTENT_TYPE_PARAM_RE = re.compile(r'(\w+)\s*=\s*(?:(?:"([^"]*)")|([^;,\s]*))')
@@ -46,7 +48,7 @@ def _make_request(
 
 
 def _make_response(
-    id: t.Union[int, str],
+    id: t.Union[int, str],  # TODO: does this make sense?
     result: t.Optional[t.Union[JSONDict, JSONList]] = None,
     error: t.Optional[JSONDict] = None,
     *,
@@ -56,12 +58,13 @@ def _make_response(
 
     # Set up the actual JSONRPC content and encode it.
     content: JSONDict = {"jsonrpc": "2.0", "id": id}
+   # content["result"]: The result of a request. This member is REQUIRED on success. This member MUST NOT exist if there was an error invoking the method.
     if result is not None:
         content["result"] = result
     if error is not None:
         content["error"] = error
     elif result is None:
-        content["result"] = None  # "result": null
+        content["result"] = None # "result": null
 
     encoded_content = json.dumps(content).encode(encoding)
 
@@ -74,8 +77,8 @@ def _make_response(
     return request
 
 
-def _parse_content_type(header: str) -> tuple:
-    """Parse content type header."""
+# Example: "application/vscode-jsonrpc; charset=utf-8" --> ("application/vscode-jsonrpc", {"charset": "utf-8"})
+def _parse_content_type(header: str) -> t.Tuple[str, t.Dict[str, str]]:
     content_type, _, param_string = header.partition(";")
     content_type = content_type.strip().lower()
 
@@ -87,26 +90,29 @@ def _parse_content_type(header: str) -> tuple:
     return content_type, metadata
 
 
-def _parse_request_or_response(data: JSONDict) -> t.Union[Request, Response]:
-    """Parse dict into Request or Response based on presence of 'method' field."""
-    del data["jsonrpc"]
-    
-    # If has 'method' field, it's a Request
-    if 'method' in data:
-        return Request(
-            method=data['method'],
-            id=data.get('id'),
-            params=data.get('params')
-        )
-    # Otherwise it's a Response
-    else:
-        return Response(
-            id=data.get('id'),
-            result=data.get('result'),
-            error=data.get('error')
-        )
-
-
+# _parse_messages is kind of tricky.
+#
+# It used to work like this:
+#   - Take in bytes argument
+#   - Yield parsed things (Responses and Requests)
+#   - Raise IncompleteResponseError if parsing fails by running out of bytes
+#
+# Then, if the bytes contained two valid things (Responses or Requests) and
+# then only a part of another thing, this function would first parse and yield
+# the valid things and then raise IncompleteResponseError, outputting no
+# information about which bytes hadn't been parsed yet. The code calling this
+# function would see only the IncompleteResponseError and discard the parsed
+# things. Even with that bugginess, this actually worked because every once in
+# a while there would be no bytes left from parsing things, and this function
+# would output parsed things with no error.
+#
+# The least error-prone fix I could think of is to pass the bytes to parse
+# as a mutable bytearray object, and just delete the used bytes from there.
+# This means that we no longer have any need for IncompleteResponseError, and
+# this function will return an empty list instead in that case.
+#
+# _parse_one_message returns None when there are no more messages, and an empty
+# iterator when a message was parsed but no things were created.
 def _parse_one_message(
     response_buf: bytearray,
 ) -> t.Optional[t.Iterable[t.Union[Request, Response]]]:
@@ -125,16 +131,23 @@ def _parse_one_message(
 
     header_lines, raw_content = bytes(response_buf).split(b"\r\n\r\n", 1)
 
-    # Many langservers don't set Content-Type header
+    # Many langservers don't set Content-Type header for whatever reason. We
+    # use a sane default for that.
+    #
+    # Langserver spec links to RFC 7230 which says that header names should be
+    # case-insensitive.
     headers = {"content-type": "application/vscode-jsonrpc; charset=utf-8"}
     for header_line in header_lines.split(b"\r\n"):
         key, value = header_line.decode("ascii").split(": ", 1)
         headers[key.lower()] = value
 
-    # Parse Content-Type and Content-Length headers
+    # We will now parse the Content-Type and Content-Length headers. Since for
+    # version 3.0 of the Language Server Protocol they're the only ones, we can
+    # just verify they're there and not keep them around in the Response
+    # object.
     assert set(headers.keys()) == {"content-type", "content-length"}
 
-    # Content-Type and encoding
+    # Content-Type and encoding.
     content_type, metadata = _parse_content_type(headers["content-type"])
     assert content_type == "application/vscode-jsonrpc"
     encoding = metadata["charset"]
@@ -142,27 +155,40 @@ def _parse_one_message(
     # Content-Length
     content_length = int(headers["content-length"])
 
-    # Verify that raw_content is long enough
+    # We need to verify that the raw_content is long enough.
     if len(raw_content) < content_length:
+        # incomplete request
         return None
 
-    # Take only as many bytes as we need
+    # Take only as many bytes as we need. If there's any remaining, they're
+    # the next response's.
     unused_bytes_count = len(raw_content) - content_length
     raw_content = raw_content[:content_length]
 
-    # Delete unnecessary stuff from response_buf
-    if unused_bytes_count == 0:
+    # This is a good place for deleting unnecessary stuff from response_buf
+    # because if the code below fails, then leaving the cause of failure to
+    # response_buf would cause this function to fail every time in the future
+    # when called with the same response_buf. I think I've had this issue a
+    # long time ago, and it was annoying how one response parsing error would
+    # also block the parsing of any future responses.
+    if unused_bytes_count == 0:  # 'del response_buf[:-0]' does wrong thing
         response_buf.clear()
     else:
         del response_buf[:-unused_bytes_count]
 
+    def parse_request_or_response(
+        data: JSONDict,
+    ) -> t.Union[Request, Response]:
+        del data["jsonrpc"]
+        return TypeAdapter(t.Union[Request, Response]).validate_python(data)
+
     content = json.loads(raw_content.decode(encoding))
 
     if isinstance(content, list):
-        # Batch operation
-        return map(_parse_request_or_response, content)
+        # This is in response to a batch operation.
+        return map(parse_request_or_response, content)
     else:
-        return [_parse_request_or_response(content)]
+        return [parse_request_or_response(content)]
 
 
 def _parse_messages(response_buf: bytearray) -> t.Iterator[t.Union[Response, Request]]:

@@ -1,5 +1,8 @@
 import enum
+#import pprint
 import typing as t
+
+from pydantic import ValidationError, TypeAdapter
 
 from .events import (
     Completion,
@@ -66,17 +69,6 @@ from .structs import (
     TextEdit,
     VersionedTextDocumentIdentifier,
     WorkspaceFolder,
-    OptionalVersionedTextDocumentIdentifier,
-)
-from ._parse_helpers import (
-    parse_signature_information,
-    parse_text_edit,
-    parse_text_edits_list,
-    parse_location_or_link_list,
-    parse_diagnostic,
-    parse_markup_content,
-    parse_range,
-    parse_location,
 )
 
 
@@ -210,7 +202,7 @@ class Client:
                 "workspaceFolders": (
                     None
                     if workspace_folders is None
-                    else [f.to_dict() for f in workspace_folders]
+                    else [f.model_dump() for f in workspace_folders]
                 ),
                 "trace": trace,
                 "capabilities": CAPABILITIES,
@@ -236,7 +228,6 @@ class Client:
     def _send_request(self, method: str, params: t.Optional[JSONDict] = None) -> Id:
         id: Id = self._id_counter
         self._id_counter += 1
-        print(f"DEBUG: Sending {method}")
 
         self._send_buf += _make_request(method=method, params=params, id=id)
         self._unanswered_requests[id] = Request(id=id, method=method, params=params)
@@ -260,18 +251,10 @@ class Client:
         assert response.id is not None
         request = self._unanswered_requests.pop(response.id)
 
-        # DEBUG: Print response
-        print(f"DEBUG: method={request.method}, result type={type(response.result)}")
-        if response.error:
-            print(f"DEBUG: ERROR: {response.error}")
-            
         # FIXME: The errors have meanings.
         if response.error is not None:
-            err = ResponseError(
-                code=response.error.get('code', 0),
-                message=response.error.get('message', ''),
-                data=response.error.get('data')
-            )
+            #raise RuntimeError("Response error!\n\n" + pprint.pformat(response.error))
+            err = ResponseError.model_validate(response.error)
             err.message_id = response.id
             return err
 
@@ -287,7 +270,7 @@ class Client:
             self._send_notification("workspace/didChangeConfiguration", params={
                 "settings": self.settings
             })
-            event = Initialized.from_dict(response.result)
+            event = Initialized.model_validate(response.result)
             self._state = ClientState.NORMAL
 
         elif method == "shutdown":
@@ -305,24 +288,32 @@ class Client:
                     'isIncomplete': 'false',
                     'items': response.result,
                 }
+            
+            ## ! parse_obj/model_validate is expensive and not really needed.
+            #try:
+            #    completion_list = CompletionList.model_validate(response.result)
+            #except ValidationError:
+            #    try:
+            #        list_adapter = TypeAdapter(t.List[CompletionItem])
+            #        completion_list = CompletionList(
+            #            isIncomplete=False,
+            #            items=list_adapter.validate_python(response.result),
+            #        )
+            #    except ValidationError:
+            #        assert response.result is None
 
             event = Completion(
                 message_id=response.id, completion_list=completion_list
             )
 
         elif method == "textDocument/willSaveWaitUntil":
-            edits = parse_text_edits_list(response.result) if response.result else None
-            event = WillSaveWaitUntilEdits(edits=edits)
+            event = WillSaveWaitUntilEdits(
+                edits=TypeAdapter(t.List[TextEdit]).validate_python(response.result)
+            )
 
         elif method == "textDocument/hover":
             if response.result is not None:
-                # Parse contents - can be string, MarkupContent, MarkedString, or list
-                raw_contents = response.result.get('contents', [])
-                contents = self._parse_hover_contents(raw_contents)
-                
-                range_data = response.result.get('range')
-                range_obj = parse_range(range_data) if range_data else None
-                event = Hover(contents=contents, range=range_obj)
+                event = Hover.model_validate(response.result)
             else:
                 event = Hover(contents=[])  # null response
             event.message_id = response.id
@@ -334,28 +325,8 @@ class Client:
             )
 
         elif method == "textDocument/signatureHelp":
-            if response.result is not None and isinstance(response.result, dict):
-                try:
-                    sigs = []
-                    for s in response.result.get('signatures', []):
-                        try:
-                            sigs.append(parse_signature_information(s))
-                        except Exception:
-                            print(f"DEBUG: Failed to parse signature: {e}")
-                            # Fallback: create minimal signature
-                            from .structs import SignatureInformation
-                            sigs.append(SignatureInformation(
-                                label=s.get('label', 'unknown') if isinstance(s, dict) else str(s)
-                            ))
-                    
-                    event = SignatureHelp(
-                        signatures=sigs,
-                        activeSignature=response.result.get('activeSignature'),
-                        activeParameter=response.result.get('activeParameter')
-                    )
-                except Exception as e:
-                    # Complete fallback
-                    event = SignatureHelp(signatures=[])
+            if response.result is not None:
+                event = SignatureHelp.model_validate(response.result)
             else:
                 event = SignatureHelp(signatures=[])  # null response
             event.message_id = response.id
@@ -367,23 +338,16 @@ class Client:
             )
 
         elif method == "textDocument/inlayHint":
-            result_data = response.result if response.result is not None else []
-            event = MInlayHints(result=result_data)
+            event = TypeAdapter(MInlayHints).validate_python(response)
             event.message_id = response.id
 
         elif method == "textDocument/rename":
             if response.result is not None and isinstance(response.result, dict):
                 if "documentChanges" in response.result:
-                    document_changes = []
-                    for change in response.result["documentChanges"]:
-                        text_doc = OptionalVersionedTextDocumentIdentifier(
-                            uri=change['textDocument']['uri'],
-                            version=change['textDocument'].get('version')
-                        )
-                        edits = [parse_text_edit(e) for e in change['edits']]
-                        document_changes.append(
-                            TextDocumentEdit(textDocument=text_doc, edits=edits)
-                        )
+                    document_changes = [
+                        TextDocumentEdit.model_validate(change)
+                        for change in response.result["documentChanges"]
+                    ]
                     event = WorkspaceEdit(
                         message_id=response.id, documentChanges=document_changes
                     )
@@ -400,102 +364,51 @@ class Client:
             if response.result is None:
                 event = SemanticTokens(data=[])
             else:
-                event = SemanticTokens(
-                    data=response.result.get('data', []),
-                    resultId=response.result.get('resultId')
-                )
+                event = SemanticTokens.model_validate(response.result)
             event.message_id = response.id
 
         #GOTOs
         elif method == "textDocument/definition":
-            try:
-                result = parse_location_or_link_list(response.result)
-            except Exception as e:
-                print(f"DEBUG: Failed to parse definition: {e}")
-                result = None
-            event = Definition(result=result)
+            event = TypeAdapter(Definition).validate_python(
+                {"result": response.result}
+            )
             event.message_id = response.id
 
         elif method == "textDocument/references":
-            result = None
-            try:
-                if response.result is not None:
-                    if isinstance(response.result, list):
-                        result = [parse_location(loc) for loc in response.result]
-            except Exception:
-                result = None
-            event = References(result=result)
-            event.message_id = response.id
+            event = TypeAdapter(References).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/implementation":
-            try:
-                result = parse_location_or_link_list(response.result)
-            except Exception:
-                result = None
-            event = Implementation(result=result)
-            event.message_id = response.id
+            event = TypeAdapter(Implementation).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/declaration":
-            try:
-                result = parse_location_or_link_list(response.result)
-            except Exception:
-                result = None
-            event = Declaration(result=result)
-            event.message_id = response.id
+            event = TypeAdapter(Declaration).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/typeDefinition":
-            try:
-                result = parse_location_or_link_list(response.result)
-            except Exception:
-                result = None
-            event = TypeDefinition(result=result)
-            event.message_id = response.id
+            event = TypeAdapter(TypeDefinition).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/prepareCallHierarchy":
-            result = None
-            if response.result is not None:
-                # Parse CallHierarchyItem list
-                from .structs import CallHierarchyItem, SymbolKind
-                result = []
-                for item_dict in response.result:
-                    item = CallHierarchyItem(
-                        name=item_dict['name'],
-                        kind=SymbolKind(item_dict['kind']),
-                        uri=item_dict['uri'],
-                        range=parse_range(item_dict['range']),
-                        selectionRange=parse_range(item_dict['selectionRange']),
-                        tags=item_dict.get('tags'),
-                        detail=item_dict.get('detail'),
-                        data=item_dict.get('data')
-                    )
-                    result.append(item)
-            event = MCallHierarchItems(result=result)
-            event.message_id = response.id
+            event = TypeAdapter(MCallHierarchItems).validate_python(
+                {"result": response.result}
+            )
 
         elif method in ("textDocument/formatting", "textDocument/rangeFormatting"):
-            result = parse_text_edits_list(response.result) if response.result else None
-            event = DocumentFormatting(result=result)
-            event.message_id = response.id
+            event = TypeAdapter(DocumentFormatting).validate_python(
+                {"result": response.result}
+            )
 
         # WORKSPACE
         elif method == "workspace/symbol":
-            result = None
-            if response.result is not None:
-                # Parse SymbolInformation list
-                from .structs import SymbolInformation, SymbolKind
-                result = []
-                for sym_dict in response.result:
-                    sym = SymbolInformation(
-                        name=sym_dict['name'],
-                        kind=SymbolKind(sym_dict['kind']),
-                        location=parse_location(sym_dict['location']),
-                        tags=sym_dict.get('tags'),
-                        deprecated=sym_dict.get('deprecated'),
-                        containerName=sym_dict.get('containerName')
-                    )
-                    result.append(sym)
-            event = MWorkspaceSymbols(result=result)
-            event.message_id = response.id
+            event = TypeAdapter(MWorkspaceSymbols).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "o#/metadata":
             metadata_result = response.result if isinstance(response.result, dict) else None
@@ -513,15 +426,16 @@ class Client:
     def _handle_request(self, request: Request) -> Event:
         def parse_request(event_cls: t.Type[Event]) -> Event:
             if issubclass(event_cls, ServerRequest):
-                params = request.params if isinstance(request.params, dict) else {}
-                event = event_cls(**params) if params else event_cls()
+                event = TypeAdapter(event_cls).validate_python(request.params)
                 assert request.id is not None
                 event._id = request.id
                 event._client = self
                 return event
             elif issubclass(event_cls, ServerNotification):
-                params = request.params if isinstance(request.params, dict) else {}
-                return event_cls(**params) if params else event_cls()
+                if isinstance(request.params, dict):
+                    return TypeAdapter(event_cls).validate_python(request.params)
+                else:
+                    return TypeAdapter(event_cls).validate_python({})
             else:
                 raise TypeError(
                     "`event_cls` must be a subclass of ServerRequest"
@@ -529,142 +443,73 @@ class Client:
                 )
 
         if request.method == "workspace/workspaceFolders":
+            # return parse_request(WorkspaceFolders)
+            # ... We don't need to parse WorkspaceFolders server's request!
+            # because according to LSP specs "params: none"
+            # Just create empty event and return it
             event = WorkspaceFolders(result=None)
             event._id = request.id
             event._client = self
             return event
         elif request.method == "workspace/configuration":
-            # Parse ConfigurationItem list
-            from .structs import ConfigurationItem
-            items = []
-            for item_dict in request.params.get('items', []):
-                items.append(ConfigurationItem(
-                    scopeUri=item_dict.get('scopeUri'),
-                    section=item_dict.get('section')
-                ))
-            event = ConfigurationRequest(items=items)
-            event._id = request.id
-            event._client = self
+            event = parse_request(ConfigurationRequest)
+            assert isinstance(event, ConfigurationRequest)
             return event
         elif request.method == "workspace/projectInitializationComplete":
             event = parse_request(WorkspaceProjectInitializationComplete)
             assert isinstance(event, WorkspaceProjectInitializationComplete)
             return event
         elif request.method == "window/showMessage":
-            from .structs import MessageType
-            event = ShowMessage(
-                type=MessageType(request.params.get('type', 3)),
-                message=request.params.get('message', '')
-            )
+            event = parse_request(ShowMessage)
+            assert isinstance(event, ShowMessage)
             return event
         elif request.method == "window/showMessageRequest":
-            from .structs import MessageType, MessageActionItem
-            actions = None
-            if 'actions' in request.params:
-                actions = [MessageActionItem(title=a['title']) 
-                          for a in request.params['actions']]
-            event = ShowMessageRequest(
-                type=MessageType(request.params.get('type', 3)),
-                message=request.params.get('message', ''),
-                actions=actions
-            )
-            event._id = request.id
-            event._client = self
+            event = parse_request(ShowMessageRequest)
+            assert isinstance(event, ShowMessageRequest)
             return event
         elif request.method == "window/logMessage":
-            from .structs import MessageType
-            event = LogMessage(
-                type=MessageType(request.params.get('type', 3)),
-                message=request.params.get('message', '')
-            )
+            event = parse_request(LogMessage)
+            assert isinstance(event, LogMessage)
             return event
         elif request.method == "textDocument/publishDiagnostics":
-            try:
-                diagnostics = [parse_diagnostic(d) 
-                              for d in request.params.get('diagnostics', [])]
-            except Exception as e:
-                # Fallback: create minimal diagnostics
-                diagnostics = []
-                for d in request.params.get('diagnostics', []):
-                    try:
-                        diagnostics.append(parse_diagnostic(d))
-                    except Exception:
-                        # Skip malformed diagnostic
-                        pass
-            
-            event = PublishDiagnostics(
-                uri=request.params.get('uri', ''),
-                diagnostics=diagnostics
-            )
+            event = parse_request(PublishDiagnostics)
+            assert isinstance(event, PublishDiagnostics)
             return event
         elif request.method == "window/workDoneProgress/create":
-            token = request.params.get('token', '')
-            self._progress_tokens_map[token] = WorkDoneProgress
-            event = WorkDoneProgressCreate(token=token)
-            event._id = request.id
-            event._client = self
-            return event
+            ev = parse_request(WorkDoneProgressCreate)
+            self._progress_tokens_map[request.params['token']] = WorkDoneProgress
+            return parse_request(WorkDoneProgressCreate)
         elif request.method == "client/registerCapability":
-            from .structs import Registration
-            registrations = []
-            for reg_dict in request.params.get('registrations', []):
-                reg = Registration(
-                    id=reg_dict['id'],
-                    method=reg_dict['method'],
-                    registerOptions=reg_dict.get('registerOptions')
-                )
-                registrations.append(reg)
-            event = RegisterCapabilityRequest(registrations=registrations)
-            event._id = request.id
-            event._client = self
+            event = parse_request(RegisterCapabilityRequest)
+            assert isinstance(event, RegisterCapabilityRequest)
             return event
 
         elif request.method == "$/progress":
-            token = request.params.get('token', '')
-            progress_type = self._progress_tokens_map.get(token)
+            progress_type = self._progress_tokens_map.get(request.params['token'])
             
             # if "window/workDoneProgress/create" request from server was missing -
             # pretend it actually was already recieved. i think there is no harm in that.
             # such server bugs must be silently ignored without crashing our plugin.
             if progress_type is None:
                 # Gracefully handle servers that forget to send workDoneProgress/create
-                self._progress_tokens_map[token] = WorkDoneProgress
+                self._progress_tokens_map[request.params['token']] = WorkDoneProgress
                 progress_type = WorkDoneProgress
 
             if progress_type == WorkDoneProgress:
-                value = request.params.get('value', {})
-                kind = value.get('kind', '')
+                kind = request.params['value']['kind']
                 kind = MWorkDoneProgressKind(kind)
 
                 if kind == MWorkDoneProgressKind.BEGIN:
-                    from .structs import WorkDoneProgressBeginValue
-                    val = WorkDoneProgressBeginValue(
-                        kind=value.get('kind', 'begin'),
-                        title=value.get('title', ''),
-                        cancellable=value.get('cancellable'),
-                        message=value.get('message'),
-                        percentage=value.get('percentage')
-                    )
-                    return WorkDoneProgressBegin(token=token, value=val)
+                    return parse_request(WorkDoneProgressBegin)
                 elif kind == MWorkDoneProgressKind.REPORT:
-                    from .structs import WorkDoneProgressReportValue
-                    val = WorkDoneProgressReportValue(
-                        kind=value.get('kind', 'report'),
-                        cancellable=value.get('cancellable'),
-                        message=value.get('message'),
-                        percentage=value.get('percentage')
-                    )
-                    return WorkDoneProgressReport(token=token, value=val)
+                    return parse_request(WorkDoneProgressReport)
                 elif kind == MWorkDoneProgressKind.END:
-                    del self._progress_tokens_map[token] # prevent the dictionary from growing indefinitely.
-                    from .structs import WorkDoneProgressEndValue
-                    val = WorkDoneProgressEndValue(
-                        kind=value.get('kind', 'end'),
-                        message=value.get('message')
-                    )
-                    return WorkDoneProgressEnd(token=token, value=val)
+                    del self._progress_tokens_map[request.params["token"]] # prevent the dictionary from growing indefinitely.
+                    return parse_request(WorkDoneProgressEnd)
                 else:
                     raise ValueError(f"Unknown progress kind: {kind}")
+
+
 
         else:
             raise NotImplementedError(request)
@@ -679,54 +524,6 @@ class Client:
                 yield self._handle_response(message)
             else:
                 yield self._handle_request(message)
-
-    def _parse_hover_contents(self, raw_contents):
-        """Parse hover contents which can be various formats."""
-        from .structs import MarkupContent, MarkupKind, MarkedString
-        
-        # If it's a string, return as-is
-        if isinstance(raw_contents, str):
-            return raw_contents
-        
-        # If it's a dict (MarkupContent or MarkedString)
-        if isinstance(raw_contents, dict):
-            if 'kind' in raw_contents:
-                # MarkupContent
-                kind_str = raw_contents.get('kind', 'plaintext')
-                kind = MarkupKind.MARKDOWN if kind_str == 'markdown' else MarkupKind.PLAINTEXT
-                return MarkupContent(kind=kind, value=raw_contents.get('value', ''))
-            elif 'language' in raw_contents:
-                # MarkedString
-                return MarkedString(
-                    language=raw_contents.get('language', ''),
-                    value=raw_contents.get('value', '')
-                )
-            else:
-                # Unknown dict format, return as string representation
-                return str(raw_contents)
-        
-        # If it's a list
-        if isinstance(raw_contents, list):
-            parsed = []
-            for item in raw_contents:
-                if isinstance(item, str):
-                    parsed.append(item)
-                elif isinstance(item, dict):
-                    if 'kind' in item:
-                        kind_str = item.get('kind', 'plaintext')
-                        kind = MarkupKind.MARKDOWN if kind_str == 'markdown' else MarkupKind.PLAINTEXT
-                        parsed.append(MarkupContent(kind=kind, value=item.get('value', '')))
-                    elif 'language' in item:
-                        parsed.append(MarkedString(
-                            language=item.get('language', ''),
-                            value=item.get('value', '')
-                        ))
-                    else:
-                        parsed.append(str(item))
-            return parsed
-        
-        # Fallback
-        return []
 
     def send(self) -> bytes:
         send_buf = self._send_buf[:]
@@ -753,7 +550,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/didOpen",
-            params={"textDocument": text_document.to_dict()},
+            params={"textDocument": text_document.model_dump()},
         )
 
     def did_change(
@@ -765,8 +562,8 @@ class Client:
         self._send_notification(
             method="textDocument/didChange",
             params={
-                "textDocument": text_document.to_dict(),
-                "contentChanges": [evt.to_dict() for evt in content_changes],
+                "textDocument": text_document.model_dump(),
+                "contentChanges": [evt.model_dump() for evt in content_changes],
             },
         )
 
@@ -782,7 +579,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/willSave",
-            params={"textDocument": text_document.to_dict(), "reason": reason.value},
+            params={"textDocument": text_document.model_dump(), "reason": reason.value},
         )
 
     def will_save_wait_until(
@@ -791,14 +588,14 @@ class Client:
         assert self._state == ClientState.NORMAL
         self._send_request(
             method="textDocument/willSaveWaitUntil",
-            params={"textDocument": text_document.to_dict(), "reason": reason.value},
+            params={"textDocument": text_document.model_dump(), "reason": reason.value},
         )
 
     def did_save(
         self, text_document: TextDocumentIdentifier, text: t.Optional[str] = None
     ) -> None:
         assert self._state == ClientState.NORMAL
-        params: t.Dict[str, t.Any] = {"textDocument": text_document.to_dict()}
+        params: t.Dict[str, t.Any] = {"textDocument": text_document.model_dump()}
         if text is not None:
             params["text"] = text
         self._send_notification(method="textDocument/didSave", params=params)
@@ -807,7 +604,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/didClose",
-            params={"textDocument": text_document.to_dict()},
+            params={"textDocument": text_document.model_dump()},
         )
 
     def did_change_workspace_folders(
@@ -815,8 +612,8 @@ class Client:
     ) -> None:
         assert self._state == ClientState.NORMAL
         params = {
-            "added": [f.to_dict() for f in added],
-            "removed": [f.to_dict() for f in removed],
+            "added": [f.model_dump() for f in added],
+            "removed": [f.model_dump() for f in removed],
         }
         self._send_notification(
             method="workspace/didChangeWorkspaceFolders", params=params
@@ -829,10 +626,10 @@ class Client:
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {}
-        params.update(text_document_position.to_dict())
+        params.update(text_document_position.model_dump())
         if context is not None:
             params.update( {
-                'context': context.to_dict(exclude_unset=True)
+                'context': context.model_dump(exclude_unset=True)
             } )
         return self._send_request(method="textDocument/completion", params=params)
 
@@ -843,7 +640,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/semanticTokens/full",
-            params={"textDocument": text_document.to_dict()},
+            params={"textDocument": text_document.model_dump()},
         )
 
     def rename(
@@ -853,41 +650,41 @@ class Client:
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {}
-        params.update(text_document_position.to_dict())
+        params.update(text_document_position.model_dump())
         params["newName"] = new_name
         return self._send_request(method="textDocument/rename", params=params)
 
     def hover(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
-            method="textDocument/hover", params=text_document_position.to_dict()
+            method="textDocument/hover", params=text_document_position.model_dump()
         )
 
     def folding_range(self, text_document: TextDocumentIdentifier) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/foldingRange",
-            params={"textDocument": text_document.to_dict()},
+            params={"textDocument": text_document.model_dump()},
         )
 
     def signatureHelp(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/signatureHelp",
-            params=text_document_position.to_dict(),
+            params=text_document_position.model_dump(),
         )
 
     def definition(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
-            method="textDocument/definition", params=text_document_position.to_dict()
+            method="textDocument/definition", params=text_document_position.model_dump()
         )
 
     def declaration(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/declaration",
-            params=text_document_position.to_dict(),
+            params=text_document_position.model_dump(),
         )
 
     def inlay_hint(self, text_document: TextDocumentIdentifier, range: Range) -> Id:
@@ -895,8 +692,8 @@ class Client:
         return self._send_request(
             method="textDocument/inlayHint",
             params={
-                "textDocument": text_document.to_dict(),
-                "range": range.to_dict(),
+                "textDocument": text_document.model_dump(),
+                "range": range.model_dump(),
             },
         )
 
@@ -904,14 +701,14 @@ class Client:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/typeDefinition",
-            params=text_document_position.to_dict(),
+            params=text_document_position.model_dump(),
         )
 
     def references(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
             "context": {"includeDeclaration": True},
-            **text_document_position.to_dict(),
+            **text_document_position.model_dump(),
         }
         return self._send_request(method="textDocument/references", params=params)
 
@@ -920,14 +717,14 @@ class Client:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/prepareCallHierarchy",
-            params=text_document_position.to_dict(),
+            params=text_document_position.model_dump(),
         )
 
     def implementation(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/implementation",
-            params=text_document_position.to_dict(),
+            params=text_document_position.model_dump(),
         )
 
     def workspace_symbol(self, query: str = "") -> Id:
@@ -938,7 +735,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/documentSymbol",
-            params={"textDocument": text_document.to_dict()},
+            params={"textDocument": text_document.model_dump()},
         )
 
     def formatting(
@@ -946,8 +743,8 @@ class Client:
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
-            "textDocument": text_document.to_dict(),
-            "options": options.to_dict(),
+            "textDocument": text_document.model_dump(),
+            "options": options.model_dump(),
         }
         return self._send_request(method="textDocument/formatting", params=params)
 
@@ -959,9 +756,9 @@ class Client:
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
-            "textDocument": text_document.to_dict(),
-            "range": range.to_dict(),
-            "options": options.to_dict(),
+            "textDocument": text_document.model_dump(),
+            "range": range.model_dump(),
+            "options": options.model_dump(),
         }
         return self._send_request(method="textDocument/rangeFormatting", params=params)
 
