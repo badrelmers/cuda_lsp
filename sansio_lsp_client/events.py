@@ -171,8 +171,15 @@ class Hover(MethodResponse):
             if isinstance(item, MarkedString):
                 return f'[{item.language}]\n{item.value}'
             elif isinstance(item, MarkupContent):
-                return f'[{item.kind}]\n{item.value}'
-            return item
+                return f'[{item.kind.value if hasattr(item.kind, "value") else item.kind}]\n{item.value}'
+            elif isinstance(item, dict):
+                # Handle raw dict (shouldn't happen but just in case)
+                if 'kind' in item:
+                    return f'[{item.get("kind", "plaintext")}]\n{item.get("value", "")}'
+                elif 'language' in item:
+                    return f'[{item.get("language", "")}]\n{item.get("value", "")}'
+                return str(item)
+            return str(item)
 
         if isinstance(self.contents, list):
             return '\n'.join((item_str(item) for item in self.contents))

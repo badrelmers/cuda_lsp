@@ -320,13 +320,14 @@ class Language:
         self._timer.restart()
 
     def _err_read_loop(self):
+        """captures server stderr"""
         try:
             while self._err:
                 line = self._err.readline()
                 if line == b'':
                     break
                 if self._log_stderr:
-                    #print(f'ServerError: {LOG_NAME}: {self.lang_str} - {line}') # bytes
+                    print(f'ServerError: {LOG_NAME}: {self.lang_str} - {line}') # bytes
                     try:
                         s = line.decode('utf-8')
                     except:
@@ -474,6 +475,11 @@ class Language:
 
 
     def _on_lsp_msg(self, msg):
+        # DEBUG: Log message types
+        print(f"DEBUG: Received message type: {type(msg).__name__}")
+        if hasattr(msg, 'result'):
+            print(f"DEBUG: Result: {msg.result}")
+            
         if DEBUG_MESSAGES:
             self._dbg_msgs = (self._dbg_msgs + [msg])[-128:]
 

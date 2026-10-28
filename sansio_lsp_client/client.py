@@ -236,6 +236,7 @@ class Client:
     def _send_request(self, method: str, params: t.Optional[JSONDict] = None) -> Id:
         id: Id = self._id_counter
         self._id_counter += 1
+        print(f"DEBUG: Sending {method}")
 
         self._send_buf += _make_request(method=method, params=params, id=id)
         self._unanswered_requests[id] = Request(id=id, method=method, params=params)
@@ -259,6 +260,11 @@ class Client:
         assert response.id is not None
         request = self._unanswered_requests.pop(response.id)
 
+        # DEBUG: Print response
+        print(f"DEBUG: method={request.method}, result type={type(response.result)}")
+        if response.error:
+            print(f"DEBUG: ERROR: {response.error}")
+            
         # FIXME: The errors have meanings.
         if response.error is not None:
             err = ResponseError(
@@ -310,7 +316,10 @@ class Client:
 
         elif method == "textDocument/hover":
             if response.result is not None:
-                contents = response.result.get('contents', [])
+                # Parse contents - can be string, MarkupContent, MarkedString, or list
+                raw_contents = response.result.get('contents', [])
+                contents = self._parse_hover_contents(raw_contents)
+                
                 range_data = response.result.get('range')
                 range_obj = parse_range(range_data) if range_data else None
                 event = Hover(contents=contents, range=range_obj)
@@ -325,14 +334,28 @@ class Client:
             )
 
         elif method == "textDocument/signatureHelp":
-            if response.result is not None:
-                sigs = [parse_signature_information(s) 
-                        for s in response.result.get('signatures', [])]
-                event = SignatureHelp(
-                    signatures=sigs,
-                    activeSignature=response.result.get('activeSignature'),
-                    activeParameter=response.result.get('activeParameter')
-                )
+            if response.result is not None and isinstance(response.result, dict):
+                try:
+                    sigs = []
+                    for s in response.result.get('signatures', []):
+                        try:
+                            sigs.append(parse_signature_information(s))
+                        except Exception:
+                            print(f"DEBUG: Failed to parse signature: {e}")
+                            # Fallback: create minimal signature
+                            from .structs import SignatureInformation
+                            sigs.append(SignatureInformation(
+                                label=s.get('label', 'unknown') if isinstance(s, dict) else str(s)
+                            ))
+                    
+                    event = SignatureHelp(
+                        signatures=sigs,
+                        activeSignature=response.result.get('activeSignature'),
+                        activeParameter=response.result.get('activeParameter')
+                    )
+                except Exception as e:
+                    # Complete fallback
+                    event = SignatureHelp(signatures=[])
             else:
                 event = SignatureHelp(signatures=[])  # null response
             event.message_id = response.id
@@ -385,27 +408,47 @@ class Client:
 
         #GOTOs
         elif method == "textDocument/definition":
-            event = Definition(result=parse_location_or_link_list(response.result))
+            try:
+                result = parse_location_or_link_list(response.result)
+            except Exception as e:
+                print(f"DEBUG: Failed to parse definition: {e}")
+                result = None
+            event = Definition(result=result)
             event.message_id = response.id
 
         elif method == "textDocument/references":
             result = None
-            if response.result is not None:
-                if isinstance(response.result, list):
-                    result = [parse_location(loc) for loc in response.result]
+            try:
+                if response.result is not None:
+                    if isinstance(response.result, list):
+                        result = [parse_location(loc) for loc in response.result]
+            except Exception:
+                result = None
             event = References(result=result)
             event.message_id = response.id
 
         elif method == "textDocument/implementation":
-            event = Implementation(result=parse_location_or_link_list(response.result))
+            try:
+                result = parse_location_or_link_list(response.result)
+            except Exception:
+                result = None
+            event = Implementation(result=result)
             event.message_id = response.id
 
         elif method == "textDocument/declaration":
-            event = Declaration(result=parse_location_or_link_list(response.result))
+            try:
+                result = parse_location_or_link_list(response.result)
+            except Exception:
+                result = None
+            event = Declaration(result=result)
             event.message_id = response.id
 
         elif method == "textDocument/typeDefinition":
-            event = TypeDefinition(result=parse_location_or_link_list(response.result))
+            try:
+                result = parse_location_or_link_list(response.result)
+            except Exception:
+                result = None
+            event = TypeDefinition(result=result)
             event.message_id = response.id
 
         elif method == "textDocument/prepareCallHierarchy":
@@ -536,10 +579,21 @@ class Client:
             )
             return event
         elif request.method == "textDocument/publishDiagnostics":
-            diagnostics = [parse_diagnostic(d) 
-                          for d in request.params.get('diagnostics', [])]
+            try:
+                diagnostics = [parse_diagnostic(d) 
+                              for d in request.params.get('diagnostics', [])]
+            except Exception as e:
+                # Fallback: create minimal diagnostics
+                diagnostics = []
+                for d in request.params.get('diagnostics', []):
+                    try:
+                        diagnostics.append(parse_diagnostic(d))
+                    except Exception:
+                        # Skip malformed diagnostic
+                        pass
+            
             event = PublishDiagnostics(
-                uri=request.params['uri'],
+                uri=request.params.get('uri', ''),
                 diagnostics=diagnostics
             )
             return event
@@ -625,6 +679,54 @@ class Client:
                 yield self._handle_response(message)
             else:
                 yield self._handle_request(message)
+
+    def _parse_hover_contents(self, raw_contents):
+        """Parse hover contents which can be various formats."""
+        from .structs import MarkupContent, MarkupKind, MarkedString
+        
+        # If it's a string, return as-is
+        if isinstance(raw_contents, str):
+            return raw_contents
+        
+        # If it's a dict (MarkupContent or MarkedString)
+        if isinstance(raw_contents, dict):
+            if 'kind' in raw_contents:
+                # MarkupContent
+                kind_str = raw_contents.get('kind', 'plaintext')
+                kind = MarkupKind.MARKDOWN if kind_str == 'markdown' else MarkupKind.PLAINTEXT
+                return MarkupContent(kind=kind, value=raw_contents.get('value', ''))
+            elif 'language' in raw_contents:
+                # MarkedString
+                return MarkedString(
+                    language=raw_contents.get('language', ''),
+                    value=raw_contents.get('value', '')
+                )
+            else:
+                # Unknown dict format, return as string representation
+                return str(raw_contents)
+        
+        # If it's a list
+        if isinstance(raw_contents, list):
+            parsed = []
+            for item in raw_contents:
+                if isinstance(item, str):
+                    parsed.append(item)
+                elif isinstance(item, dict):
+                    if 'kind' in item:
+                        kind_str = item.get('kind', 'plaintext')
+                        kind = MarkupKind.MARKDOWN if kind_str == 'markdown' else MarkupKind.PLAINTEXT
+                        parsed.append(MarkupContent(kind=kind, value=item.get('value', '')))
+                    elif 'language' in item:
+                        parsed.append(MarkedString(
+                            language=item.get('language', ''),
+                            value=item.get('value', '')
+                        ))
+                    else:
+                        parsed.append(str(item))
+            return parsed
+        
+        # Fallback
+        return []
 
     def send(self) -> bytes:
         send_buf = self._send_buf[:]
