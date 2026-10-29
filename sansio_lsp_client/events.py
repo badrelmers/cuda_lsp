@@ -89,7 +89,7 @@ class ShowMessage(ServerNotification):
     message: str = attrs.field()
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class ShowMessageRequest(ServerRequest):
     type: MessageType = attrs.field()
     message: str = attrs.field()
@@ -106,7 +106,7 @@ class LogMessage(ServerNotification):
     message: str = attrs.field()
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class WorkDoneProgressCreate(ServerRequest):
     token: ProgressToken = attrs.field()
 
@@ -129,17 +129,17 @@ class WorkDoneProgress(Progress):
     pass
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class WorkDoneProgressBegin(WorkDoneProgress):
     value: WorkDoneProgressBeginValue = attrs.field()
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class WorkDoneProgressReport(WorkDoneProgress):
     value: WorkDoneProgressReportValue = attrs.field()
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class WorkDoneProgressEnd(WorkDoneProgress):
     value: WorkDoneProgressEndValue = attrs.field()
 
@@ -175,11 +175,19 @@ class Hover(MethodResponse):
 
     def m_str(self) -> str:
         def item_str(item: t.Union[MarkedString, MarkupContent, str]) -> str:
-            if isinstance(item, MarkedString):
-                return f"[{item.language}]\n{item.value}"
-            if isinstance(item, MarkupContent):
-                return f"[{item.kind}]\n{item.value}"
-            return item
+            if isinstance(item, str):
+                return item
+
+            language = getattr(item, 'language', None)
+            value = getattr(item, 'value', None)
+            if language is not None and value is not None:
+                return f"[{language}]\n{value}"
+
+            kind = getattr(item, 'kind', None)
+            if kind is not None and value is not None:
+                return f"[{kind}]\n{value}"
+
+            return str(item)
 
         if isinstance(self.contents, list):
             return "\n".join(item_str(item) for item in self.contents)
@@ -272,7 +280,7 @@ class TypeDefinition(MethodResponse):
     result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = attrs.field()
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class RegisterCapabilityRequest(ServerRequest):
     registrations: t.List[Registration] = attrs.field()
 
@@ -294,7 +302,7 @@ class WorkspaceFolders(ServerRequest):
         self._client._send_response(id=self._id, result=result)
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class ConfigurationRequest(ServerRequest):
     items: t.List[ConfigurationItem] = attrs.field()
 

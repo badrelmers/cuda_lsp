@@ -1,11 +1,7 @@
 import enum
 #import pprint
 import typing as t
-from lsprotocol import types as lsp_types
-import types
-class PluginHover(lsp_types.Hover):
-    message_id: int = None
-    
+
 from .events import (
     Completion,
     ConfigurationRequest,
@@ -312,41 +308,40 @@ class Client:
                 ]
             event = WillSaveWaitUntilEdits(edits=edits)
 
-
-        elif method == "textDocument/hover1":
-            if response.result is not None:
-                event = Converter.structure(response.result, lsp_types.Hover)
-            else:
-                event = lsp_types.Hover(contents=[])  # null response
-            event.message_id = response.id
-
-        elif method == "textDocument/hover2":
-            if response.result is not None:
-                structured_data = Converter.structure(response.result, lsp_types.Hover)
-                event = types.SimpleNamespace(**Converter.unstructure(structured_data))
-            else:
-                event = types.SimpleNamespace(contents=[], range=None)  # null response
-
-            event.message_id = response.id
-            
-        elif method == "textDocument/hover3":
-            if response.result is not None:
-                hover = Converter.structure(response.result, lsp_types.Hover)
-                event_dict = hover.__dict__
-            else:
-                hover = lsp_types.Hover(contents=[])
-                event_dict = hover.__dict__
-            event_dict['message_id'] = response.id
-            event = SimpleNamespace(**event_dict)
-            
-            
         elif method == "textDocument/hover":
             if response.result is not None:
-                event = Converter.structure(response.result, PluginHover)
+                contents_raw = response.result.get("contents")
+                contents = contents_raw
+                try:
+                    if isinstance(contents_raw, dict):
+                        contents = Converter.structure(contents_raw, MarkupContent)
+                    elif isinstance(contents_raw, list):
+                        structured_list = []
+                        for item in contents_raw:
+                            if isinstance(item, dict):
+                                try:
+                                    structured_list.append(Converter.structure(item, MarkedString))
+                                except Exception:
+                                    structured_list.append(item)
+                            else:
+                                structured_list.append(item)
+                        contents = structured_list
+                except Exception as ex:
+                    print("DEBUG hover contents structuring failed", ex, contents_raw)
+
+                hover_range = response.result.get("range")
+                range_obj = None
+                if hover_range is not None:
+                    try:
+                        range_obj = Converter.structure(hover_range, Range)
+                    except Exception as ex:
+                        print("DEBUG hover range structuring failed", ex, hover_range)
+
+                event = Hover(contents=contents or [], range=range_obj)
             else:
-                event = PluginHover(contents=[])  # null response
+                event = Hover(contents=[])  # null response
             event.message_id = response.id
-            
+
         elif method == "textDocument/foldingRange":
             event = MFoldingRanges(
                 message_id=response.id,
@@ -486,9 +481,19 @@ class Client:
             assert isinstance(event, PublishDiagnostics)
             return event
         elif request.method == "window/workDoneProgress/create":
-            ev = parse_request(WorkDoneProgressCreate)
-            self._progress_tokens_map[request.params['token']] = WorkDoneProgress
-            return parse_request(WorkDoneProgressCreate)
+            params = request.params or {}
+            token = params.get('token')
+            if token is not None:
+                self._progress_tokens_map[token] = WorkDoneProgress
+            try:
+                event = Converter.structure(params, WorkDoneProgressCreate)
+                assert isinstance(event, WorkDoneProgressCreate)
+            except Exception as ex:
+                print("DEBUG workDoneProgress/create structuring failed", ex, params)
+                event = WorkDoneProgressCreate(token=token)
+            event._client = self
+            event._id = request.id
+            return event
         elif request.method == "client/registerCapability":
             event = parse_request(RegisterCapabilityRequest)
             assert isinstance(event, RegisterCapabilityRequest)

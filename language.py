@@ -842,12 +842,18 @@ class Language:
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     first_item = msg.contents[0] if isinstance(msg.contents, list) and len(msg.contents) > 0 else msg.contents
                     if first_item: # if received anything
-                        if isinstance(first_item, (MarkedString, str)):
+                        if isinstance(first_item, str) or (hasattr(first_item, 'language') and hasattr(first_item, 'value')):
                             # for deprecated 'MarkedString' or 'str' default to 'markdown'
-                            markupkind = MarkupKind.MARKDOWN
+                            markupkind = MarkupKind.Markdown
                         else:
                             # can be a list (supposedly)
                             markupkind = getattr(first_item, 'kind', None)
+
+                            if isinstance(markupkind, str):
+                                try:
+                                    markupkind = MarkupKind(markupkind)
+                                except ValueError:
+                                    pass
 
                         filtered_cmds = self.scfg.filter_commands(self._caret_cmds)
                         Hint.show(msg.m_str(),
@@ -2003,8 +2009,8 @@ class ServerConfig:
                     _opts.update(_save)
                 self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, register_options=_opts))
         
-        if isinstance(docsync, int):
-            self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, register_options=self._default_opts))
+        elif isinstance(docsync, int):
+            docsync = {'change': docsync}
 
         #  OPEN, CLOSE
         if is_openclose:

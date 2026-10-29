@@ -162,7 +162,7 @@ class Hint:
         ### dialog Editor setup
         cls.ed.set_prop(PROP_RO, False)
         try:
-            if markupkind == MarkupKind.MARKDOWN:
+            if markupkind == MarkupKind.Markdown:
                 cls.ed.set_prop(PROP_LEXER_FILE, 'Markdown')
                 import html
                 text = html.unescape(text)
