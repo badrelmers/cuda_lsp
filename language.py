@@ -52,21 +52,6 @@ import urllib.parse
 
 from .sansio_lsp_client import client as lsp
 from .sansio_lsp_client import events
-from .sansio_lsp_client.structs import (
-        CompletionRegistrationOptions,
-        TextDocumentSyncKind,
-        Registration,
-        DiagnosticSeverity,
-        DocumentSymbol,
-        CompletionItemKind,
-        MarkupKind,
-        MarkedString,
-        FormattingOptions,
-        WorkspaceFolder,
-        InsertTextFormat,
-        CompletionContext,
-        CompletionTriggerKind,
-    )
     
 from .snippet_engine import Snippet, VS_SNIPPET
 
@@ -105,10 +90,10 @@ GOTO_EVENT_TYPES = {
     lsp_types.DeclarationResponse,
 }
 CALLABLE_COMPLETIONS = {
-    CompletionItemKind.Method,
-    CompletionItemKind.Function,
-    CompletionItemKind.Constructor,
-    #CompletionItemKind.Class,
+    lsp_types.CompletionItemKind.Method,
+    lsp_types.CompletionItemKind.Function,
+    lsp_types.CompletionItemKind.Constructor,
+    #lsp_types.CompletionItemKind.Class,
 }
 
 RequestPos = namedtuple('RequestPos', 'h_ed carets target_pos_caret cursor_ed')
@@ -425,7 +410,7 @@ class Language:
         if self._work_dir:
             # for now just a single folder in workspace
             root_uri = path_to_uri(self._work_dir)
-            return [ WorkspaceFolder(uri=root_uri, name='Root'), ]
+            return [ lsp_types.WorkspaceFolder(uri=root_uri, name='Root'), ]
         else:
             return None
 
@@ -539,7 +524,7 @@ class Language:
                     self._err_q.put(s)
         except Exception as ex:
             print(f'ErrReadException: {LOG_NAME}: {self.lang_str} - {ex}')
-        pass;       LOG and print(f'NOTE: err reader exited')
+        pass;       LOG and print(f'NOTE: err reader exited. LSP server exited.')
 
 
     def _read_loop(self):
@@ -1010,12 +995,12 @@ class Language:
             pass;       LOG and print('NOTE: send_changes return: no opts')
             return
 
-        docsynckind = TextDocumentSyncKind( opts.get('syncKind', TextDocumentSyncKind.None_) )
-        if docsynckind == TextDocumentSyncKind.None_:
+        docsynckind = lsp_types.TextDocumentSyncKind( opts.get('syncKind', lsp_types.TextDocumentSyncKind.None_) )
+        if docsynckind == lsp_types.TextDocumentSyncKind.None_:
             pass;       LOG and print('send_changes return: NONE sync')
             return
 
-        _is_whole_doc = docsynckind == TextDocumentSyncKind.Full
+        _is_whole_doc = docsynckind == lsp_types.TextDocumentSyncKind.Full
         _changes = eddoc.get_changes(whole_doc=_is_whole_doc)
         if not _changes:
             pass;       LOG and print('send_changes return: no changes')
@@ -1100,10 +1085,10 @@ class Language:
                 added = []
                 if self._work_dir:
                     old_root_uri = path_to_uri(self._work_dir)
-                    removed.append(WorkspaceFolder(uri=old_root_uri, name='Root'))
+                    removed.append(lsp_types.WorkspaceFolder(uri=old_root_uri, name='Root'))
                 if newroot:
                     new_root_uri = path_to_uri(newroot) if newroot else None
-                    added.append(WorkspaceFolder(uri=new_root_uri, name='Root'))
+                    added.append(lsp_types.WorkspaceFolder(uri=new_root_uri, name='Root'))
                 self._work_dir = newroot
 
                 self.client.did_change_workspace_folders(removed=removed, added=added)
@@ -1127,10 +1112,10 @@ class Language:
             
             if methodAttrName == 'completion':
                 if self._last_complete and self._last_complete.is_incomplete:
-                    triggerKind = CompletionTriggerKind(CompletionTriggerKind.TriggerForIncompleteCompletions)
+                    triggerKind = lsp_types.CompletionTriggerKind(lsp_types.CompletionTriggerKind.TriggerForIncompleteCompletions)
                 else:
-                    triggerKind = CompletionTriggerKind(CompletionTriggerKind.Invoked)
-                context = CompletionContext(trigger_kind=triggerKind)
+                    triggerKind = lsp_types.CompletionTriggerKind(lsp_types.CompletionTriggerKind.Invoked)
+                context = lsp_types.CompletionContext(trigger_kind=triggerKind)
                 id = clientMethod(docpos, context=context)
             else:
                 id = clientMethod(docpos)
@@ -1376,7 +1361,7 @@ class Language:
         def link_to_target(link): #SKIP
             """ returns: (uri, goto-range)
             """
-            if isinstance(link, Location):
+            if isinstance(link, lsp_types.Location):
                 return (link.uri, link.range)
             elif isinstance(link, lsp_types.LocationLink):
                 return (link.target_uri, link.target_selection_range)
@@ -1690,18 +1675,18 @@ TOKENS_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')
 DIAG_BM_TAG = app_proc(PROC_GET_UNIQUE_TAG, '') # jic
 _icons_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'icons')
 DIAG_BM_IC_PATHS = {
-    DiagnosticSeverity.Error       : os.path.join(_icons_dir, 'error.png'),
-    DiagnosticSeverity.Warning     : os.path.join(_icons_dir, 'warning.png'),
-    DiagnosticSeverity.Information : os.path.join(_icons_dir, 'information.png'),
-    DiagnosticSeverity.Hint        : os.path.join(_icons_dir, 'hint.png'),
+    lsp_types.DiagnosticSeverity.Error       : os.path.join(_icons_dir, 'error.png'),
+    lsp_types.DiagnosticSeverity.Warning     : os.path.join(_icons_dir, 'warning.png'),
+    lsp_types.DiagnosticSeverity.Information : os.path.join(_icons_dir, 'information.png'),
+    lsp_types.DiagnosticSeverity.Hint        : os.path.join(_icons_dir, 'hint.png'),
 }
 DIAG_BM_KINDS = {
-    DiagnosticSeverity.Error       : 50,
-    DiagnosticSeverity.Warning     : 51,
-    DiagnosticSeverity.Information : 52,
-    DiagnosticSeverity.Hint        : 53,
+    lsp_types.DiagnosticSeverity.Error       : 50,
+    lsp_types.DiagnosticSeverity.Warning     : 51,
+    lsp_types.DiagnosticSeverity.Information : 52,
+    lsp_types.DiagnosticSeverity.Hint        : 53,
 }
-DIAG_DEFAULT_SEVERITY = DiagnosticSeverity.Information # *shrug*
+DIAG_DEFAULT_SEVERITY = lsp_types.DiagnosticSeverity.Information # *shrug*
 
 class DiagnosticsMan:
     """ * Command.on_tab_change() ->
@@ -1968,7 +1953,7 @@ METHOD_WS_FOLDERS = 'workspace/workspaceFolders'
 CAPABILITY_DID_OPEN         = 'textDocument.didOpen'
 CAPABILITY_DID_CLOSE        = 'textDocument.didClose'
 CAPABILITY_DID_SAVE         = 'textDocument.didSave' # options: (supported, includeText)
-CAPABILITY_DID_CHANGE       = 'textDocument.didChange' # option: TextDocumentSyncKind
+CAPABILITY_DID_CHANGE       = 'textDocument.didChange' # option: lsp_types.TextDocumentSyncKind
 CAPABILITY_COMPLETION       = 'textDocument.completion'
 CAPABILITY_HOVER            = 'textDocument.hover'
 CAPABILITY_SIG_HELP         = 'textDocument.signatureHelp'
@@ -2019,7 +2004,7 @@ class ServerConfig:
         if 'capabilities' in capabilities:
             capabilities = capabilities['capabilities']
         
-        self.capabs = [] # struct.Registration
+        self.capabs = [] # lsp_types.Registration
         self.lang_str = lang_str
 
         self._default_selector = [{'language': langid}  for langid in langids]
@@ -2039,26 +2024,26 @@ class ServerConfig:
                 _opts = {**self._default_opts}
                 if isinstance(_save, dict):
                     _opts.update(_save)
-                self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, register_options=_opts))
+                self.capabs.append(lsp_types.Registration(id='0', method=METHOD_DID_SAVE, register_options=_opts))
         
         if isinstance(docsync, int):
-            self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, register_options=self._default_opts))
+            self.capabs.append(lsp_types.Registration(id='0', method=METHOD_DID_SAVE, register_options=self._default_opts))
 
         #  OPEN, CLOSE
         if is_openclose:
-            open = Registration(id='0', method=METHOD_DID_OPEN, register_options=self._default_opts)
-            close = Registration(id='0', method=METHOD_DID_CLOSE, register_options=self._default_opts)
+            open = lsp_types.Registration(id='0', method=METHOD_DID_OPEN, register_options=self._default_opts)
+            close = lsp_types.Registration(id='0', method=METHOD_DID_CLOSE, register_options=self._default_opts)
             self.capabs += [open, close]
 
         # CHANGE
         if isinstance(docsync, dict):
-            _default_sync = int(TextDocumentSyncKind.None_)
-            docsynckind = TextDocumentSyncKind(docsync.get('change', _default_sync))
+            _default_sync = int(lsp_types.TextDocumentSyncKind.None_)
+            docsynckind = lsp_types.TextDocumentSyncKind(docsync.get('change', _default_sync))
         else:
-            docsynckind = TextDocumentSyncKind(docsync)
+            docsynckind = lsp_types.TextDocumentSyncKind(docsync)
 
         _opts = {**self._default_opts, 'syncKind': docsynckind}
-        self.capabs.append(Registration(id='0', method=METHOD_DID_CHANGE, register_options=_opts))
+        self.capabs.append(lsp_types.Registration(id='0', method=METHOD_DID_CHANGE, register_options=_opts))
 
 
         ### WORKSPACE
@@ -2071,7 +2056,7 @@ class ServerConfig:
                 'supported': wsfolders.get('supported', False),
                 'changeNotifications': wsfolders.get('changeNotifications', False),
             }
-            _reg = Registration(id='0', method=METHOD_WS_FOLDERS, register_options=_opts)
+            _reg = lsp_types.Registration(id='0', method=METHOD_WS_FOLDERS, register_options=_opts)
             self.capabs.append(_reg)
 
 
@@ -2087,14 +2072,14 @@ class ServerConfig:
                 if 'documentSelector' in capval and not capval['documentSelector']:
                      del capval['documentSelector']
                 _opts.update(capval)
-            self.capabs.append(Registration(id='0', method=meth, register_options=_opts))
+            self.capabs.append(lsp_types.Registration(id='0', method=meth, register_options=_opts))
 
     def on_register(self, dynreg):
         """ process dynamic registration request: RegisterMethodRequest
         """
         # check for 'documentSelector' in registerOptions
         # "If set to null the document selector provided on the client side will be used." (c) LSP spec
-        reg: Registration
+        reg: lsp_types.Registration
         for reg in dynreg.registrations:
             if not isinstance(reg.register_options, dict):
                 reg.register_options = self._default_opts
@@ -2134,7 +2119,7 @@ class ServerConfig:
 
         filters = registration.register_options.get('documentSelector', [])
         # allowing empty selector on workspace methods  (ok?)
-        #   example: Registration(id='...', method='workspace/symbol', registerOptions={}),
+        #   example: lsp_types.Registration(id='...', method='workspace/symbol', registerOptions={}),
         if not filters:
             return (registration.method or '').startswith('workspace/')
 
@@ -2462,7 +2447,7 @@ class CompletionMan:
                                 insertText = label
                             filtered_items.append({
                                 'label': label,
-                                'kind' : CompletionItemKind.Text,
+                                'kind' : lsp_types.CompletionItemKind.Text,
                                 'insertText': insertText,
                             })
                         else:
@@ -2594,7 +2579,7 @@ class CompletionMan:
         
         words = ['{}\t{}\t{}|{}'.format(
                     add_html_tags(item, word1),
-                    short_version(item['kind'] and CompletionItemKind(item['kind']).name.lower() or ''),
+                    short_version(item['kind'] and lsp_types.CompletionItemKind(item['kind']).name.lower() or ''),
                     message_id, i)
                     for i,item in enumerate(items)
                 ]
@@ -2633,7 +2618,7 @@ class CompletionMan:
         
         line_txt = ed.get_text_line(y0)
         is_callable = item.get('kind') in CALLABLE_COMPLETIONS
-        is_snippet = item.get('insertTextFormat') == InsertTextFormat.Snippet
+        is_snippet = item.get('insertTextFormat') == lsp_types.InsertTextFormat.Snippet
 
         cached_x = self.carets[0][0]
         cached_x_diff = x0-cached_x

@@ -1,37 +1,12 @@
 import typing as t
-from lsprotocol import types as lsp_types
-
 import attrs
-
+from lsprotocol import converters, types as lsp_types
 from .structs import (
-    CallHierarchyItem,
-    CompletionList,
-    ConfigurationItem,
-    Diagnostic,
-    DocumentSymbol,
-    FoldingRange,
     Id,
-    InlayHint,
-    JSONDict,
-    MarkedString,
-    MarkupContent,
-    MessageActionItem,
-    MessageType,
-    ProgressToken,
-    Range,
-    Registration,
-    SignatureInformation,
-    SymbolInformation,
-    TextDocumentEdit,
-    TextEdit,
-    WorkspaceFolder,
-    WorkDoneProgressBeginValue,
-    WorkDoneProgressEndValue,
-    WorkDoneProgressKind,
-    WorkDoneProgressReportValue,
-    structure,
-    unstructure,
+    JSONDict,    
 )
+Converter = converters.get_converter()
+
 
 if t.TYPE_CHECKING:  # avoid import cycle at runtime, Only imported during type checking, not at runtime!
     from .client import Client
@@ -84,30 +59,30 @@ class Shutdown(Event):
 
 @attrs.define
 class ShowMessage(ServerNotification):
-    type: MessageType = attrs.field()
+    type: lsp_types.MessageType = attrs.field()
     message: str = attrs.field()
 
 
 @attrs.define
 class ShowMessageRequest(ServerRequest):
-    type: MessageType = attrs.field()
+    type: lsp_types.MessageType = attrs.field()
     message: str = attrs.field()
-    actions: t.Optional[t.List[MessageActionItem]] = attrs.field(default=None)
+    actions: t.Optional[t.List[lsp_types.MessageActionItem]] = attrs.field(default=None)
 
-    def reply(self, action: t.Optional[MessageActionItem] = None) -> None:
-        result = None if action is None else unstructure(action)
+    def reply(self, action: t.Optional[lsp_types.MessageActionItem] = None) -> None:
+        result = None if action is None else Converter.unstructure(action)
         self._client._send_response(id=self._id, result=result)
 
 
 @attrs.define
 class LogMessage(ServerNotification):
-    type: MessageType = attrs.field()
+    type: lsp_types.MessageType = attrs.field()
     message: str = attrs.field()
 
 
 @attrs.define
 class WorkDoneProgressCreate(ServerRequest):
-    token: ProgressToken = attrs.field()
+    token: lsp_types.ProgressToken = attrs.field()
 
     def reply(self) -> None:
         self._client._send_response(id=self._id, result=None)
@@ -115,11 +90,11 @@ class WorkDoneProgressCreate(ServerRequest):
 
 @attrs.define
 class Progress(ServerNotification):
-    token: ProgressToken = attrs.field()
+    token: lsp_types.ProgressToken = attrs.field()
     value: t.Union[
-        WorkDoneProgressBeginValue,
-        WorkDoneProgressReportValue,
-        WorkDoneProgressEndValue,
+        lsp_types.WorkDoneProgressBegin,
+        lsp_types.WorkDoneProgressReport,
+        lsp_types.WorkDoneProgressEnd,
     ] = attrs.field()
 
 
@@ -130,17 +105,17 @@ class WorkDoneProgress(Progress):
 
 @attrs.define
 class WorkDoneProgressBegin(WorkDoneProgress):
-    value: WorkDoneProgressBeginValue = attrs.field()
+    value: lsp_types.WorkDoneProgressBegin = attrs.field()
 
 
 @attrs.define
 class WorkDoneProgressReport(WorkDoneProgress):
-    value: WorkDoneProgressReportValue = attrs.field()
+    value: lsp_types.WorkDoneProgressReport = attrs.field()
 
 
 @attrs.define
 class WorkDoneProgressEnd(WorkDoneProgress):
-    value: WorkDoneProgressEndValue = attrs.field()
+    value: lsp_types.WorkDoneProgressEnd = attrs.field()
 
 
 @attrs.define
@@ -151,13 +126,13 @@ class Completion(Event):
 
 @attrs.define
 class WillSaveWaitUntilEdits(Event):
-    edits: t.Optional[t.List[TextEdit]] = attrs.field(default=None)
+    edits: t.Optional[t.List[lsp_types.TextEdit]] = attrs.field(default=None)
 
 
 @attrs.define
 class PublishDiagnostics(ServerNotification):
     uri: str = attrs.field()
-    diagnostics: t.List[Diagnostic] = attrs.field()
+    diagnostics: t.List[lsp_types.Diagnostic] = attrs.field()
 
 
 @attrs.define
@@ -168,7 +143,7 @@ class WorkspaceProjectInitializationComplete(ServerNotification):
 
 @attrs.define(kw_only=True)
 class SignatureHelp(MethodResponse):
-    signatures: t.List[SignatureInformation] = attrs.field()
+    signatures: t.List[lsp_types.SignatureInformation] = attrs.field()
     activeSignature: t.Optional[int] = attrs.field(default=None)
     activeParameter: t.Optional[int] = attrs.field(default=None)
 
@@ -197,39 +172,39 @@ class SemanticTokens(Event):
 
 @attrs.define
 class WorkspaceEdit(MethodResponse):
-    documentChanges: t.Optional[t.List[TextDocumentEdit]] = attrs.field(default=None)
-    changes: t.Optional[t.Dict[str, t.List[TextEdit]]] = attrs.field(default=None)
+    documentChanges: t.Optional[t.List[lsp_types.TextDocumentEdit]] = attrs.field(default=None)
+    changes: t.Optional[t.Dict[str, t.List[lsp_types.TextEdit]]] = attrs.field(default=None)
 
 @attrs.define
 class MCallHierarchItems(Event):
-    result: t.Union[t.List[CallHierarchyItem], None] = attrs.field()
+    result: t.Union[t.List[lsp_types.CallHierarchyItem], None] = attrs.field()
     
 
 @attrs.define
 class MWorkspaceSymbols(MethodResponse):
-    result: t.Union[t.List[SymbolInformation], None] = attrs.field()
+    result: t.Union[t.List[lsp_types.SymbolInformation], None] = attrs.field()
 
 
 @attrs.define
 class MFoldingRanges(MethodResponse):
-    result: t.Optional[t.List[FoldingRange]] = attrs.field(default=None)
+    result: t.Optional[t.List[lsp_types.FoldingRange]] = attrs.field(default=None)
 
 
 @attrs.define
 class MInlayHints(MethodResponse):
-    result: t.Optional[t.List[InlayHint]] = attrs.field(default=None)
+    result: t.Optional[t.List[lsp_types.InlayHint]] = attrs.field(default=None)
 
 
 @attrs.define
 class MDocumentSymbols(MethodResponse):
-    result: t.Union[t.List[SymbolInformation], t.List[DocumentSymbol], None] = attrs.field(
+    result: t.Union[t.List[lsp_types.SymbolInformation], t.List[lsp_types.DocumentSymbol], None] = attrs.field(
         default=None
     )
 
 
 @attrs.define
 class RegisterCapabilityRequest(ServerRequest):
-    registrations: t.List[Registration] = attrs.field()
+    registrations: t.List[lsp_types.Registration] = attrs.field()
 
     def reply(self) -> None:
         self._client._send_response(id=self._id, result={})
@@ -237,16 +212,16 @@ class RegisterCapabilityRequest(ServerRequest):
 
 @attrs.define
 class WorkspaceFolders(ServerRequest):
-    result: t.Optional[t.List[WorkspaceFolder]] = attrs.field(default=None)
+    result: t.Optional[t.List[lsp_types.WorkspaceFolder]] = attrs.field(default=None)
 
-    def reply(self, folders: t.Optional[t.List[WorkspaceFolder]] = None) -> None:
-        result = None if folders is None else [unstructure(f) for f in folders]
+    def reply(self, folders: t.Optional[t.List[lsp_types.WorkspaceFolder]] = None) -> None:
+        result = None if folders is None else [Converter.unstructure(f) for f in folders]
         self._client._send_response(id=self._id, result=result)
 
 
 @attrs.define
 class ConfigurationRequest(ServerRequest):
-    items: t.List[ConfigurationItem] = attrs.field()
+    items: t.List[lsp_types.ConfigurationItem] = attrs.field()
 
     def reply(self, result: t.List[t.Any]) -> None:
         self._client._send_response(id=self._id, result=result)

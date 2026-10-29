@@ -2,7 +2,7 @@ import json
 import re
 import typing as t
 
-from .structs import JSONDict, JSONList, Request, Response, Id
+from .structs import JSONDict, JSONList, Id
 
 _CONTENT_TYPE_PARAM_RE = re.compile(r'(\w+)\s*=\s*(?:(?:"([^"]*)")|([^;,\s]*))')
 

@@ -72,15 +72,15 @@ caption=LSP Client\Configure server for current project
 method=config_server
 
 
-;[item50]
-;section=commands
-;caption=LSP Client\Workspace symbols (broken)
-;method=dbg_workspace_symbols
-;
-;[item51]
-;section=commands
-;caption=LSP Client\Call hierarchy (broken)
-;method=dbg_call_hierarchy_in
+[item50]
+section=commands
+caption=LSP Client\Workspace symbols (broken)
+method=dbg_workspace_symbols
+
+[item51]
+section=commands
+caption=LSP Client\Call hierarchy (broken)
+method=dbg_call_hierarchy_in
 
 
 [item70]

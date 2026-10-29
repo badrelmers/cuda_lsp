@@ -1,18 +1,7 @@
 import enum
 #import pprint
 import typing as t
-
-
-import lsprotocol.types as lsp_types
 import attrs
-
-# This manually links all strings to their classes within the library itself
-# so you never have to think about it again. this is not needed anymore because now we use directly response calsses from lsprotocol like DefinitionResponse which automatically resolve the quoted types. it may be needed only by things like DefinitionResult...etc
-# for name, obj in lsp_types.__dict__.items():
-    # if isinstance(obj, type) and attrs.has(obj):
-        # attrs.resolve_types(obj, globalns=lsp_types.__dict__)
-        
-        
 from .events import (
     Completion,
     ConfigurationRequest,
@@ -25,7 +14,6 @@ from .events import (
     MInlayHints,
     Metadata,
     MWorkspaceSymbols,
-    MethodResponse,
     Progress,
     PublishDiagnostics,
     RegisterCapabilityRequest,
@@ -49,33 +37,22 @@ from .events import (
 )
 from .io_handler import _make_request, _make_response, _parse_messages
 from .structs import (
-    CompletionContext,
-    CompletionItem,
-    CompletionItemKind,
-    TextDocumentContentChangeEvent,
-    CompletionList,
-    Converter,
-    FormattingOptions,
     Id,
     JSONDict,
     JSONList,
-    MWorkDoneProgressKind,
-    Range,
     Request,
-    Response,
-    SymbolKind,
-    TextDocumentEdit,
-    TextDocumentIdentifier,
-    TextDocumentItem,
-    TextDocumentPosition,
-    TextDocumentSaveReason,
-    TextEdit,
-    VersionedTextDocumentIdentifier,
-    WorkspaceFolder,
-    unstructure,
 )
+from lsprotocol import converters, types as lsp_types
+Converter = converters.get_converter()
 
 
+# This manually links all strings to their classes within the library itself
+# so you never have to think about it again. this is not needed anymore because now we use directly response calsses from lsprotocol like DefinitionResponse which automatically resolve the quoted types. it may be needed only by things like DefinitionResult...etc
+# for name, obj in lsp_types.__dict__.items():
+    # if isinstance(obj, type) and attrs.has(obj):
+        # attrs.resolve_types(obj, globalns=lsp_types.__dict__)
+        
+    
 class ClientState(enum.Enum):
     NOT_INITIALIZED = enum.auto()
     WAITING_FOR_INITIALIZED = enum.auto()
@@ -100,7 +77,7 @@ CAPABILITIES: JSONDict = {
         "completion": {
             "dynamicRegistration": True,
             "completionItem": {"snippetSupport": True},
-            "completionItemKind": {"valueSet": list(CompletionItemKind)},
+            "completionItemKind": {"valueSet": list(lsp_types.CompletionItemKind)},
             "contextSupport": True,
         },
         "hover": {
@@ -135,7 +112,7 @@ CAPABILITIES: JSONDict = {
         "documentSymbol": {
             "hierarchicalDocumentSymbolSupport": True,
             "dynamicRegistration": True,
-            "symbolKind": {"valueSet": list(SymbolKind)},
+            "symbolKind": {"valueSet": list(lsp_types.SymbolKind)},
         },
     },
     "window": {
@@ -150,7 +127,7 @@ CAPABILITIES: JSONDict = {
     "workspace": {
         "symbol": {
             "dynamicRegistration": True,
-            "symbolKind": {"valueSet": list(SymbolKind)},
+            "symbolKind": {"valueSet": list(lsp_types.SymbolKind)},
         },
         "workspaceFolders": True,
         # TODO 'workspaceEdit':..., #'applyEdit':..., 'executeCommand':...,
@@ -172,7 +149,7 @@ class Client:
         self,
         process_id: t.Optional[int] = None,
         root_uri: t.Optional[str] = None,
-        workspace_folders: t.Optional[t.List[WorkspaceFolder]] = None,
+        workspace_folders: t.Optional[t.List[lsp_types.WorkspaceFolder]] = None,
         trace: str = "off",
         settings = {},
     ) -> None:
@@ -206,7 +183,7 @@ class Client:
                 "workspaceFolders": (
                     None
                     if workspace_folders is None
-                    else [unstructure(f) for f in workspace_folders]
+                    else [Converter.unstructure(f) for f in workspace_folders]
                 ),
                 "trace": trace,
                 "capabilities": CAPABILITIES,
@@ -312,7 +289,7 @@ class Client:
             edits = None
             if isinstance(result, list):
                 edits = [
-                    Converter.structure(entry, TextEdit) for entry in result
+                    Converter.structure(entry, lsp_types.TextEdit) for entry in result
                 ]
             event = WillSaveWaitUntilEdits(edits=edits)
 
@@ -352,7 +329,7 @@ class Client:
             if result is not None and isinstance(result, dict):
                 if "documentChanges" in result:
                     document_changes = [
-                        Converter.structure(change, TextDocumentEdit)
+                        Converter.structure(change, lsp_types.TextDocumentEdit)
                         for change in result["documentChanges"]
                     ]
                     event = WorkspaceEdit(
@@ -484,14 +461,13 @@ class Client:
             if progress_type == WorkDoneProgress:
                 # Safely drill into nested kind
                 value = params.get('value', {})
-                kind_str = value.get('kind')
-                kind = MWorkDoneProgressKind(kind_str)
+                kind = value.get('kind')
 
-                if kind == MWorkDoneProgressKind.BEGIN:
+                if kind == "begin":
                     return parse_request(WorkDoneProgressBegin)
-                elif kind == MWorkDoneProgressKind.REPORT:
+                elif kind == "report":
                     return parse_request(WorkDoneProgressReport)
-                elif kind == MWorkDoneProgressKind.END:
+                elif kind == "end":
                     if token in self._progress_tokens_map:
                         del self._progress_tokens_map[token] # prevent the dictionary from growing indefinitely.
                     return parse_request(WorkDoneProgressEnd)
@@ -548,9 +524,9 @@ class Client:
             method="$/cancelRequest", params={"id": self._id_counter - 1}
         )
 
-    def did_open(self, text_document: TextDocumentItem) -> None:
+    def did_open(self, text_document: lsp_types.TextDocumentItem) -> None:
         assert self._state == ClientState.NORMAL
-        td_dict = unstructure(text_document)
+        td_dict = Converter.unstructure(text_document)
         print(f"DEBUG did_open: uri={td_dict.get('uri')}, languageId={td_dict.get('languageId')}")
         print(f"DEBUG did_open: unstructured type = {type(td_dict)}")
         print(f"DEBUG did_open: text length = {len(td_dict.get('text', ''))}")
@@ -562,15 +538,15 @@ class Client:
 
     def did_change(
         self,
-        text_document: VersionedTextDocumentIdentifier,
-        content_changes: t.List[TextDocumentContentChangeEvent],
+        text_document: lsp_types.VersionedTextDocumentIdentifier,
+        content_changes: t.List[lsp_types.TextDocumentContentChangeEvent],
     ) -> None:
         assert self._state == ClientState.NORMAL
-        content_changes_payload = [unstructure(evt) for evt in content_changes]
+        content_changes_payload = [Converter.unstructure(evt) for evt in content_changes]
         self._send_notification(
             method="textDocument/didChange",
             params={
-                "textDocument": unstructure(text_document),
+                "textDocument": Converter.unstructure(text_document),
                 "contentChanges": content_changes_payload,
             },
         )
@@ -582,46 +558,46 @@ class Client:
         )
 
     def will_save(
-        self, text_document: TextDocumentIdentifier, reason: TextDocumentSaveReason
+        self, text_document: lsp_types.TextDocumentIdentifier, reason: lsp_types.TextDocumentSaveReason
     ) -> None:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/willSave",
-            params={"textDocument": unstructure(text_document), "reason": reason.value},
+            params={"textDocument": Converter.unstructure(text_document), "reason": reason.value},
         )
 
     def will_save_wait_until(
-        self, text_document: TextDocumentIdentifier, reason: TextDocumentSaveReason
+        self, text_document: lsp_types.TextDocumentIdentifier, reason: lsp_types.TextDocumentSaveReason
     ) -> None:
         assert self._state == ClientState.NORMAL
         self._send_request(
             method="textDocument/willSaveWaitUntil",
-            params={"textDocument": unstructure(text_document), "reason": reason.value},
+            params={"textDocument": Converter.unstructure(text_document), "reason": reason.value},
         )
 
     def did_save(
-        self, text_document: TextDocumentIdentifier, text: t.Optional[str] = None
+        self, text_document: lsp_types.TextDocumentIdentifier, text: t.Optional[str] = None
     ) -> None:
         assert self._state == ClientState.NORMAL
-        params: t.Dict[str, t.Any] = {"textDocument": unstructure(text_document)}
+        params: t.Dict[str, t.Any] = {"textDocument": Converter.unstructure(text_document)}
         if text is not None:
             params["text"] = text
         self._send_notification(method="textDocument/didSave", params=params)
 
-    def did_close(self, text_document: TextDocumentIdentifier) -> None:
+    def did_close(self, text_document: lsp_types.TextDocumentIdentifier) -> None:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/didClose",
-            params={"textDocument": unstructure(text_document)},
+            params={"textDocument": Converter.unstructure(text_document)},
         )
 
     def did_change_workspace_folders(
-        self, added: t.List[WorkspaceFolder], removed: t.List[WorkspaceFolder]
+        self, added: t.List[lsp_types.WorkspaceFolder], removed: t.List[lsp_types.WorkspaceFolder]
     ) -> None:
         assert self._state == ClientState.NORMAL
         params = {
-            "added": [unstructure(f) for f in added],
-            "removed": [unstructure(f) for f in removed],
+            "added": [Converter.unstructure(f) for f in added],
+            "removed": [Converter.unstructure(f) for f in removed],
         }
         self._send_notification(
             method="workspace/didChangeWorkspaceFolders", params=params
@@ -629,145 +605,145 @@ class Client:
 
     def completion(
         self,
-        text_document_position: TextDocumentPosition,
-        context: t.Optional[CompletionContext] = None,
+        text_document_position: lsp_types.TextDocumentPositionParams,
+        context: t.Optional[lsp_types.CompletionContext] = None,
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {}
-        params.update(unstructure(text_document_position))
+        params.update(Converter.unstructure(text_document_position))
         if context is not None:
             params.update( {
-                'context': unstructure(context)
+                'context': Converter.unstructure(context)
             } )
         return self._send_request(method="textDocument/completion", params=params)
 
     def semantic_tokens(
         self,
-        text_document: TextDocumentIdentifier,
+        text_document: lsp_types.TextDocumentIdentifier,
     ) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/semanticTokens/full",
-            params={"textDocument": unstructure(text_document)},
+            params={"textDocument": Converter.unstructure(text_document)},
         )
 
     def rename(
         self,
-        text_document_position: TextDocumentPosition,
+        text_document_position: lsp_types.TextDocumentPositionParams,
         new_name: str,
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
-            **unstructure(text_document_position),
+            **Converter.unstructure(text_document_position),
             "newName": new_name,
         }
         return self._send_request(method="textDocument/rename", params=params)
 
-    def hover(self, text_document_position: TextDocumentPosition) -> Id:
+    def hover(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
-            method="textDocument/hover", params=unstructure(text_document_position)
+            method="textDocument/hover", params=Converter.unstructure(text_document_position)
         )
 
-    def folding_range(self, text_document: TextDocumentIdentifier) -> Id:
+    def folding_range(self, text_document: lsp_types.TextDocumentIdentifier) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/foldingRange",
-            params={"textDocument": unstructure(text_document)},
+            params={"textDocument": Converter.unstructure(text_document)},
         )
 
-    def signatureHelp(self, text_document_position: TextDocumentPosition) -> Id:
+    def signatureHelp(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/signatureHelp",
-            params=unstructure(text_document_position),
+            params=Converter.unstructure(text_document_position),
         )
 
-    def definition(self, text_document_position: TextDocumentPosition) -> Id:
+    def definition(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
-            method="textDocument/definition", params=unstructure(text_document_position)
+            method="textDocument/definition", params=Converter.unstructure(text_document_position)
         )
 
-    def declaration(self, text_document_position: TextDocumentPosition) -> Id:
+    def declaration(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/declaration",
-            params=unstructure(text_document_position),
+            params=Converter.unstructure(text_document_position),
         )
 
-    def inlay_hint(self, text_document: TextDocumentIdentifier, range: Range) -> Id:
+    def inlay_hint(self, text_document: lsp_types.TextDocumentIdentifier, range: lsp_types.Range) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/inlayHint",
             params={
-                "textDocument": unstructure(text_document),
-                "range": unstructure(range),
+                "textDocument": Converter.unstructure(text_document),
+                "range": Converter.unstructure(range),
             },
         )
 
-    def typeDefinition(self, text_document_position: TextDocumentPosition) -> Id:
+    def typeDefinition(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/typeDefinition",
-            params=unstructure(text_document_position),
+            params=Converter.unstructure(text_document_position),
         )
 
-    def references(self, text_document_position: TextDocumentPosition) -> Id:
+    def references(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
             "context": {"includeDeclaration": True},
-            **unstructure(text_document_position),
+            **Converter.unstructure(text_document_position),
         }
         return self._send_request(method="textDocument/references", params=params)
 
     # TODO incomplete
-    def prepareCallHierarchy(self, text_document_position: TextDocumentPosition) -> Id:
+    def prepareCallHierarchy(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/prepareCallHierarchy",
-            params=unstructure(text_document_position),
+            params=Converter.unstructure(text_document_position),
         )
 
-    def implementation(self, text_document_position: TextDocumentPosition) -> Id:
+    def implementation(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/implementation",
-            params=unstructure(text_document_position),
+            params=Converter.unstructure(text_document_position),
         )
 
     def workspace_symbol(self, query: str = "") -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(method="workspace/symbol", params={"query": query})
 
-    def documentSymbol(self, text_document: TextDocumentIdentifier) -> Id:
+    def documentSymbol(self, text_document: lsp_types.TextDocumentIdentifier) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/documentSymbol",
-            params={"textDocument": unstructure(text_document)},
+            params={"textDocument": Converter.unstructure(text_document)},
         )
 
     def formatting(
-        self, text_document: TextDocumentIdentifier, options: FormattingOptions
+        self, text_document: lsp_types.TextDocumentIdentifier, options: lsp_types.FormattingOptions
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
-            "textDocument": unstructure(text_document),
-            "options": unstructure(options),
+            "textDocument": Converter.unstructure(text_document),
+            "options": Converter.unstructure(options),
         }
         return self._send_request(method="textDocument/formatting", params=params)
 
     def rangeFormatting(
         self,
-        text_document: TextDocumentIdentifier,
-        range: Range,
-        options: FormattingOptions,
+        text_document: lsp_types.TextDocumentIdentifier,
+        range: lsp_types.Range,
+        options: lsp_types.FormattingOptions,
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
-            "textDocument": unstructure(text_document),
-            "range": unstructure(range),
-            "options": unstructure(options),
+            "textDocument": Converter.unstructure(text_document),
+            "range": Converter.unstructure(range),
+            "options": Converter.unstructure(options),
         }
         return self._send_request(method="textDocument/rangeFormatting", params=params)
 
