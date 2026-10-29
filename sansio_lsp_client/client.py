@@ -60,6 +60,11 @@ from .structs import (
     DiagnosticSeverity,
     DiagnosticTag,
     DiagnosticRelatedInformation,
+    Location,
+    LocationLink,
+    MarkedString,
+    MarkupContent,
+    MarkupKind,
     Range,
     Request,
     Response,
@@ -77,6 +82,94 @@ from .structs import (
     WorkDoneProgressReportValue,
     WorkDoneProgressEndValue,
 )
+
+
+_range_adapter = TypeAdapter(Range)
+
+
+def _structure_range(value: t.Any) -> t.Optional[Range]:
+    if value is None or isinstance(value, Range):
+        return value
+    return _range_adapter.validate_python(value)
+
+
+def _coerce_markup_kind(kind: t.Any) -> MarkupKind:
+    if isinstance(kind, MarkupKind):
+        return kind
+    if isinstance(kind, str):
+        try:
+            return MarkupKind(kind)
+        except ValueError:
+            return MarkupKind.MARKDOWN
+    return MarkupKind.MARKDOWN
+
+
+def _structure_marked_string(value: t.Any) -> t.Union[MarkedString, str]:
+    if isinstance(value, MarkedString):
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        language = value.get("language")
+        text = value.get("value", "")
+        if language is not None:
+            return MarkedString(language=language, value=text)
+        return text
+    return str(value)
+
+
+def _structure_hover_contents(value: t.Any) -> t.Union[
+    t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
+]:
+    if value is None:
+        return []
+    if isinstance(value, (str, MarkedString, MarkupContent)):
+        if isinstance(value, MarkupContent):
+            value.kind = _coerce_markup_kind(value.kind)
+        return value
+    if isinstance(value, dict):
+        if "kind" in value and "value" in value:
+            return MarkupContent(
+                kind=_coerce_markup_kind(value.get("kind")),
+                value=value.get("value", ""),
+            )
+        return _structure_marked_string(value)
+    if isinstance(value, list):
+        return [
+            _structure_marked_string(item)
+            for item in value
+        ]
+    return value
+
+
+def _structure_location_like(value: t.Any) -> t.Union[Location, LocationLink, t.Any]:
+    if isinstance(value, (Location, LocationLink)):
+        return value
+    if not isinstance(value, dict):
+        return value
+    if "targetUri" in value or "targetRange" in value:
+        data: dict[str, t.Any] = {
+            "targetUri": value.get("targetUri", ""),
+            "targetRange": _structure_range(value.get("targetRange")),
+            "targetSelectionRange": _structure_range(value.get("targetSelectionRange")),
+        }
+        origin = value.get("originSelectionRange")
+        if origin is not None:
+            data["originSelectionRange"] = _structure_range(origin)
+        return LocationLink(**data)
+    if "uri" in value and "range" in value:
+        return Location(uri=value["uri"], range=_structure_range(value.get("range")))
+    return value
+
+
+def _structure_location_result(value: t.Any) -> t.Union[
+    t.List[t.Union[Location, LocationLink]], Location, LocationLink, None
+]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [_structure_location_like(item) for item in value]
+    return _structure_location_like(value)
 
 
 class ClientState(enum.Enum):
@@ -321,7 +414,9 @@ class Client:
         elif method == "textDocument/hover":
             if response.result is not None:
                 try:
-                    event = Hover.model_validate(response.result)
+                    structured_contents = _structure_hover_contents(response.result.get("contents"))
+                    structured_range = _structure_range(response.result.get("range"))
+                    event = Hover(contents=structured_contents, range=structured_range)
                 except ValidationError as exc:
                     raise ValidationError(
                         f"While structuring Hover: {exc} | payload={response.result}"
@@ -382,9 +477,8 @@ class Client:
         #GOTOs
         elif method == "textDocument/definition":
             try:
-                event = TypeAdapter(Definition).validate_python(
-                    {"result": response.result}
-                )
+                structured_result = _structure_location_result(response.result)
+                event = Definition(result=structured_result)
             except ValidationError as exc:
                 raise ValidationError(
                     f"While structuring Definition: {exc} | payload={response.result}"
@@ -398,9 +492,8 @@ class Client:
 
         elif method == "textDocument/implementation":
             try:
-                event = TypeAdapter(Implementation).validate_python(
-                    {"result": response.result}
-                )
+                structured_result = _structure_location_result(response.result)
+                event = Implementation(result=structured_result)
             except ValidationError as exc:
                 raise ValidationError(
                     f"While structuring Implementation: {exc} | payload={response.result}"
@@ -413,9 +506,8 @@ class Client:
 
         elif method == "textDocument/typeDefinition":
             try:
-                event = TypeAdapter(TypeDefinition).validate_python(
-                    {"result": response.result}
-                )
+                structured_result = _structure_location_result(response.result)
+                event = TypeDefinition(result=structured_result)
             except ValidationError as exc:
                 raise ValidationError(
                     f"While structuring TypeDefinition: {exc} | payload={response.result}"

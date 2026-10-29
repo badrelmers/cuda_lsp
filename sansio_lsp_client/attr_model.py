@@ -14,6 +14,8 @@ __all__ = [
     "converter",
 ]
 
+# Create converter instance with better configuration
+# forbid_extra_keys = Don't fail on unknown keys from server
 converter = Converter(forbid_extra_keys=False)
 
 
