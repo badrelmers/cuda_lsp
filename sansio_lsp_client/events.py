@@ -43,7 +43,7 @@ class Event:
     pass
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class MethodResponse(Event):
     message_id: t.Optional[Id] = None
 
@@ -162,7 +162,7 @@ class WorkspaceProjectInitializationComplete(ServerNotification):
     pass
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class Hover(MethodResponse):
     contents: t.Union[
         t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
@@ -182,7 +182,7 @@ class Hover(MethodResponse):
         return item_str(self.contents)
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class SignatureHelp(MethodResponse):
     signatures: t.List[SignatureInformation] = attrs.field()
     activeSignature: t.Optional[int] = attrs.field(default=None)
@@ -221,7 +221,7 @@ class WorkspaceEdit(MethodResponse):
     changes: t.Optional[t.Dict[str, t.List[TextEdit]]] = attrs.field(default=None)
 
 
-@attrs.define
+@attrs.define(kw_only=True)
 class References(MethodResponse):
     result: t.Union[t.List[Location], None] = attrs.field()
 
