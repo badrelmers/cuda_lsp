@@ -102,7 +102,7 @@ MWorkDoneProgressKind = WorkDoneProgressKind
 def _range_from_positions(change_start: Position, change_end: Position) -> Range:
     return Range(start=change_start, end=change_end)
 
-
+#TODO dellllll
 def make_text_document_content_change_event(
     change_start: Position,
     change_end: Position,
@@ -117,7 +117,7 @@ def make_text_document_content_change_event(
         range_length=range_length,
     )
 
-
+#TODO dellllll
 def make_whole_document_change_event(change_text: str) -> lsp_types.TextDocumentContentChangeWholeDocument:
     return lsp_types.TextDocumentContentChangeWholeDocument(text=change_text)
 

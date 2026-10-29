@@ -13,6 +13,8 @@ class DocBook:
     def new_doc(self, ed):
         global structs
         from .sansio_lsp_client import structs
+        global lsp_types
+        from lsprotocol import types as lsp_types
 
         doc = EditorDoc(ed)
         self.docs[doc.uri] = doc
@@ -101,7 +103,7 @@ class EditorDoc:
         if oldtxt == self._txt:
             return []
         if whole_doc:
-            _ch = structs.TextDocumentContentChangeEvent.whole_document_change(change_text=self._txt)
+            _ch = lsp_types.TextDocumentContentChangeWholeDocument(text=self._txt)
             return [_ch]
 
         oldspl = oldtxt.splitlines(keepends=True)
@@ -117,7 +119,7 @@ class EditorDoc:
             if time.time() - _start_time > 0.1:
                 # taken too long, send whole doc
                 changes.clear()
-                _ch = structs.TextDocumentContentChangeEvent.whole_document_change(change_text=self._txt)
+                _ch = lsp_types.TextDocumentContentChangeWholeDocument(text=self._txt)
                 changes.append(_ch)
                 break
 
@@ -161,7 +163,10 @@ class EditorDoc:
             else:
                 raise Exception('INVALID opcodes: {opc}')
 
-            change_ev = structs.TextDocumentContentChangeEvent(text=change_str, range=range_)
+            change_ev = lsp_types.TextDocumentContentChangePartial(
+                range=range_,
+                text=change_str,
+            )
             changes.append(change_ev)
         #end while
 
@@ -194,15 +199,15 @@ class EditorDoc:
 
         _docid = self.get_docid()
         _pos = structs.Position(line=y1, character=x1)
-        docpos = structs.TextDocumentPosition(textDocument=_docid, position=_pos)
+        docpos = structs.TextDocumentPosition(text_document=_docid, position=_pos)
         return docpos
 
     def get_textdoc(self):
         doc = structs.TextDocumentItem(
-            uri         = self.uri,
-            languageId  = self.langid,
-            version     = self.ver,
-            text        = self.txt,
+            uri=self.uri,
+            language_id=self.langid,
+            version=self.ver,
+            text=self.txt,
         )
         return doc
 
@@ -211,11 +216,11 @@ class EditorDoc:
 
     def get_ed_format_opts(self):
         return structs.FormattingOptions(
-            tabSize                 = self.ed.get_prop(PROP_TAB_SIZE),
-            insertSpaces            = self.ed.get_prop(PROP_TAB_SPACES),
-            trimTrailingWhitespace  = self.ed.get_prop(PROP_SAVING_TRIM_SPACES),
-            insertFinalNewline      = self.ed.get_prop(PROP_SAVING_FORCE_FINAL_EOL),
-            trimFinalNewlines       = self.ed.get_prop(PROP_SAVING_TRIM_FINAL_EMPTY_LINES),
+            tab_size=self.ed.get_prop(PROP_TAB_SIZE),
+            insert_spaces=self.ed.get_prop(PROP_TAB_SPACES),
+            trim_trailing_whitespace=self.ed.get_prop(PROP_SAVING_TRIM_SPACES),
+            insert_final_newline=self.ed.get_prop(PROP_SAVING_FORCE_FINAL_EOL),
+            trim_final_newlines=self.ed.get_prop(PROP_SAVING_TRIM_FINAL_EMPTY_LINES),
         )
 
     def get_selection_range(self):

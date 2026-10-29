@@ -236,6 +236,11 @@ class Client:
     def _send_notification(
         self, method: str, params: t.Optional[JSONDict] = None
     ) -> None:
+        print(f"DEBUG _send_notification: method={method}")
+        if method == "initialized":
+            print(f"DEBUG: Sending initialized notification")
+        if method == "textDocument/didOpen":
+            print(f"DEBUG: Sending didOpen for uri: {params.get('textDocument', {}).get('uri') if params else 'unknown'}")
         self._send_buf += _make_request(method=method, params=params)
 
     def _send_response(
@@ -521,10 +526,15 @@ class Client:
 
     def did_open(self, text_document: TextDocumentItem) -> None:
         assert self._state == ClientState.NORMAL
+        td_dict = unstructure(text_document)
+        print(f"DEBUG did_open: uri={td_dict.get('uri')}, languageId={td_dict.get('languageId')}")
+        print(f"DEBUG did_open: unstructured type = {type(td_dict)}")
+        print(f"DEBUG did_open: text length = {len(td_dict.get('text', ''))}")
         self._send_notification(
             method="textDocument/didOpen",
-            params={"textDocument": unstructure(text_document)},
+            params={"textDocument": td_dict},
         )
+
 
     def did_change(
         self,

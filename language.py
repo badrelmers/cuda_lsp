@@ -549,6 +549,7 @@ class Language:
 
         if msgtype == events.Initialized:
             self.scfg = ServerConfig(msg, self.langids, self.lang_str)
+            print("ServerConfig msg",msg)
             app_proc(PROC_EXEC_PLUGIN, 'cuda_lsp,on_lang_inited,'+self.name)
 
         elif msgtype == events.RegisterCapabilityRequest:
@@ -1725,6 +1726,12 @@ AUTO_METHODS = {
 class ServerConfig:
     def __init__(self, initialized, langids, lang_str):
         capabilities = initialized.capabilities
+        print("===ServerConfig initialized",initialized)
+        print("===capabilities",capabilities)
+        # CRITICAL FIX: The capabilities might be nested under 'capabilities' key
+        if 'capabilities' in capabilities:
+            capabilities = capabilities['capabilities']
+        
         self.capabs = [] # struct.Registration
         self.lang_str = lang_str
 
