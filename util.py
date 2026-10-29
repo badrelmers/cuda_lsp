@@ -161,24 +161,26 @@ def split_text_by_length(text, max_length, prepare_for_corner=False):
     lines_out = []
     for line in text.split('\n'):
         if prepare_for_corner:
-            line = re.sub(r"^\[.*?Err.*?\]:\s*" , "⛔️ ", line) 
-            line = re.sub(r"^\[.*?Wrn.*?\]:\s*" , "⚠️ ", line) 
-            line = re.sub(r"^\[.*?Inf.*?\]:\s*" , "ℹ️ ", line) 
-            line = re.sub(r"^\[.*?Hint.*?\]:\s*", "📜️ ", line) 
+            line = re.sub(r"^\[.*?Error.*?\]:\s*" , "[X] ", line)
+            line = re.sub(r"^\[.*?Warning.*?\]:\s*" , "[!] ", line)
+            line = re.sub(r"^\[.*?Information.*?\]:\s*" , "[i] ", line)
+            line = re.sub(r"^\[.*?Hint.*?\]:\s*", "[H] ", line)
         words = line.split()
         parts = []
         current_part = ''
         for word in words:
-            if len(current_part) + len(word) <= max_length:
+            # Check length against max_length
+            if len(current_part) + len(word) + (1 if current_part else 0) <= max_length:
                 if current_part:
                     current_part += ' ' + word
                 else:
                     current_part = word
             else:
-                parts.append(current_part)
+                # Add a trailing space because text touch the edge of cudatext, it needs a padding
+                parts.append(current_part + " ")
                 current_part = word
         if current_part:
-            parts.append(current_part)
+            parts.append(current_part + " ")
         lines_out.extend(parts)
     return '\n'.join(lines_out)
 

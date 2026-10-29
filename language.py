@@ -1507,7 +1507,7 @@ class DiagnosticsMan:
                     pre,post = ('[',']: ') if (d.severity is not None  or  d.code) else  ('','')
                     mid = ':' if (d.severity is not None  and  d.code) else ''
 
-                    severity_short = d.severity.short_name() if d.severity else ''
+                    severity_short = d.severity.name if d.severity else ''
                     # "[severity:code] message"
                     code = str(d.code)  if d.code is not None else  ''
                     source = str(d.source)  if d.source is not None else  ''
@@ -1593,9 +1593,9 @@ class DiagnosticsMan:
                     text = text.split('\1')[1] if '\1' in text else text
                     text = split_text_by_length(text, 50, prepare_for_corner=True)
 
-                    font_size_opt = 'font_size'+app_proc(PROC_GET_OS_SUFFIX, '')
-                    ed_self.set_prop(__PROP_CORNER_FONT_NAME, 'default')
-                    ed_self.set_prop(__PROP_CORNER_FONT_SIZE, appx.get_opt(font_size_opt, 10)+3)
+                    # font_size_opt = 'font_size'+app_proc(PROC_GET_OS_SUFFIX, '')
+                    # ed_self.set_prop(__PROP_CORNER_FONT_NAME, 'default')
+                    # ed_self.set_prop(__PROP_CORNER_FONT_SIZE, appx.get_opt(font_size_opt, 10)+3)
 
                     ed_self.set_prop(__PROP_CORNER_COLOR_BACK, appx.html_color_to_int('ffffe1'))
                     ed_self.set_prop(__PROP_CORNER_COLOR_BORDER, appx.html_color_to_int('aaa'))
