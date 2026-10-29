@@ -526,8 +526,11 @@ class Client:
                             )
 
                         structured_payload["diagnostics"] = normalized_diagnostics
-                        return PublishDiagnostics(**structured_payload)
-
+                        return PublishDiagnostics(
+                            uri=structured_payload["uri"],
+                            diagnostics=normalized_diagnostics,
+                            version=structured_payload.get("version"),
+                        )
                     return TypeAdapter(event_cls).validate_python(payload)
                 except ValidationError as exc:
                     raise ValidationError(f"{exc} | payload={payload}") from exc
