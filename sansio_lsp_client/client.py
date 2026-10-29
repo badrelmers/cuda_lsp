@@ -247,12 +247,15 @@ class Client:
         error_payload = response.get('error')
         if error_payload is not None:
             print("NOTE: =======error_payload",error_payload)
-            err = ResponseError(
-                code=error_payload.get("code"),
-                message=error_payload.get("message", ""),
-                data=error_payload.get("data"),
-            )
-            err.message_id = response_id
+            # err = lsp_types.ResponseErrorMessage(error_payload)
+            err = Converter.structure(response, lsp_types.ResponseErrorMessage)
+            print("NOTE: =======error_payload",err)
+            # err = ResponseError(
+            #     code=error_payload.get("code"),
+            #     message=error_payload.get("message", ""),
+            #     data=error_payload.get("data"),
+            # )
+            # err.message_id = response_id
             return err
 
         event: Event

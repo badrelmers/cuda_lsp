@@ -952,14 +952,18 @@ class Language:
         elif msgtype == events.ShowMessage:
             self.plog.log(msg)
 
-        elif msgtype == events.ResponseError:
+        elif msgtype == lsp_types.ResponseErrorMessage:
             _reqpos = self.request_positions.pop(message_id, None)    # discard
             data = self.metadata_goto_requests.pop(message_id, None)
+            msg = msg.error
             if data:
                 # Log error for OmniSharp metadata
                 errstr = f'OmniSharp Metadata ResponseError[{msg.code}]: {msg.message}'
                 self.plog.log_str(errstr, type_=_('Response Error'), severity=SEVERITY_ERR)
             else:
+                from cudax_lib import get_translation, html_color_to_int
+                _ = get_translation(__file__)  # I18N
+
                 errstr = f'ResponseError[{msg.code}]: {msg.message}'
                 self.plog.log_str(errstr, type_=_('Response Error'), severity=SEVERITY_ERR)
 
