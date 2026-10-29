@@ -2,6 +2,7 @@ import sys
 import os
 import socket
 import time
+import json
 import queue
 import subprocess
 import re
@@ -70,14 +71,16 @@ from .snippet_engine import Snippet, VS_SNIPPET
 import traceback
 import datetime
 
-LOG = False
+# stderr errors are always printed to the bottom LSP panel so no need to enable anything here to get them
+LOG = True
 LOG_CACHE = False
 DEBUG_COMPLETION = False
-DEBUG_MESSAGES = False
+DEBUG_MESSAGES = True
 DBG = LOG
 LOG_NAME = 'LSP'
 
-DEBUG_DEV = True
+DEBUG_DEV = True # enable spying request/response messages panel
+SPY_MSG_LIMIT = 3000
 
 api_ver = app_api_version()
 
@@ -327,7 +330,9 @@ class Language:
                 if line == b'':
                     break
                 if self._log_stderr:
-                    print(f'ServerError: {LOG_NAME}: {self.lang_str} - {line}') # bytes
+                    if DEBUG_DEV:
+                        # stderr errors are already printed to the LSP bottom panel, but i prefer to print them again to the Console to attract my attention because this type or errors are fatal, because the LSP bottom panel usually show red color for lsp linting diagnostics which the eye do not pay attention to it and the mind think it is not a fatal error so i may not pay attention to them always
+                        print(f'ERROR: ServerError: {LOG_NAME}: {self.lang_str} - {line}') # bytes
                     try:
                         s = line.decode('utf-8')
                     except:
@@ -418,6 +423,32 @@ class Language:
             while not self._read_q.empty():
                 data = self._read_q.get()
 
+                # LOG RECEIVED DATA TO SPY PANEL
+                if DEBUG_DEV:
+                    try:
+                        # Try to parse and log the JSON-RPC message
+                        data_str = data.decode('utf-8')
+                        # Skip headers
+                        if '\r\n\r\n' in data_str:
+                            _, json_part = data_str.split('\r\n\r\n', 1)
+                            parsed = json.loads(json_part)
+
+                            # 1. Determine Type and Direction
+                            msg_type = "NOTIFICATION" if "id" not in parsed else ("REQUEST     " if "method" in parsed else "RESPONSE    ")
+                            # direction = {"NOTIFICATION": "<- ", "REQUEST": "<--", "RESPONSE": "<<<"}.get(msg_type, "???")
+                            direction = {"NOTIFICATION": "◄- ", "REQUEST     ": "◄--", "RESPONSE    ": "◄◄◄"}.get(msg_type, "???")
+                            method_or_id = parsed.get("method", parsed.get("id", "unknown"))
+
+                            # 2. Format and Truncate the content: Limit to 1000 characters with metadata if truncated
+                            full_str = str(parsed)
+                            log_content = (full_str[:SPY_MSG_LIMIT] + f" [TRUNCATED... total: {len(full_str)}]") if len(full_str) > SPY_MSG_LIMIT else full_str
+
+                            # 3. Log it
+                            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                            self.plog.log_str(f"[{timestamp}] {direction} RECV {msg_type}: {method_or_id} _ {log_content}", type_='Spy   ', severity=SEVERITY_LOG)                            
+                    except:
+                        pass
+
                 # recv now returns an iterator, so we must iterate manually to handle errors. consume the recv generator with proper error handling
                 event_iter = self.client.recv(data)
                 while True:
@@ -433,7 +464,10 @@ class Language:
                         if len(err_str) > limit:
                             err_str = err_str[:limit] + '...'
                         msg_status(f'{LOG_NAME}: {self.lang_str}: unsupported msg: {err_str}')
-                        pass;       LOG and self.plog.log_str(f'{err}', type_='dbg', severity=SEVERITY_ERR)
+                        pass;       LOG and self.plog.log_str(f'unsupported msg: {err}', type_='dbg', severity=SEVERITY_ERR)
+                        if DEBUG_DEV:
+                            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                            self.plog.log_str(f"[{timestamp}] ███ RECV ERROR unsprt: {err}", type_='Spy   ', severity=SEVERITY_ERR, scroll=True)
                         
                         if DEBUG_MESSAGES:
                             if err and hasattr(err, 'args') and err.args and hasattr(err.args[0], 'dict'):
@@ -459,6 +493,43 @@ class Language:
             # send Queue
             send_buf = self.client.send()
             if send_buf:
+                # LOG SENT DATA TO SPY PANEL
+                if DEBUG_DEV:
+                    try:
+                        data_str = send_buf.decode('utf-8')
+                        if '\r\n\r\n' in data_str:
+                            _, json_part = data_str.split('\r\n\r\n', 1)
+                            # May contain multiple messages
+                            parts = json_part.split('Content-Length:')
+                            for part in parts:
+                                if not part.strip():
+                                    continue
+                                # Extract JSON after headers
+                                if '\r\n\r\n' in part:
+                                    _, json_msg = part.split('\r\n\r\n', 1)
+                                else:
+                                    json_msg = part
+                                try:
+                                    parsed = json.loads(json_msg)
+                                    
+                                    # 1. Determine Type and Direction
+                                    msg_type = "NOTIFICATION" if "id" not in parsed else ("REQUEST     " if "method" in parsed else "RESPONSE    ")
+                                    # direction = {"NOTIFICATION": " ->", "REQUEST": "-->", "RESPONSE": ">>>"}.get(msg_type, "???")
+                                    direction = {"NOTIFICATION": " -►", "REQUEST     ": "--►", "RESPONSE    ": "►►►"}.get(msg_type, "???")
+                                    method_or_id = parsed.get("method", parsed.get("id", "unknown"))
+
+                                    # 2. Format and Truncate the content: Limit to 1000 characters with metadata if truncated
+                                    full_str = str(parsed)
+                                    log_content = (full_str[:SPY_MSG_LIMIT] + f" [TRUNCATED... total: {len(full_str)}]") if len(full_str) > SPY_MSG_LIMIT else full_str
+
+                                    # 3. Log it
+                                    timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                                    self.plog.log_str(f"[{timestamp}] {direction} SEND {msg_type}: {method_or_id} _ {log_content}", type_='Spy   ', severity=SEVERITY_LOG)
+                                except:
+                                    pass
+                    except:
+                        pass
+                    
                 self._send_q.put(send_buf)
                 self._timer.restart()
 
@@ -476,9 +547,10 @@ class Language:
 
     def _on_lsp_msg(self, msg):
         # DEBUG: Log message types
-        print(f"DEBUG: Received message type: {type(msg).__name__}")
-        if hasattr(msg, 'result'):
-            print(f"DEBUG: Result: {msg.result}")
+        if DEBUG_DEV:
+            print(f"DEBUG _on_lsp_msg: Received message type: {type(msg).__name__}")
+            if hasattr(msg, 'result'):
+                print(f"DEBUG _on_lsp_msg: Result: {msg.result}")
             
         if DEBUG_MESSAGES:
             self._dbg_msgs = (self._dbg_msgs + [msg])[-128:]
@@ -1531,9 +1603,9 @@ class DiagnosticsMan:
                     text = text.split('\1')[1] if '\1' in text else text
                     text = split_text_by_length(text, 50, prepare_for_corner=True)
 
-                    font_size_opt = 'font_size'+app_proc(PROC_GET_OS_SUFFIX, '')
-                    ed_self.set_prop(__PROP_CORNER_FONT_NAME, 'default')
-                    ed_self.set_prop(__PROP_CORNER_FONT_SIZE, appx.get_opt(font_size_opt, 10)+3)
+                    # font_size_opt = 'font_size'+app_proc(PROC_GET_OS_SUFFIX, '')
+                    # ed_self.set_prop(__PROP_CORNER_FONT_NAME, 'default')
+                    # ed_self.set_prop(__PROP_CORNER_FONT_SIZE, appx.get_opt(font_size_opt, 10)+3)
 
                     ed_self.set_prop(__PROP_CORNER_COLOR_BACK, appx.html_color_to_int('ffffe1'))
                     ed_self.set_prop(__PROP_CORNER_COLOR_BORDER, appx.html_color_to_int('aaa'))

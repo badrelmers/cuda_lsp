@@ -7,6 +7,16 @@ from cattrs import Converter, override
 from cattrs.errors import BaseValidationError
 from cattrs.gen import make_dict_structure_fn, make_dict_unstructure_fn
 
+# I created this file to exactly mimic Pydantic's API (TypeAdapter, model_dump, model_validate) so we wouldn't have to change the existing logic after dropping pydantic and replace it with attrs and cattrs. so we can merge easly new updates of the official sansio repo in the future
+# and this solve three problems that attrs doesn't do "automatically" like Pydantic:
+
+# - Aliasing: If our JSON has keys like class (a reserved word), attrs needs a hook to map class in JSON to class_name in Python.
+
+# - Compatibility: I wanted to keep TypeAdapter(Definition).validate_python(...) syntax so I wouldn't have to rewrite the old CudaText LSP logic.
+
+# - Error Handling: cattrs throws different exception types than Pydantic. I wrapped them to prevent the plugin from crashing if it expected a ValidationError.
+
+
 __all__ = [
     "AttrsModel",
     "TypeAdapter",
