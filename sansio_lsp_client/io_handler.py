@@ -58,42 +58,26 @@ def _make_headers(content_length: int, encoding: str = "utf-8") -> bytes:
     return headers_bytes
 
 
-def _make_request(
+def _make_request_content(
     method: str,
     params: t.Optional[JSONDict] = None,
     id: t.Optional[Id] = None,
-    *,
-    encoding: str = "utf-8",
-) -> bytes:
-    request = bytearray()
-
-    # Set up the actual JSONRPC content and encode it.
+) -> JSONDict:
+    """Build the raw JSON-RPC content of a request/notification."""
     content: JSONDict = {"jsonrpc": "2.0", "method": method}
     if params is not None:
         content["params"] = params
     if id is not None:
         content["id"] = id
-    encoded_content = json.dumps(content).encode(encoding)
-
-    # Write the headers to the request body
-    request += _make_headers(content_length=len(encoded_content), encoding=encoding)
-
-    # Append the content to the request
-    request += encoded_content
-
-    return request
+    return content
 
 
-def _make_response(
+def _make_response_content(
     id: t.Union[int, str],
     result: t.Optional[t.Union[JSONDict, JSONList]] = None,
     error: t.Optional[JSONDict] = None,
-    *,
-    encoding: str = "utf-8",
-) -> bytes:
-    request = bytearray()
-
-    # Set up the actual JSONRPC content and encode it.
+) -> JSONDict:
+    """Build the raw JSON-RPC content of a response."""
     content: JSONDict = {"jsonrpc": "2.0", "id": id}
     # content["result"]: The result of a request. This member is REQUIRED on success.
     # This member MUST NOT exist if there was an error invoking the method.
@@ -103,16 +87,38 @@ def _make_response(
         content["error"] = error
     elif result is None:
         content["result"] = None  # "result": null
+    return content
 
+
+def _dump_content(content: JSONDict, *, encoding: str = "utf-8") -> bytes:
+    """Frame a raw JSON-RPC content dict into bytes."""
     encoded_content = json.dumps(content).encode(encoding)
+    # Write the headers, then append the content.
+    return _make_headers(content_length=len(encoded_content), encoding=encoding) + encoded_content
 
-    # Write the headers to the request body
-    request += _make_headers(content_length=len(encoded_content), encoding=encoding)
 
-    # Append the content to the request
-    request += encoded_content
+def _make_request(
+    method: str,
+    params: t.Optional[JSONDict] = None,
+    id: t.Optional[Id] = None,
+    *,
+    encoding: str = "utf-8",
+) -> bytes:
+    return _dump_content(
+        _make_request_content(method=method, params=params, id=id), encoding=encoding
+    )
 
-    return request
+
+def _make_response(
+    id: t.Union[int, str],
+    result: t.Optional[t.Union[JSONDict, JSONList]] = None,
+    error: t.Optional[JSONDict] = None,
+    *,
+    encoding: str = "utf-8",
+) -> bytes:
+    return _dump_content(
+        _make_response_content(id=id, result=result, error=error), encoding=encoding
+    )
 
 
 # ---------------------------------------------------------------------------

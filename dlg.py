@@ -337,6 +337,8 @@ PANEL_LOG_TAG = app_proc(PROC_GET_UNIQUE_TAG, '') # jic
 TYPE_MSG = 'type_msgs'
 TYPE_LOG = 'type_logs'
 TYPE_DIAG = 'type_diags'
+TYPE_SPY = 'type_spy'      # debug spy of request/response JSON-RPC messages
+TYPE_UNHANDLED = 'type_unhandled'  # server messages no handler exists for
 
 SEVERITY_ERR = 'svr_err'
 SEVERITY_WRN = 'svr_wrn'
@@ -368,6 +370,8 @@ PANEL_CAPTIONS = {
     TYPE_MSG:       _('Messages'),
     TYPE_LOG:       _('Logs'),
     TYPE_DIAG:      _('Diagnostics'),
+    TYPE_SPY:       _('Spy'),
+    TYPE_UNHANDLED: _('Unhandled'),
 
     SEVERITY_ERR:   _('Error'),
     SEVERITY_WRN:   _('Warning'),
@@ -390,6 +394,10 @@ class PanelLog:
 
     TAG_ED_MENU_WRAP = 'ed_wrap'
 
+    # Spy traffic can be very high-volume (every JSON-RPC message of a
+    # session): bound the backlog so the panel stays fast and small.
+    SPY_BACKLOG = 500
+
     def __init__(self, panel_name, state=None):
         PanelLog.panels[panel_name] = self
         PanelLog.type_captions = {
@@ -401,6 +409,8 @@ class PanelLog:
 
         self._msgs = [] # lsp.ShowMessageParams, lsp.LogMessageParams, tuple(type_, str)
         self._extra_types = set() # server stderr, etc
+        self._spy_count = 0 # for the SPY_BACKLOG cap
+        self._memo_dirty = False # msgs added without memo update (spy batching)
         self.diag_filename_info = {}
         # filter panel: disabled "categories"
         self._disabled_items = set(state.get('log_panel_filter'))  if isinstance(state, dict) else  set()
@@ -644,7 +654,32 @@ class PanelLog:
         lm = LogMsg(s, type=type_, severity=severity)
 
         self._msgs.append(lm)
-        update_memo and self._update_memo()
+
+        # high-volume spy traffic: keep only the newest SPY_BACKLOG entries
+        if type_ == TYPE_SPY:
+            self._spy_count += 1
+            if self._spy_count > self.SPY_BACKLOG:
+                drop = self._spy_count - self.SPY_BACKLOG
+                kept = []
+                for m in self._msgs:
+                    if m.type == TYPE_SPY:
+                        if drop > 0:
+                            drop -= 1
+                            continue
+                    kept.append(m)
+                self._msgs[:] = kept
+                self._spy_count = self.SPY_BACKLOG
+
+        if update_memo:
+            self._memo_dirty = False
+            self._update_memo()
+        else:
+            # batched: rendered later by flush() - fast for high-volume traffic
+            self._memo_dirty = True
+
+        if scroll:
+            # let the memo render first, then scroll it to the last entry
+            timer_proc(TIMER_START_ONE, self._scroll_to_end, 50, tag='')
 
         timer_proc(TIMER_START_ONE, self._update_counts, 500)
         self._update_sidebar()
@@ -658,8 +693,17 @@ class PanelLog:
             self._extra_types.add(type_)
             self._update_sb()
 
+    def flush(self):
+        """ Render messages which were logged with update_memo=False (e.g. the
+        spy traffic) - call once after a batch of messages was logged.
+        """
+        if self._memo_dirty:
+            self._memo_dirty = False
+            self._update_memo()
+
     def clear_diagnostics(self):
         self._msgs = [ msg for msg in self._msgs if PanelLog.type_captions.get(msg.type, msg.type) != TYPE_DIAG ]
+        self._spy_count = sum(1 for msg in self._msgs if msg.type == TYPE_SPY)
         self._update_memo()
         self._update_counts()
         self._update_sidebar()
@@ -667,6 +711,7 @@ class PanelLog:
         
     def clear(self):
         self._msgs.clear()
+        self._spy_count = 0
         self._update_memo()
         self._update_counts()
         self._update_sidebar()

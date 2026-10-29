@@ -1,11 +1,16 @@
 2026.10.27
++ add: debug spy of request/response JSON-RPC messages in the LSP log panel ('Spy' filter category): shows every message in both directions with timestamp, direction arrow, type (request/notification/response), method name (responses are correlated to their method) and the raw JSON body (truncated at 3000 chars); enabled by DEBUG_DEV=True in language.py; high-volume traffic is batched and capped at the last 500 entries
++ add: 'Unhandled' filter category in the LSP log panel + status bar message + console print for server messages which have no handler yet (unknown custom methods like Roslyn's 'workspace/projectInitializationComplete', but also spec methods not implemented in the client like 'workspace/applyEdit'): reports the method name, whether an lsprotocol type exists, and whether a MethodNotFound reply was sent - so missing support is easy to discover and implement
++ add: unhandled server *requests* now get a JSON-RPC 'MethodNotFound' (-32601) reply, so servers don't hang waiting for an answer (previously they were silently dropped)
++ add: panel's log_str() now supports the 'scroll' parameter (scrolls the panel to the last entry) and update_memo=False + flush() batching for fast bulk logging
 * change: replaced 'pydantic' dependency with pure-Python 'attrs'+'cattrs'+'lsprotocol'; bundled in subfolder lsp_modules, supports Python 3.8...3.14+, no compiled binaries needed anymore
 * change: lsprotocol is now used exclusively for ALL LSP types: sansio_lsp_client yields lsprotocol message objects (e.g. lsp.HoverResponse, lsp.PublishDiagnosticsNotification, lsp.RegistrationRequest, lsp.ResponseErrorMessage), dispatched via lsprotocol's METHOD_TO_TYPES table; hand-written event/struct classes (events.py, structs.py) and the custom JSON-RPC envelope were removed
 * change: replies to server requests are now sent via client.respond(id, result) instead of event.reply()
 * change: completion response items are kept as raw dicts (perf: no per-item object creation)
+* change: sansio client supports an optional message spy hook Client(spy=callback)/set_spy(callback), called with (direction, raw message dict, correlated method) for every complete message - used by the plugin for the 'Spy' panel
 - fix: 'workspace/didChangeWorkspaceFolders' notification now uses the spec-required 'event' wrapper
 - fix: diagnostics without 'severity' field no longer break the diagnostics panel
-- fix: unknown server methods / unknown response ids no longer kill the receive batch (raw passthrough)
+- fix: unknown server methods / unknown response ids no longer kill the receive batch (raw passthrough), they are reported in the 'Unhandled' panel category instead
 
 2026.07.08
 - fix: avoid deprecated API: PROP_SCROLL_HORZ (by Alexey T.)

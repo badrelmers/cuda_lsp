@@ -28,8 +28,9 @@ from .io_handler import (
     JSONDict,
     JSONList,
     ProgressToken,
-    _make_request,
-    _make_response,
+    _dump_content,
+    _make_request_content,
+    _make_response_content,
     _parse_messages,
     structure,
     unstructure,
@@ -171,8 +172,20 @@ class Client:
         workspace_folders: t.Optional[t.List[lsp.WorkspaceFolder]] = None,
         trace: str = "off",
         settings: t.Optional[t.Any] = {},
+        spy: t.Optional[t.Callable[[str, JSONDict, t.Optional[str]], None]] = None,
     ) -> None:
         self._state = ClientState.NOT_INITIALIZED
+
+        # Optional message spy: called as spy(direction, content, method) for
+        # every complete JSON-RPC message going in ('recv') or out ('send'),
+        # with the *raw parsed content dict* and (when known) the method name
+        # a response belongs to. Must never raise - failures are swallowed.
+        # Set before the 'initialize' request is queued, so it is spied too.
+        self._spy = spy
+
+        # Methods of server->client requests, by request id: lets the spy
+        # display which method our responses reply to.
+        self._server_request_methods: t.Dict[Id, str] = {}
 
         # Used to save data as it comes in (from `recieve_bytes`) until we have
         # a full request.
@@ -215,6 +228,32 @@ class Client:
     def state(self) -> ClientState:
         return self._state
 
+    def set_spy(
+        self, spy: t.Optional[t.Callable[[str, JSONDict, t.Optional[str]], None]] = None
+    ) -> None:
+        """Register/replace/remove the message spy callback (see ``__init__``)."""
+        self._spy = spy
+
+    def _spy_message(self, direction: str, content: JSONDict) -> None:
+        """Feed the registered spy (if any) with one complete raw message."""
+        if self._spy is None:
+            return
+        try:
+            method = None
+            if isinstance(content, dict):
+                method = content.get("method")
+                if method is None and "id" in content:
+                    # Response: correlate its id with a method name, so the spy
+                    # can display e.g. 'textDocument/hover (id 3)'.
+                    if direction == "recv":
+                        method = self._unanswered_requests.get(content["id"])
+                    else:
+                        method = self._server_request_methods.get(content["id"])
+            self._spy(direction, content, method)
+        except Exception:
+            # Spying must never break the protocol.
+            pass
+
     @property
     def is_initialized(self) -> bool:
         return (
@@ -226,14 +265,18 @@ class Client:
         id: Id = self._id_counter
         self._id_counter += 1
 
-        self._send_buf += _make_request(method=method, params=params, id=id)
+        content = _make_request_content(method=method, params=params, id=id)
+        self._spy_message("send", content)
+        self._send_buf += _dump_content(content)
         self._unanswered_requests[id] = method
         return id
 
     def _send_notification(
         self, method: str, params: t.Optional[JSONDict] = None
     ) -> None:
-        self._send_buf += _make_request(method=method, params=params)
+        content = _make_request_content(method=method, params=params)
+        self._spy_message("send", content)
+        self._send_buf += _dump_content(content)
 
     def _send_response(
         self,
@@ -241,7 +284,10 @@ class Client:
         result: t.Optional[t.Union[JSONDict, JSONList]] = None,
         error: t.Optional[JSONDict] = None,
     ) -> None:
-        self._send_buf += _make_response(id=id, result=result, error=error)
+        content = _make_response_content(id=id, result=result, error=error)
+        self._spy_message("send", content)
+        self._server_request_methods.pop(id, None)
+        self._send_buf += _dump_content(content)
 
     # ------------------------------------------------------------------
     # Incoming messages: raw JSON dict -> lsprotocol message objects
@@ -271,6 +317,11 @@ class Client:
     def _handle_request(self, content: JSONDict) -> t.Any:
         """Handle a server->client request or notification."""
         method: str = content["method"]
+
+        # Remember server request methods for spy display of our responses.
+        request_id = content.get("id")
+        if request_id is not None:
+            self._server_request_methods[request_id] = method
 
         if method == "$/progress":
             # if "window/workDoneProgress/create" request from server was missing -
@@ -361,6 +412,9 @@ class Client:
         # parse, the messages before it are yielded successfully before the
         # error, and the messages after it are left in _recv_buf.
         for content in _parse_messages(self._recv_buf):
+            # Spy on every *complete* incoming message - before/independently
+            # of message parsing, so even malformed messages are visible.
+            self._spy_message("recv", content)
             yield self._handle_message(content)
 
     def send(self) -> bytes:

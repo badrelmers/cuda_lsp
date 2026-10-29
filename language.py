@@ -2,6 +2,7 @@ import sys
 import os
 import socket
 import time
+import json
 import queue
 import subprocess
 import re
@@ -39,7 +40,8 @@ from .util import (
         ValidationError,
     )
 from .dlg import Hint, SEVERITY_MAP, SignaturesDialog, TYPE_DIAG
-from .dlg import PanelLog, SEVERITY_ERR, SEVERITY_LOG, SEVERITY_NA
+from .dlg import PanelLog, SEVERITY_ERR, SEVERITY_LOG, SEVERITY_NA, SEVERITY_WRN
+from .dlg import TYPE_SPY, TYPE_UNHANDLED
 from .book import EditorDoc
 #from .tree import TreeMan  # imported on access
 
@@ -88,7 +90,8 @@ DEBUG_MESSAGES = False
 DBG = LOG
 LOG_NAME = 'LSP'
 
-DEBUG_DEV = True
+DEBUG_DEV = True # enable spying of request/response messages in LSP panel ('Spy' category)
+SPY_MSG_LIMIT = 3000 # spy: max chars of a message body, longer bodies get truncated
 
 api_ver = app_api_version()
 
@@ -220,7 +223,10 @@ class Language:
                 root_uri=root_uri,
                 workspace_folders=self.workspace_folders,
                 process_id=os.getpid(),
-                settings=expand_dict_dots(self._cfg["settings"])
+                settings=expand_dict_dots(self._cfg["settings"]),
+                # attach the spy *at construction*, so even the very first
+                # 'initialize' request is spied
+                spy=(self._on_spy_message if DEBUG_DEV else None),
             )
             self._start_server()
         return self._client
@@ -443,7 +449,11 @@ class Language:
                         if len(err_str) > limit:
                             err_str = err_str[:limit] + '...'
                         msg_status(f'{LOG_NAME}: {self.lang_str}: unsupported msg: {err_str}')
-                        pass;       LOG and self.plog.log_str(f'{err}', type_='dbg', severity=SEVERITY_ERR)
+                        pass;       LOG and self.plog.log_str(f'unsupported msg: {err}', type_='dbg', severity=SEVERITY_ERR)
+                        if DEBUG_DEV:
+                            # make parsing errors visible in the spy stream too
+                            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                            self.plog.log_str(f'[{timestamp}] \u2588\u2588\u2588 RECV ERROR unsupported: {err}', type_=TYPE_SPY, severity=SEVERITY_ERR, scroll=True)
                         
                         if DEBUG_MESSAGES:
                             if err and hasattr(err, 'args') and err.args:
@@ -478,6 +488,10 @@ class Language:
             while not self._err_q.empty():
                 s = self._err_q.get()
                 self.plog.log_str(s, type_='stderr')
+
+            # render spy messages logged in this batch (log_str with
+            # update_memo=False is much faster for high-volume traffic)
+            self.plog.flush()
 
         except Exception as ex:
             print(f'ERROR: QueuesProcessingError: {LOG_NAME}: {self.lang_str} - {ex}')
@@ -668,10 +682,104 @@ class Language:
                 self._handle_metadata(result, targetrange, reqpos, dlg_caption)
 
             else:
-                print(f'{LOG_NAME}: {self.lang_str} - unknown Message type: {msgtype}')
+                self._on_unhandled_msg(msg)
 
         else:
-            print(f'{LOG_NAME}: {self.lang_str} - unknown Message type: {msgtype}')
+            self._on_unhandled_msg(msg)
+
+
+    def _on_unhandled_msg(self, msg):
+        """ Loudly report a server message which has no handler - so missing
+        support is easy to discover and implement (status bar + 'Unhandled'
+        panel category + console). Unhandled server *requests* additionally
+        get a MethodNotFound reply, so the server doesn't hang waiting for it.
+        """
+        if isinstance(msg, dict):
+            method = msg.get('method')
+            msg_id = msg.get('id')
+            if method is None:
+                extra = ' (response to an unknown request id)'
+            else:
+                extra = ' (not in LSP spec, no lsprotocol type)'
+        else:
+            method = getattr(msg, 'method', None)
+            msg_id = getattr(msg, 'id', None)
+            extra = f' (lsprotocol type: {type(msg).__name__})'
+
+        if method is None:
+            kind = 'response'
+        elif msg_id is None:
+            kind = 'notification'
+        else:
+            kind = 'request'
+
+        # don't leave the server hanging on a request we can't answer
+        replied = False
+        if kind == 'request':
+            try:
+                self.client.respond(
+                    msg_id,
+                    error=lsp.ResponseError(
+                        code=lsp.ErrorCodes.MethodNotFound,
+                        message=f"cuda_lsp doesn't handle method: {method}",
+                    ),
+                )
+                replied = True
+            except Exception:
+                pass
+
+        name = method if method is not None else f'id {msg_id}'
+        text = f'Unhandled server {kind}: {name}{extra}'
+        if replied:
+            text += ' - replied MethodNotFound'
+        print(f'{LOG_NAME}: {self.lang_str} - {text}')
+        msg_status(f'{LOG_NAME}: {self.lang_str}: {text}')
+        self.plog.log_str(text, type_=TYPE_UNHANDLED, severity=SEVERITY_WRN, scroll=True)
+
+
+    def _on_spy_message(self, direction, content, method=None):
+        """ DEBUG_DEV message spy: log every JSON-RPC message (raw JSON, both
+        directions) to the LSP panel's 'Spy' category. Registered on the
+        sansio client via Client(spy=...), which calls it for every complete
+        message - before/independently of message parsing.
+        """
+        try:
+            # 1. Determine type and direction
+            if 'method' in content:
+                kind = 'REQUEST' if 'id' in content else 'NOTIFICATION'
+            else:
+                kind = 'RESPONSE'
+
+            if direction == 'recv':
+                arrow = {'NOTIFICATION': '\u25c4- ', 'REQUEST': '\u25c4--', 'RESPONSE': '\u25c4\u25c4\u25c4'}[kind]
+                way = 'RECV'
+            else:
+                arrow = {'NOTIFICATION': ' -\u25ba', 'REQUEST': '--\u25ba', 'RESPONSE': '\u25ba\u25ba\u25ba'}[kind]
+                way = 'SEND'
+
+            # 2. Name column: method, or 'method (id N)' for responses
+            # (correlated by the client, so responses show what they reply to)
+            if kind == 'RESPONSE':
+                rid = content.get('id', '?')
+                name = f'{method} (id {rid})' if method else f'(id {rid})'
+            else:
+                name = method or '?'
+
+            # 3. Format and truncate the content: valid JSON,
+            # limited to SPY_MSG_LIMIT chars with a marker if truncated
+            body = json.dumps(content, ensure_ascii=False)
+            if len(body) > SPY_MSG_LIMIT:
+                body = body[:SPY_MSG_LIMIT] + f' [TRUNCATED... total: {len(body)}]'
+
+            # 4. Log it (update_memo=False: batched render by flush(),
+            # fast enough for high-volume traffic)
+            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            self.plog.log_str(
+                f'[{timestamp}] {arrow} {way} {kind:<12}: {name} _ {body}',
+                type_=TYPE_SPY, severity=SEVERITY_LOG, update_memo=False)
+        except Exception:
+            # spying must never break message processing
+            pass
 
 
     def send_changes(self, eddoc):
