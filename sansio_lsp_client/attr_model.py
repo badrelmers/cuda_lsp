@@ -80,7 +80,7 @@ class AttrsModel:
         try:
             return converter.structure(data, cls)
         except BaseValidationError as exc:  # pragma: no cover - mirrors pydantic API
-            raise ValidationError(str(exc), exc) from exc
+            raise ValidationError(f"{exc} | payload={data}", exc) from exc
 
 
 T = t.TypeVar("T")
@@ -96,7 +96,7 @@ class TypeAdapter(t.Generic[T]):
         try:
             return converter.structure(data, self._typ)
         except BaseValidationError as exc:  # pragma: no cover - mirrors pydantic API
-            raise ValidationError(str(exc), exc) from exc
+            raise ValidationError(f"{exc} | payload={data}", exc) from exc
 
 
 # Register the base class itself to ensure derived classes inherit proper hooks.
