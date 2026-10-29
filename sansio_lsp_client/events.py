@@ -1,4 +1,5 @@
 import typing as t
+from lsprotocol import types as lsp_types
 
 import attrs
 
@@ -34,10 +35,8 @@ from .structs import (
     unstructure,
 )
 
-if t.TYPE_CHECKING:  # avoid import cycle at runtime
+if t.TYPE_CHECKING:  # avoid import cycle at runtime, Only imported during type checking, not at runtime!
     from .client import Client
-else:
-    Client = t.Any  # type: ignore, we need it to fix "name 'Client' is not defined" error, pydantic fix this automatically so we did not need this but attrs does not fix it
 
 
 @attrs.define
@@ -62,10 +61,14 @@ class ResponseError(Event):
 
 @attrs.define
 class ServerRequest(Event):
-    _client: Client = attrs.field()
-    _id: Id = attrs.field()
-
-
+    # mimic Pydantic's PrivateAttr(). 
+    # Pydantic's PrivateAttr is invisible to validation, Pydantic excludes private attributes from the generated constructor and the validation logic. It only looks for "Public" fields. init=False make attrs behave like Pydantic. an alternative is to use 'from __future__ import annotations'
+    # init=False tells attrs not to expect those fields in the constructor, so Converter.structure(params, WorkDoneProgressCreate) will succeed when params only contains the LSP fields (like token)
+    # we need also to make it optional t.Optional["Client"] to prevent this error: NameError: name 'Client' is not defined. The error is happening because attrs is trying to resolve the forward reference "Client" at runtime (during Converter.structure), but Client isn't available since it's only imported under TYPE_CHECKING.
+    _client: t.Optional["Client"] = attrs.field(init=False)
+    _id: t.Optional[Id] = attrs.field(init=False)
+    
+    
 @attrs.define
 class ServerNotification(Event):
     pass
@@ -163,25 +166,27 @@ class PublishDiagnostics(ServerNotification):
 class WorkspaceProjectInitializationComplete(ServerNotification):
     pass
 
+Hover = lsp_types.Hover
 
-@attrs.define(kw_only=True)
-class Hover(MethodResponse):
-    contents: t.Union[
-        t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
-    ] = attrs.field()
-    range: t.Optional[Range] = attrs.field(default=None)
-
-    def m_str(self) -> str:
-        def item_str(item: t.Union[MarkedString, MarkupContent, str]) -> str:
-            if isinstance(item, MarkedString):
-                return f"[{item.language}]\n{item.value}"
-            if isinstance(item, MarkupContent):
-                return f"[{item.kind}]\n{item.value}"
-            return item
-
-        if isinstance(self.contents, list):
-            return "\n".join(item_str(item) for item in self.contents)
-        return item_str(self.contents)
+# delllllllllllllll
+# @attrs.define(kw_only=True)
+# class Hover(MethodResponse):
+    # contents: t.Union[
+        # t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
+    # ] = attrs.field()
+    # range: t.Optional[Range] = attrs.field(default=None)
+# 
+    # def m_str(self) -> str:
+        # def item_str(item: t.Union[MarkedString, MarkupContent, str]) -> str:
+            # if isinstance(item, MarkedString):
+                # return f"[{item.language}]\n{item.value}"
+            # if isinstance(item, MarkupContent):
+                # return f"[{item.kind}]\n{item.value}"
+            # return item
+# 
+        # if isinstance(self.contents, list):
+            # return "\n".join(item_str(item) for item in self.contents)
+        # return item_str(self.contents)
 
 
 @attrs.define(kw_only=True)

@@ -313,7 +313,7 @@ class Client:
                 event = Converter.structure(response.result, Hover)
             else:
                 event = Hover(contents=[])  # null response
-            event.message_id = response.id
+            # event.message_id = response.id
 
         elif method == "textDocument/foldingRange":
             event = MFoldingRanges(
@@ -492,16 +492,25 @@ class Client:
         else:
             raise NotImplementedError(request)
 
-    def recv(self, data: bytes) -> t.Iterator[Event]:
-        self._recv_buf += data
+    def recv(self, data: bytes) -> t.Iterator[t.Tuple[t.Optional[Id], Event]]:
+        """Parse received data and yield (message_id, event) tuples.
+        
+        Returns:
+            Iterator of (message_id, event) tuples where:
+            - message_id: The ID from our original request (for responses), or None (for server requests/notifications)
+            - event: The parsed Event object
+        """
         # Make sure to use lots of iterators, so that if one message fails to
         # parse, the messages before it are yielded successfully before the
         # error, and the messages after it are left in _recv_buf.
+        self._recv_buf += data
         for message in _parse_messages(self._recv_buf):
             if isinstance(message, Response):
-                yield self._handle_response(message)
+                event = self._handle_response(message)
+                yield (message.id, event)
             else:
-                yield self._handle_request(message)
+                event = self._handle_request(message)
+                yield (None, event)  # Server requests/notifications don't have our message_id
 
     def send(self) -> bytes:
         send_buf = self._send_buf[:]
