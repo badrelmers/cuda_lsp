@@ -64,6 +64,7 @@ CallHierarchyIncomingCall = lsp_types.CallHierarchyIncomingCall
 CallHierarchyOutgoingCall = lsp_types.CallHierarchyOutgoingCall
 TextDocumentSyncKind = lsp_types.TextDocumentSyncKind
 SymbolInformation = lsp_types.SymbolInformation
+DocumentSymbol = lsp_types.DocumentSymbol
 InlayHint = lsp_types.InlayHint
 InlayHintKind = lsp_types.InlayHintKind
 InlayHintLabelPart = lsp_types.InlayHintLabelPart
@@ -89,6 +90,9 @@ class WorkDoneProgressKind(str, enum.Enum):
     BEGIN = "begin"
     REPORT = "report"
     END = "end"
+
+
+MWorkDoneProgressKind = WorkDoneProgressKind
 
 
 def _range_from_positions(change_start: Position, change_end: Position) -> Range:
