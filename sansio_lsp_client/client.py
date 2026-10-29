@@ -2,7 +2,7 @@ import enum
 #import pprint
 import typing as t
 
-from .attr_model import TypeAdapter, ValidationError
+from pydantic import ValidationError, TypeAdapter
 
 from .events import (
     Completion,
@@ -56,15 +56,6 @@ from .structs import (
     JSONDict,
     JSONList,
     MWorkDoneProgressKind,
-    Diagnostic,
-    DiagnosticSeverity,
-    DiagnosticTag,
-    DiagnosticRelatedInformation,
-    Location,
-    LocationLink,
-    MarkedString,
-    MarkupContent,
-    MarkupKind,
     Range,
     Request,
     Response,
@@ -78,98 +69,7 @@ from .structs import (
     TextEdit,
     VersionedTextDocumentIdentifier,
     WorkspaceFolder,
-    WorkDoneProgressBeginValue,
-    WorkDoneProgressReportValue,
-    WorkDoneProgressEndValue,
 )
-
-
-_range_adapter = TypeAdapter(Range)
-
-
-def _structure_range(value: t.Any) -> t.Optional[Range]:
-    if value is None or isinstance(value, Range):
-        return value
-    return _range_adapter.validate_python(value)
-
-
-def _coerce_markup_kind(kind: t.Any) -> MarkupKind:
-    if isinstance(kind, MarkupKind):
-        return kind
-    if isinstance(kind, str):
-        try:
-            return MarkupKind(kind)
-        except ValueError:
-            return MarkupKind.MARKDOWN
-    return MarkupKind.MARKDOWN
-
-
-def _structure_marked_string(value: t.Any) -> t.Union[MarkedString, str]:
-    if isinstance(value, MarkedString):
-        return value
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        language = value.get("language")
-        text = value.get("value", "")
-        if language is not None:
-            return MarkedString(language=language, value=text)
-        return text
-    return str(value)
-
-
-def _structure_hover_contents(value: t.Any) -> t.Union[
-    t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
-]:
-    if value is None:
-        return []
-    if isinstance(value, (str, MarkedString, MarkupContent)):
-        if isinstance(value, MarkupContent):
-            value.kind = _coerce_markup_kind(value.kind)
-        return value
-    if isinstance(value, dict):
-        if "kind" in value and "value" in value:
-            return MarkupContent(
-                kind=_coerce_markup_kind(value.get("kind")),
-                value=value.get("value", ""),
-            )
-        return _structure_marked_string(value)
-    if isinstance(value, list):
-        return [
-            _structure_marked_string(item)
-            for item in value
-        ]
-    return value
-
-
-def _structure_location_like(value: t.Any) -> t.Union[Location, LocationLink, t.Any]:
-    if isinstance(value, (Location, LocationLink)):
-        return value
-    if not isinstance(value, dict):
-        return value
-    if "targetUri" in value or "targetRange" in value:
-        data: dict[str, t.Any] = {
-            "targetUri": value.get("targetUri", ""),
-            "targetRange": _structure_range(value.get("targetRange")),
-            "targetSelectionRange": _structure_range(value.get("targetSelectionRange")),
-        }
-        origin = value.get("originSelectionRange")
-        if origin is not None:
-            data["originSelectionRange"] = _structure_range(origin)
-        return LocationLink(**data)
-    if "uri" in value and "range" in value:
-        return Location(uri=value["uri"], range=_structure_range(value.get("range")))
-    return value
-
-
-def _structure_location_result(value: t.Any) -> t.Union[
-    t.List[t.Union[Location, LocationLink]], Location, LocationLink, None
-]:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return [_structure_location_like(item) for item in value]
-    return _structure_location_like(value)
 
 
 class ClientState(enum.Enum):
@@ -413,14 +313,7 @@ class Client:
 
         elif method == "textDocument/hover":
             if response.result is not None:
-                try:
-                    structured_contents = _structure_hover_contents(response.result.get("contents"))
-                    structured_range = _structure_range(response.result.get("range"))
-                    event = Hover(contents=structured_contents, range=structured_range)
-                except ValidationError as exc:
-                    raise ValidationError(
-                        f"While structuring Hover: {exc} | payload={response.result}"
-                    ) from exc
+                event = Hover.model_validate(response.result)
             else:
                 event = Hover(contents=[])  # null response
             event.message_id = response.id
@@ -476,13 +369,9 @@ class Client:
 
         #GOTOs
         elif method == "textDocument/definition":
-            try:
-                structured_result = _structure_location_result(response.result)
-                event = Definition(result=structured_result)
-            except ValidationError as exc:
-                raise ValidationError(
-                    f"While structuring Definition: {exc} | payload={response.result}"
-                ) from exc
+            event = TypeAdapter(Definition).validate_python(
+                {"result": response.result}
+            )
             event.message_id = response.id
 
         elif method == "textDocument/references":
@@ -491,13 +380,9 @@ class Client:
             )
 
         elif method == "textDocument/implementation":
-            try:
-                structured_result = _structure_location_result(response.result)
-                event = Implementation(result=structured_result)
-            except ValidationError as exc:
-                raise ValidationError(
-                    f"While structuring Implementation: {exc} | payload={response.result}"
-                ) from exc
+            event = TypeAdapter(Implementation).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/declaration":
             event = TypeAdapter(Declaration).validate_python(
@@ -505,13 +390,9 @@ class Client:
             )
 
         elif method == "textDocument/typeDefinition":
-            try:
-                structured_result = _structure_location_result(response.result)
-                event = TypeDefinition(result=structured_result)
-            except ValidationError as exc:
-                raise ValidationError(
-                    f"While structuring TypeDefinition: {exc} | payload={response.result}"
-                ) from exc
+            event = TypeAdapter(TypeDefinition).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/prepareCallHierarchy":
             event = TypeAdapter(MCallHierarchItems).validate_python(
@@ -543,109 +424,18 @@ class Client:
 
     # request from server
     def _handle_request(self, request: Request) -> Event:
-        progress_notifications = (WorkDoneProgressBegin, WorkDoneProgressReport, WorkDoneProgressEnd)
-        progress_value_map = {
-            WorkDoneProgressBegin: WorkDoneProgressBeginValue,
-            WorkDoneProgressReport: WorkDoneProgressReportValue,
-            WorkDoneProgressEnd: WorkDoneProgressEndValue,
-        }
-
         def parse_request(event_cls: t.Type[Event]) -> Event:
             if issubclass(event_cls, ServerRequest):
-                payload = request.params if isinstance(request.params, dict) else {}
-                try:
-                    if event_cls is WorkDoneProgressCreate:
-                        event = event_cls(**payload)
-                    else:
-                        event = TypeAdapter(event_cls).validate_python(payload)
-                except ValidationError as exc:
-                    raise ValidationError(f"{exc} | payload={payload}") from exc
+                event = TypeAdapter(event_cls).validate_python(request.params)
                 assert request.id is not None
                 event._id = request.id
                 event._client = self
                 return event
             elif issubclass(event_cls, ServerNotification):
-                payload = request.params if isinstance(request.params, dict) else {}
-                try:
-                    if issubclass(event_cls, progress_notifications):
-                        structured_payload = dict(payload)
-                        value_payload = structured_payload.get("value")
-                        if value_payload is not None:
-                            value_cls = progress_value_map.get(event_cls)
-                            if value_cls is not None:
-                                structured_payload["value"] = TypeAdapter(value_cls).validate_python(value_payload)
-                        event = event_cls(**structured_payload)
-                        if isinstance(event.value, dict):
-                            value_cls = progress_value_map.get(event_cls)
-                            if value_cls is not None:
-                                event.value = TypeAdapter(value_cls).validate_python(event.value)
-                        return event
-                    if event_cls is PublishDiagnostics:
-                        structured_payload = dict(payload)
-                        diagnostics_payload = structured_payload.get("diagnostics", [])
-                        normalized_diagnostics: t.List[Diagnostic] = []
-                        for item in diagnostics_payload:
-                            diag_payload = dict(item)
-                            severity_val = diag_payload.get("severity")
-                            severity: t.Optional[DiagnosticSeverity]
-                            if isinstance(severity_val, DiagnosticSeverity):
-                                severity = severity_val
-                            elif severity_val is None:
-                                severity = None
-                            else:
-                                try:
-                                    severity = DiagnosticSeverity(severity_val)
-                                except ValueError:
-                                    severity = None
-
-                            tags_list = diag_payload.get("tags")
-                            normalized_tags: t.Optional[t.List[DiagnosticTag]] = None
-                            if isinstance(tags_list, list):
-                                normalized_tags = []
-                                for tag_val in tags_list:
-                                    if isinstance(tag_val, DiagnosticTag):
-                                        normalized_tags.append(tag_val)
-                                    else:
-                                        try:
-                                            normalized_tags.append(DiagnosticTag(tag_val))
-                                        except ValueError:
-                                            continue
-                                if not normalized_tags:
-                                    normalized_tags = None
-
-                            related_payload = diag_payload.get("relatedInformation")
-                            related_info: t.Optional[t.List[DiagnosticRelatedInformation]] = None
-                            if isinstance(related_payload, list):
-                                related_info = [
-                                    TypeAdapter(DiagnosticRelatedInformation).validate_python(related_item)
-                                    for related_item in related_payload
-                                ]
-
-                            range_obj = TypeAdapter(Range).validate_python(diag_payload["range"])
-
-                            normalized_diagnostics.append(
-                                Diagnostic(
-                                    range=range_obj,
-                                    message=diag_payload["message"],
-                                    severity=severity,
-                                    code=diag_payload.get("code"),
-                                    codeDescription=diag_payload.get("codeDescription"),
-                                    source=diag_payload.get("source"),
-                                    relatedInformation=related_info,
-                                    tags=normalized_tags,
-                                    data=diag_payload.get("data"),
-                                )
-                            )
-
-                        structured_payload["diagnostics"] = normalized_diagnostics
-                        return PublishDiagnostics(
-                            uri=structured_payload["uri"],
-                            diagnostics=normalized_diagnostics,
-                            version=structured_payload.get("version"),
-                        )
-                    return TypeAdapter(event_cls).validate_python(payload)
-                except ValidationError as exc:
-                    raise ValidationError(f"{exc} | payload={payload}") from exc
+                if isinstance(request.params, dict):
+                    return TypeAdapter(event_cls).validate_python(request.params)
+                else:
+                    return TypeAdapter(event_cls).validate_python({})
             else:
                 raise TypeError(
                     "`event_cls` must be a subclass of ServerRequest"
