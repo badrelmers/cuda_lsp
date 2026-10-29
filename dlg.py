@@ -11,6 +11,8 @@ import cudatext_cmd as cmds
 #from .sansio_lsp_client.structs import MarkupKind
 #from .sansio_lsp_client.events import ShowMessage, LogMessage
 
+from lsprotocol.types import MarkupKind, MessageType
+
 LogMsg = namedtuple('LogMsg', 'msg type severity')
 
 _   = apx.get_translation(__file__)  # I18N
@@ -71,7 +73,7 @@ class Hint:
         global MarkupKind
         global FORM_H
 
-        from .sansio_lsp_client.structs import MarkupKind
+        from lsprotocol.types import MarkupKind, MessageType
 
         _cell_w, cell_h = ed.get_prop(PROP_CELL_SIZE)
         FORM_H = FORM_GAP*2 + ED_MAX_LINES*cell_h + BUTTON_H
@@ -393,18 +395,12 @@ class PanelLog:
     TAG_ED_MENU_WRAP = 'ed_wrap'
 
     def __init__(self, panel_name, state=None):
-        global LogMessage, ShowMessage
-        from .sansio_lsp_client import LogMessage, ShowMessage
 
         PanelLog.panels[panel_name] = self
-        PanelLog.type_captions = {
-            ShowMessage: TYPE_MSG,
-            LogMessage: TYPE_LOG,
-        }
 
         self.name = panel_name
 
-        self._msgs = [] # ShowMessage, LogMessage, tuple(type_, str)
+        self._msgs = [] # Will contain LogMsg tuples
         self._extra_types = set() # server stderr, etc
         self.diag_filename_info = {}
         # filter panel: disabled "categories"
@@ -638,9 +634,24 @@ class PanelLog:
             self._memo.set_prop(PROP_LINE_TOP, self._memo.get_prop(PROP_LINE_TOP))
         ##
 
-    def log(self, msg):   # events: ShowMessage, LogMessage
-        severity_str = SEVERITY_MAP[msg.type.value]
-        self.log_str(msg.message, type_=type(msg), severity=severity_str, scroll=True)
+    def log(self, msg):
+        # msg is now a LogMsg namedtuple or similar
+        # It should have: msg.message, msg.type, msg.severity
+        
+        # If msg.type is MessageType enum, get its value
+        if hasattr(msg, 'type'):
+            if isinstance(msg.type, MessageType):
+                severity_str = SEVERITY_MAP.get(msg.type.value, SEVERITY_LOG)
+            elif isinstance(msg.type, int):
+                severity_str = SEVERITY_MAP.get(msg.type, SEVERITY_LOG)
+            else:
+                severity_str = msg.severity if hasattr(msg, 'severity') else SEVERITY_LOG
+        else:
+            severity_str = msg.severity if hasattr(msg, 'severity') else SEVERITY_LOG
+            
+        message_text = msg.message if hasattr(msg, 'message') else str(msg)
+        
+        self.log_str(message_text, type_=type(msg), severity=severity_str, scroll=True)
 
     def log_str(self, s, type_, severity=SEVERITY_NA, scroll=False, update_memo=True):
         if s and s[-1] != '\n':
@@ -664,7 +675,8 @@ class PanelLog:
             self._update_sb()
 
     def clear_diagnostics(self):
-        self._msgs = [ msg for msg in self._msgs if PanelLog.type_captions.get(msg.type, msg.type) != TYPE_DIAG ]
+        # self._msgs = [ msg for msg in self._msgs if PanelLog.type_captions.get(msg.type, msg.type) != TYPE_DIAG ]
+        self._msgs = [ msg for msg in self._msgs if not (isinstance(msg.type, str) and msg.type == TYPE_DIAG) ]
         self._update_memo()
         self._update_counts()
         self._update_sidebar()
@@ -732,22 +744,31 @@ class PanelLog:
     def _set_memo_wrap(self, is_wrap):
         _wrap = WRAP_ON_WINDOW  if is_wrap else  WRAP_OFF
         self._memo.set_prop(PROP_WRAP, _wrap)
-
-
+            
     def _filter_msg(self, msg):
-        type_str = PanelLog.type_captions.get(msg.type, msg.type)
+        if isinstance(msg.type, str):
+            type_str = msg.type
+        else:
+            # msg.type might be MessageType enum or something else
+            type_str = str(msg.type) if hasattr(msg.type, '__str__') else 'unknown'
 
-        if type_str not in self._disabled_items  and  msg.severity not in self._disabled_items:
+        if type_str not in self._disabled_items and msg.severity not in self._disabled_items:
             return True
-
+            
     def _get_msg_counts(self):
         r = defaultdict(int)
         for msg in self._msgs:
-            type_str = PanelLog.type_captions.get(msg.type, msg.type)
+            # Get type string from msg.type
+            if isinstance(msg.type, str):
+                type_str = msg.type
+            elif hasattr(msg.type, 'name'):
+                type_str = msg.type.name
+            else:
+                type_str = str(msg.type)
+            
             r[type_str] += 1
             r[msg.severity] += 1
         return r
-
 
     def get_state(self):
         state = {

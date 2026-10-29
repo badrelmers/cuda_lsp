@@ -3,7 +3,7 @@ from cudatext import *
 
 from .book import EditorDoc
 
-from .sansio_lsp_client.structs import SymbolKind, DocumentSymbol, SymbolInformation
+from lsprotocol.types import SymbolKind, DocumentSymbol, SymbolInformation
 
 
 KEY_TREE_TYPES_SHOW = 'tree_types_show'

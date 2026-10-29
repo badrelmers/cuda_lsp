@@ -26,50 +26,51 @@ from cudax_lib import get_translation, html_color_to_int
 _ = get_translation(__file__)  # I18N
 
 from .util import (
-        get_first,
-        ed_uri,
-        get_visible_eds,
-        get_word,
-        get_nonwords_chars,
-        replace_on_right,
-        split_text_by_length,
-        uri_to_path,
-        path_to_uri,
-        langid2lex,
-        collapse_path,
-        normalize_drive_letter,
-        replace_unbracketed,
-        TimerScheduler,
+    get_first,
+    ed_uri,
+    get_visible_eds,
+    get_word,
+    get_nonwords_chars,
+    replace_on_right,
+    split_text_by_length,
+    uri_to_path,
+    path_to_uri,
+    langid2lex,
+    collapse_path,
+    normalize_drive_letter,
+    replace_unbracketed,
+    TimerScheduler,
+    ValidationError,
+)
 
-        ValidationError,
-    )
-from .dlg import Hint, SEVERITY_MAP, SignaturesDialog, TYPE_DIAG
-from .dlg import PanelLog, SEVERITY_ERR, SEVERITY_LOG
+from .dlg import (
+    Hint,
+    SEVERITY_MAP,
+    SignaturesDialog,
+    TYPE_DIAG,
+    PanelLog,
+    SEVERITY_ERR,
+    SEVERITY_LOG,
+    SEVERITY_WRN,
+    SEVERITY_INFO,
+    LogMsg,
+)
+
 from .book import EditorDoc
 #from .tree import TreeMan  # imported on access
 
 import urllib.parse
 
 from .sansio_lsp_client import client as lsp
-from .sansio_lsp_client import events
+
+from .sansio_lsp_client.events import (
+    ResponseError,
+    Metadata,
+)
+
 from .sansio_lsp_client.structs import (
-        CompletionRegistrationOptions,
-        TextDocumentSyncKind,
-        Registration,
-        DiagnosticSeverity,
-        Location,
-        LocationLink,
-        DocumentSymbol,
-        CompletionItemKind,
-        MarkupKind,
-        MarkedString,
-        FormattingOptions,
-        WorkspaceFolder,
-        InsertTextFormat,
-        CompletionContext,
-        CompletionTriggerKind,
-    )
-    
+    unstructure,
+)
 from .snippet_engine import Snippet, VS_SNIPPET
 
 import traceback
@@ -101,30 +102,33 @@ MAX_TIMER_TIME = 10    # ms
 
 GOTO_EVENT_TYPES = {
     lsp_types.DefinitionResponse,
-    events.References,
-    events.Implementation,
-    events.TypeDefinition,
-    events.Declaration,
+    lsp_types.ReferencesResponse,
+    lsp_types.ImplementationResponse,
+    lsp_types.TypeDefinitionResponse,
+    lsp_types.DeclarationResponse,
 }
+
 CALLABLE_COMPLETIONS = {
-    CompletionItemKind.Method,
-    CompletionItemKind.Function,
-    CompletionItemKind.Constructor,
-    #CompletionItemKind.CLASS,
+    lsp_types.CompletionItemKind.Method,
+    lsp_types.CompletionItemKind.Function,
+    lsp_types.CompletionItemKind.Constructor,
+    #lsp_types.CompletionItemKind.Class,
+
 }
+
+GOTO_TITLES = {
+    lsp_types.DefinitionResponse:      _('Go to: definition'),
+    lsp_types.ReferencesResponse:      _('Go to: references'),
+    lsp_types.ImplementationResponse:  _('Go to: implementation'),
+    lsp_types.TypeDefinitionResponse:  _('Go to: type definition'),
+    lsp_types.DeclarationResponse:     _('Go to: declaration'),
+}
+
 
 RequestPos = namedtuple('RequestPos', 'h_ed carets target_pos_caret cursor_ed')
 CachedCompletion = namedtuple('CachedCompletion', 'obj message_id items filtered_items carets h_ed line_str is_incomplete')
 CompletionEdit = namedtuple('CompletionEdit', 'replace_range replace_text x y word1 word2 is_callable is_snippet cached_x')
 Test = namedtuple('Test', 'lexer initial_text replace_range replace_text result_text is_callable is_snippet')
-
-GOTO_TITLES = {
-    lsp_types.DefinitionResponse:      _('Go to: definition'),
-    events.References:      _('Go to: references'),
-    events.Implementation:  _('Go to: implementation'),
-    events.TypeDefinition:  _('Go to: type definition'),
-    events.Declaration:     _('Go to: declaration'),
-}
 
 
 def print_exception_details(ex, *, limit=None, include_chain=True, _seen=None):
@@ -427,7 +431,7 @@ class Language:
         if self._work_dir:
             # for now just a single folder in workspace
             root_uri = path_to_uri(self._work_dir)
-            return [ WorkspaceFolder(uri=root_uri, name='Root'), ]
+            return [lsp_types.WorkspaceFolder(uri=root_uri, name='Root')]
         else:
             return None
 
@@ -803,39 +807,51 @@ class Language:
 
         msgtype = type(msg)
 
-        if msgtype == events.Initialized:
-            self.scfg = ServerConfig(msg, self.langids, self.lang_str)
-            print("ServerConfig msg",msg)
+        if msgtype == lsp_types.InitializeResponse:
+            result = msg.result if hasattr(msg, 'result') else msg
+            self.scfg = ServerConfig(result, self.langids, self.lang_str)
+            print("ServerConfig msg", msg)
             app_proc(PROC_EXEC_PLUGIN, 'cuda_lsp,on_lang_inited,'+self.name)
 
-        elif msgtype == events.RegisterCapabilityRequest:
-            self.scfg.on_register(msg)
-            msg.reply() # send confirmation reply to server
+        elif msgtype == lsp_types.RegistrationRequest:
+            params = msg.params if hasattr(msg, 'params') else msg
+            self.scfg.on_register(params)
+            # send confirmation reply to server. Reply using _client
+            if hasattr(msg, 'id'):
+                self.client._send_response(id=msg.id, result={})
             self.process_queues()
             app_proc(PROC_EXEC_PLUGIN, 'cuda_lsp,on_lang_inited,'+self.name)
 
-        elif msgtype == events.WorkspaceFolders:
-            msg.reply(folders=self.workspace_folders)
+        elif msgtype == lsp_types.WorkspaceFoldersRequest:
+            result = None if self.workspace_folders is None else [unstructure(f) for f in self.workspace_folders]
+            if hasattr(msg, 'id'):
+                self.client._send_response(id=msg.id, result=result)
 
-        elif msgtype == events.Completion:
+        elif msgtype == lsp_types.CompletionResponse:
             reqpos = self.request_positions.pop(message_id, None)
 
-            if msg.completion_list:
-                items = msg.completion_list['items']
-                pass;       LOG and print(f'got completion({len(items)}): {time.time():.3f} {message_id} in {list(self.request_positions)}')
+            # Access result which can be CompletionList or list of CompletionItem
+            if msg.result:
+                if isinstance(msg.result, lsp_types.CompletionList):
+                    items = msg.result.items or []
+                    is_incomplete = msg.result.is_incomplete or False
+                elif isinstance(msg.result, list):
+                    items = msg.result
+                    is_incomplete = False
+                else:
+                    items = []
+                    is_incomplete = False
             else:
                 items = []
+                is_incomplete = False
 
-            if items is None:
-                items = []
-            if msg.completion_list is None:
-                msg.completion_list = {'isIncomplete': 'false'} # dummy data if CompletionList==null
+            pass;       LOG and print(f'got completion({len(items)}): {time.time():.3f} {message_id}')
 
             if reqpos:
                 try:
                     compl = CompletionMan(self, carets=reqpos.carets, h_ed=reqpos.h_ed)
-                    pass;       LOG_CACHE and print("using fresh results.","items:",len(items)," incomplete:",msg.completion_list['isIncomplete'])
-                    _last_complete = compl.prepare_complete(message_id, items, msg.completion_list['isIncomplete'] == 'true')
+                    pass;       LOG_CACHE and print("using fresh results.","items:",len(items)," incomplete:",is_incomplete)
+                    _last_complete = compl.prepare_complete(message_id, items, is_incomplete)
                     if _last_complete:
                         self._last_complete = _last_complete
                         compl.show_complete(self._last_complete.message_id, self._last_complete.filtered_items)
@@ -848,7 +864,9 @@ class Language:
                 
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     # 1. Normalize contents to a list for consistent processing
-                    contents = msg.contents
+                    # Access contents - it's directly on the Hover object
+                    contents = msg.contents if hasattr(msg, 'contents') else None
+                    
                     if not isinstance(contents, list):
                         items = [contents] if contents else []
                     else:
@@ -898,28 +916,33 @@ class Language:
                         )
                     else:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Hover - no info')
-                        
-        elif msgtype == events.SignatureHelp:
+
+        elif msgtype == lsp_types.SignatureHelpResponse:
             if message_id in self.request_positions:
                 _reqpos = self.request_positions.pop(message_id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
-                    hint = msg.get_hint_str()
-                    if hint:
-                        #hint = replace_unbracketed(hint, ',', ',\n\t', brackets={'{':'}', '[':']'})
-                        #caret_x, caret_y = _reqpos.carets[0][:2]
-                        # 8 - default duration
-                        #msg_status_alt(hint, 8, pos=HINTPOS_TEXT_BRACKET, x=caret_x, y=caret_y)
-                        
-                        SignaturesDialog.set_text(msg.get_signatures())
+                    sig_help = msg.result
+                    if sig_help and hasattr(sig_help, 'signatures') and sig_help.signatures:
+                        # Build tuple for SignaturesDialog
+                        signatures_data = (
+                            sig_help.signatures,
+                            sig_help.active_signature,
+                            sig_help.active_parameter
+                        )
+                        SignaturesDialog.set_text(signatures_data)
                         SignaturesDialog.show()
                         
                     else:
                         SignaturesDialog.hide()
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Signature help - no info')
 
-        elif msgtype == events.SemanticTokens:
+        elif msgtype == lsp_types.SemanticTokensResponse:
             reqpos = self.request_positions.pop(message_id)
-            self.on_semantic_tokens(reqpos.h_ed, resultId=msg.resultId, data=msg.data)
+            result = msg.result
+            if result:
+                result_id = result.result_id if hasattr(result, 'result_id') else None
+                data = result.data if hasattr(result, 'data') else []
+                self.on_semantic_tokens(reqpos.h_ed, resultId=result_id, data=data)
 
         #GOTOs
         elif msgtype in GOTO_EVENT_TYPES:
@@ -928,12 +951,12 @@ class Language:
             reqpos = self.request_positions.pop(message_id)
             self.do_goto(items=msg.result, dlg_caption=dlg_caption, skip_dlg=skip_dlg, reqpos=reqpos)
 
-        elif msgtype == events.MDocumentSymbols:
+        elif msgtype == lsp_types.DocumentSymbolResponse:
             _reqpos = self.request_positions.pop(message_id)
             if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed  and  self.treeman:
                 self.treeman.fill_tree(msg.result)
 
-        elif msgtype == events.DocumentFormatting:
+        elif msgtype == lsp_types.DocumentFormattingResponse:
             if message_id in self.request_positions:
                 _reqpos = self.request_positions.pop(message_id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
@@ -951,25 +974,62 @@ class Language:
                     else:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Document formatting - no info')
 
-        elif msgtype == events.PublishDiagnostics:
+        elif msgtype == lsp_types.PublishDiagnosticsNotification:
+            params = msg.params if hasattr(msg, 'params') else msg
+            uri = params.uri
+            diagnostics = params.diagnostics
+            
             if IS_WIN:
-                msg.uri = normalize_drive_letter(msg.uri)
-            self.diagnostics_man.set_diagnostics(uri=msg.uri, diag_list=msg.diagnostics)
+                uri = normalize_drive_letter(uri)
+            self.diagnostics_man.set_diagnostics(uri=uri, diag_list=diagnostics)
 
-        elif msgtype == events.ConfigurationRequest:
-            cfgs = [ServerConfig.get_configuration(self._cfg, cfgitem) for cfgitem in msg.items]
-            msg.reply(cfgs)
+        elif msgtype == lsp_types.ConfigurationRequest:
+            params = msg.params if hasattr(msg, 'params') else msg
+            cfgs = [ServerConfig.get_configuration(self._cfg, cfgitem) for cfgitem in params.items]
+            if hasattr(msg, 'id'):
+                self.client._send_response(id=msg.id, result=cfgs)
 
-        elif msgtype == events.LogMessage:
+        elif msgtype == lsp_types.LogMessageNotification:
             # abandoning server - ignore logs
             if self._shutting_down is not None:
                 return
-            self.plog.log(msg)
+            
+            # Access params
+            params = msg.params if hasattr(msg, 'params') else msg
+            
+            # Create LogMsg namedtuple for compatibility
+            # params.type is MessageType enum, params.message is string
+            message_type = params.type  # This is MessageType enum
+            message_text = params.message
+            
+            # Get severity from MessageType value
+            severity = SEVERITY_MAP.get(message_type.value if hasattr(message_type, 'value') else message_type, SEVERITY_LOG)
+            
+            # Create LogMsg namedtuple
+            log_msg = LogMsg(msg=message_text, type=message_type, severity=severity)
+            
+            # Log it
+            self.plog.log(log_msg)
 
-        elif msgtype == events.ShowMessage:
-            self.plog.log(msg)
 
-        elif msgtype == events.ResponseError:
+        elif msgtype == lsp_types.ShowMessageRequest:
+            # Access params
+            params = msg.params if hasattr(msg, 'params') else msg
+            
+            # Create LogMsg namedtuple
+            message_type = params.type
+            message_text = params.message
+            
+            # Get severity from MessageType value
+            severity = SEVERITY_MAP.get(message_type.value if hasattr(message_type, 'value') else message_type, SEVERITY_LOG)
+            
+            # Create LogMsg namedtuple
+            log_msg = LogMsg(msg=message_text, type=message_type, severity=severity)
+            
+            # Log it
+            self.plog.log(log_msg)
+
+        elif msgtype == ResponseError:
             _reqpos = self.request_positions.pop(message_id, None)    # discard
             data = self.metadata_goto_requests.pop(message_id, None)
             if data:
@@ -980,17 +1040,17 @@ class Language:
                 errstr = f'ResponseError[{msg.code}]: {msg.message}'
                 self.plog.log_str(errstr, type_=_('Response Error'), severity=SEVERITY_ERR)
 
-        elif isinstance(msg, events.WorkDoneProgressCreate)  or  issubclass(msgtype, events.Progress):
+        elif isinstance(msg, (lsp_types.WorkDoneProgressCreateRequest, lsp_types.ProgressNotification)):
             self._on_progress(msg)
 
-        elif msgtype == events.Shutdown:
+        elif msgtype == lsp_types.ShutdownResponse:
             print(f'{LOG_NAME}: {self.lang_str}[{self.client_state_str}] - got shutdown response, exiting')
             self.client.exit()
             self.process_queues()
             self.shutdown_start_time = time.time()
             #self.exit()
 
-        elif msgtype == events.Metadata:
+        elif msgtype == Metadata:
             data = self.metadata_goto_requests.pop(message_id, None)
             if data:
                 reqpos, targetrange, dlg_caption = data
@@ -1012,12 +1072,12 @@ class Language:
             pass;       LOG and print('NOTE: send_changes return: no opts')
             return
 
-        docsynckind = TextDocumentSyncKind( opts.get('syncKind', TextDocumentSyncKind.None_) )
-        if docsynckind == TextDocumentSyncKind.None_:
+        docsynckind = lsp_types.TextDocumentSyncKind(opts.get('syncKind', lsp_types.TextDocumentSyncKind.None_))
+        if docsynckind == lsp_types.TextDocumentSyncKind.None_:
             pass;       LOG and print('send_changes return: NONE sync')
             return
 
-        _is_whole_doc = docsynckind == TextDocumentSyncKind.Full
+        _is_whole_doc = docsynckind == lsp_types.TextDocumentSyncKind.Full
         _changes = eddoc.get_changes(whole_doc=_is_whole_doc)
         if not _changes:
             pass;       LOG and print('send_changes return: no changes')
@@ -1095,17 +1155,17 @@ class Language:
                     eddoc.ed.set_prop(PROP_RO, False)
 
     def on_rootdir_change(self, newroot):
-        if self._client is not None  and  self.client.is_initialized:
+        if self._client is not None and self.client.is_initialized:
             opts = self.scfg.method_opts(METHOD_WS_FOLDERS)
-            if opts  and  opts.get('supported')  and  opts.get('changeNotifications'):
+            if opts and opts.get('supported') and opts.get('changeNotifications'):
                 removed = [] # emptys if no folder
                 added = []
                 if self._work_dir:
                     old_root_uri = path_to_uri(self._work_dir)
-                    removed.append(WorkspaceFolder(uri=old_root_uri, name='Root'))
+                    removed.append(lsp_types.WorkspaceFolder(uri=old_root_uri, name='Root'))
                 if newroot:
                     new_root_uri = path_to_uri(newroot) if newroot else None
-                    added.append(WorkspaceFolder(uri=new_root_uri, name='Root'))
+                    added.append(lsp_types.WorkspaceFolder(uri=new_root_uri, name='Root'))
                 self._work_dir = newroot
 
                 self.client.did_change_workspace_folders(removed=removed, added=added)
@@ -1116,11 +1176,11 @@ class Language:
             opts = self.scfg.method_opts(method_name, eddoc)
             if opts is None:
                 msg_status(f'{LOG_NAME}: Method is not supported by server: {method_name}')
-                return None,None
+                return None, None
 
             docpos = eddoc.get_docpos(caret)
             if docpos is None: # invalid caret position
-                return None,None
+                return None, None
 
             self.send_changes(eddoc)
 
@@ -1129,10 +1189,10 @@ class Language:
             
             if methodAttrName == 'completion':
                 if self._last_complete and self._last_complete.is_incomplete:
-                    triggerKind = CompletionTriggerKind(CompletionTriggerKind.TRIGGER_FOR_INCOMPLETE_COMPLETIONS)
+                    triggerKind = lsp_types.CompletionTriggerKind.TriggerForIncompleteCompletions
                 else:
-                    triggerKind = CompletionTriggerKind(CompletionTriggerKind.INVOKED)
-                context = CompletionContext(triggerKind=triggerKind)
+                    triggerKind = lsp_types.CompletionTriggerKind.Invoked
+                context = lsp_types.CompletionContext(trigger_kind=triggerKind)
                 id = clientMethod(docpos, context=context)
             else:
                 id = clientMethod(docpos)
@@ -1140,7 +1200,7 @@ class Language:
             self.process_queues()
             pass;       LOG and print(f' >> GUI:sent {method_name} request: {id}, time:{time.time():.3f}')
             return id, (docpos.position.character, docpos.position.line)
-        return None,None #TODO fix ugly
+        return None, None #TODO fix ugly
 
     def is_in_comment_or_string(self, _ed, x, y):
         context = _ed.get_token(TOKEN_GET_KIND, x, y)
@@ -1378,12 +1438,12 @@ class Language:
         def link_to_target(link): #SKIP
             """ returns: (uri, goto-range)
             """
-            if isinstance(link, Location):
+            if isinstance(link, lsp_types.Location):
                 return (link.uri, link.range)
-            elif isinstance(link, LocationLink):
-                return (link.targetUri, link.targetSelectionRange)
+            elif isinstance(link, lsp_types.LocationLink):
+                return (link.target_uri, link.target_selection_range)
             else:
-                raise Exception('Invalid goto-link type: '+str(type(link)))
+                raise Exception('Invalid goto-link type: ' + str(type(link)))
 
         if not items:
             msg_status(f'{LOG_NAME}: {self.lang_str}: {dlg_caption} - no info')
@@ -1391,32 +1451,32 @@ class Language:
 
         if isinstance(items, list):
             targets = (link_to_target(item) for item in items)
-            targets = ((uri_to_path(uri),range_) for uri,range_ in targets) # uri to path
+            targets = ((uri_to_path(uri), range_) for uri, range_ in targets) # uri to path
 
             if skip_dlg:
                 item = items[0] # first
             else:
                 targets = list(targets)
                 # ((dir,filename), line)
-                names = [(os.path.split(path), range_.start.line+1)  for path,range_ in targets] # must be a list, not a generator
+                names = [(os.path.split(path), range_.start.line+1) for path, range_ in targets] # must be a list, not a generator
                 # new feature: preselect item with the same line as where the caret currently is
                 cur_line = ed.get_carets()[0][1]
                 focused = 0
-                for i,name in enumerate(names):
+                for i, name in enumerate(names):
                     if name[1] == cur_line+1 and name[0][0]+os.path.sep+name[0][1] == ed.get_filename():
                         focused = i
                         break
 
-                names = [f'{fn}, line {nline}\t{collapse_path(folder)}' for (folder,fn),nline in names]
+                names = [f'{fn}, line {nline}\t{collapse_path(folder)}' for (folder, fn), nline in names]
                 ind = dlg_menu(DMENU_LIST_ALT, names, caption=dlg_caption, focused=focused)
                 if ind is None:
                     return
                 item = items[ind]
 
-            uri,targetrange = link_to_target(item)
+            uri, targetrange = link_to_target(item)
 
         else: # items is single item
-            uri,targetrange = link_to_target(items)
+            uri, targetrange = link_to_target(items)
 
         if uri.startswith('file:///%24metadata%24'):
             # Handle OmniSharp metadata URI
@@ -1607,29 +1667,46 @@ class Language:
 
 
     def _on_progress(self, msg):
-        if isinstance(msg, events.WorkDoneProgressCreate):
+        if isinstance(msg, lsp_types.WorkDoneProgressCreateRequest):
             # on buggy servers token can already exist at this stage.
             # such server bugs must be silently ignored without crashing our plugin.
-            self.progresses.setdefault(msg.token, None) # set to None ONLY if it desn't exist
-            msg.reply()
+            params = msg.params if hasattr(msg, 'params') else msg
+            token = params.token
+            self.progresses.setdefault(token, None) # set to None ONLY if it desn't exist
+            if hasattr(msg, 'id'):
+                self.client._send_response(id=msg.id, result=None)
 
-        elif isinstance(msg, events.WorkDoneProgress):
-            val = msg.value
+        elif isinstance(msg, lsp_types.ProgressNotification):
+            params = msg.params if hasattr(msg, 'params') else msg
+            token = params.token
+            val = params.value
+
             title = None
-            if isinstance(msg, events.WorkDoneProgressBegin):
-                self.progresses[msg.token] = msg
-                title = val.title
-                msg_str = f': {val.message}'  if val.message else ''
+            if hasattr(val, 'kind'):
+                if val.kind == 'begin':
+                    self.progresses[token] = msg
+                    title = val.title if hasattr(val, 'title') else None
+                    msg_str = f': {val.message}' if hasattr(val, 'message') and val.message else ''
 
-            elif isinstance(msg, events.WorkDoneProgressReport):
-                title = self.progresses[msg.token].value.title
-                msg_str = ''
-                if val.message:                     msg_str = f': {val.message}'
-                elif val.percentage is not None:    msg_str = f' [{val.percentage}%]'
+                elif val.kind == 'report':
+                    if token in self.progresses:
+                        begin_msg = self.progresses[token]
+                        begin_params = begin_msg.params if hasattr(begin_msg, 'params') else begin_msg
+                        begin_val = begin_params.value
+                        title = begin_val.title if hasattr(begin_val, 'title') else None
+                    msg_str = ''
+                    if hasattr(val, 'message') and val.message:
+                        msg_str = f': {val.message}'
+                    elif hasattr(val, 'percentage') and val.percentage is not None:
+                        msg_str = f' [{val.percentage}%]'
 
-            elif isinstance(msg, events.WorkDoneProgressEnd):
-                title = self.progresses.pop(msg.token).value.title # deletes start-message
-                msg_str = f': {val.message}'  if val.message else  ' [Done]'
+                elif val.kind == 'end':
+                    if token in self.progresses:
+                        begin_msg = self.progresses.pop(token)
+                        begin_params = begin_msg.params if hasattr(begin_msg, 'params') else begin_msg
+                        begin_val = begin_params.value
+                        title = begin_val.title if hasattr(begin_val, 'title') else None
+                    msg_str = f': {val.message}' if hasattr(val, 'message') and val.message else ' [Done]'
 
             if title:
                 msg_status(f'{LOG_NAME}: {self.lang_str} - {title + msg_str}')
@@ -1691,6 +1768,7 @@ def _connect_tcp(port):
 TOKENS_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')
 DIAG_BM_TAG = app_proc(PROC_GET_UNIQUE_TAG, '') # jic
 _icons_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'icons')
+DiagnosticSeverity = lsp_types.DiagnosticSeverity
 DIAG_BM_IC_PATHS = {
     DiagnosticSeverity.Error       : os.path.join(_icons_dir, 'error.png'),
     DiagnosticSeverity.Warning     : os.path.join(_icons_dir, 'warning.png'),
@@ -2013,14 +2091,21 @@ AUTO_METHODS = {
 }
 
 class ServerConfig:
-    def __init__(self, initialized, langids, lang_str):
-        capabilities = initialized.capabilities
-        print("===ServerConfig initialized",initialized)
+    def __init__(self, initialized_result, langids, lang_str):
+        # Handle both InitializeResult and raw capabilities dict
+        if hasattr(initialized_result, 'capabilities'):
+            capabilities = initialized_result.capabilities
+        else:
+            capabilities = initialized_result
+            
         print("===capabilities",capabilities)
-        # CRITICAL FIX: The capabilities might be nested under 'capabilities' key
-        if 'capabilities' in capabilities:
-            capabilities = capabilities['capabilities']
         
+        # Convert ServerCapabilities object to dict
+        if not isinstance(capabilities, dict):
+            # It's a ServerCapabilities object, convert to dict
+            from .sansio_lsp_client.structs import unstructure
+            capabilities = unstructure(capabilities)
+            
         self.capabs = [] # struct.Registration
         self.lang_str = lang_str
 
@@ -2041,26 +2126,26 @@ class ServerConfig:
                 _opts = {**self._default_opts}
                 if isinstance(_save, dict):
                     _opts.update(_save)
-                self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, register_options=_opts))
+                self.capabs.append(lsp_types.Registration(id='0', method=METHOD_DID_SAVE, register_options=_opts))
         
         if isinstance(docsync, int):
-            self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, register_options=self._default_opts))
+            self.capabs.append(lsp_types.Registration(id='0', method=METHOD_DID_SAVE, register_options=self._default_opts))
 
         #  OPEN, CLOSE
         if is_openclose:
-            open = Registration(id='0', method=METHOD_DID_OPEN, register_options=self._default_opts)
-            close = Registration(id='0', method=METHOD_DID_CLOSE, register_options=self._default_opts)
+            open = lsp_types.Registration(id='0', method=METHOD_DID_OPEN, register_options=self._default_opts)
+            close = lsp_types.Registration(id='0', method=METHOD_DID_CLOSE, register_options=self._default_opts)
             self.capabs += [open, close]
 
         # CHANGE
         if isinstance(docsync, dict):
-            _default_sync = int(TextDocumentSyncKind.None_)
-            docsynckind = TextDocumentSyncKind(docsync.get('change', _default_sync))
+            _default_sync = int(lsp_types.TextDocumentSyncKind.None_)
+            docsynckind = lsp_types.TextDocumentSyncKind(docsync.get('change', _default_sync))
         else:
-            docsynckind = TextDocumentSyncKind(docsync)
+            docsynckind = lsp_types.TextDocumentSyncKind(docsync)
 
         _opts = {**self._default_opts, 'syncKind': docsynckind}
-        self.capabs.append(Registration(id='0', method=METHOD_DID_CHANGE, register_options=_opts))
+        self.capabs.append(lsp_types.Registration(id='0', method=METHOD_DID_CHANGE, register_options=_opts))
 
 
         ### WORKSPACE
@@ -2073,7 +2158,7 @@ class ServerConfig:
                 'supported': wsfolders.get('supported', False),
                 'changeNotifications': wsfolders.get('changeNotifications', False),
             }
-            _reg = Registration(id='0', method=METHOD_WS_FOLDERS, register_options=_opts)
+            _reg = lsp_types.Registration(id='0', method=METHOD_WS_FOLDERS, register_options=_opts)
             self.capabs.append(_reg)
 
 
@@ -2089,21 +2174,30 @@ class ServerConfig:
                 if 'documentSelector' in capval and not capval['documentSelector']:
                      del capval['documentSelector']
                 _opts.update(capval)
-            self.capabs.append(Registration(id='0', method=meth, register_options=_opts))
+            self.capabs.append(lsp_types.Registration(id='0', method=meth, register_options=_opts))
 
     def on_register(self, dynreg):
         """ process dynamic registration request: RegisterMethodRequest
         """
         # check for 'documentSelector' in registerOptions
         # "If set to null the document selector provided on the client side will be used." (c) LSP spec
-        reg: Registration
-        for reg in dynreg.registrations:
+        
+        # dynreg can be RegisterCapabilityParams or has .registrations
+        if hasattr(dynreg, 'registrations'):
+            registrations = dynreg.registrations
+        elif isinstance(dynreg, list):
+            registrations = dynreg
+        else:
+            registrations = dynreg.params.registrations if hasattr(dynreg, 'params') else []
+            
+        # Process registrations
+        for reg in registrations:
             if not isinstance(reg.register_options, dict):
                 reg.register_options = self._default_opts
             elif 'documentSelector' not in reg.register_options:
                 reg.register_options['documentSelector'] = self._default_selector
 
-        self.capabs.extend(dynreg.registrations)
+        self.capabs.extend(registrations)
 
     def method_opts(self, method_name, doc=None, ed_self=None, langid=None):
         """ returns: options dict or None
@@ -2136,7 +2230,7 @@ class ServerConfig:
 
         filters = registration.register_options.get('documentSelector', [])
         # allowing empty selector on workspace methods  (ok?)
-        #   example: Registration(id='...', method='workspace/symbol', registerOptions={}),
+        #   example: lsp_types.Registration(id='...', method='workspace/symbol', registerOptions={}),
         if not filters:
             return (registration.method or '').startswith('workspace/')
 
@@ -2441,9 +2535,30 @@ class CompletionMan:
 
         # return if caret has moved
         if not is_cached and self.carets != _carets:
-            return        
+            return
         
-        filtered_items = items.copy()
+        # Convert lsp_types.CompletionItem objects to dict format
+        # Check if items are objects (from lsprotocol) or already dicts
+        filtered_items = []
+        for item in items:
+            if isinstance(item, dict):
+                # Already a dict, use as-is
+                filtered_items.append(item)
+            else:
+                # It's an lsp_types.CompletionItem object, convert to dict
+                item_dict = {
+                    'label': item.label,
+                    'kind': item.kind,
+                    'insertText': item.insert_text if hasattr(item, 'insert_text') and item.insert_text else item.label,
+                    'filterText': item.filter_text if hasattr(item, 'filter_text') else None,
+                    'sortText': item.sort_text if hasattr(item, 'sort_text') else None,
+                    'textEdit': item.text_edit if hasattr(item, 'text_edit') else None,
+                    'additionalTextEdits': item.additional_text_edits if hasattr(item, 'additional_text_edits') else None,
+                    'deprecated': item.deprecated if hasattr(item, 'deprecated') else None,
+                    'tags': item.tags if hasattr(item, 'tags') else None,
+                    'insertTextFormat': item.insert_text_format if hasattr(item, 'insert_text_format') else None,
+                }
+                filtered_items.append(item_dict)
         
         # Complete From Text integration
         if Language.complete_from_text:
@@ -2464,7 +2579,7 @@ class CompletionMan:
                                 insertText = label
                             filtered_items.append({
                                 'label': label,
-                                'kind' : CompletionItemKind.TEXT,
+                                'kind': lsp_types.CompletionItemKind.Text,
                                 'insertText': insertText,
                             })
                         else:
@@ -2487,7 +2602,7 @@ class CompletionMan:
     def show_complete(self, message_id, items):
         
         if not items:
-            msg_status(f'{LOG_NAME}: {self.lang.lang_str}: Completion - no info')
+            msg_status(f'{LOG_NAME}: {self.lang_str}: Completion - no info')
             return
         
         word1 = ''
@@ -2594,13 +2709,35 @@ class CompletionMan:
             s = s.replace('property', 'prop')
             return s
         
-        words = ['{}\t{}\t{}|{}'.format(
-                    add_html_tags(item, word1),
-                    short_version(item['kind'] and CompletionItemKind(item['kind']).name.lower() or ''),
-                    message_id, i)
-                    for i,item in enumerate(items)
-                ]
-        sel = get_first(i for i,item in enumerate(items)  if item.get('preselect') is True)
+        words = []
+        for i, item in enumerate(items):
+            # Handle both dict and lsp_types.CompletionItemKind for 'kind'
+            item_kind = item.get('kind')
+            if item_kind is not None:
+                # Convert to name string
+                if hasattr(item_kind, 'name'):
+                    # It's an enum
+                    kind_name = item_kind.name.lower()
+                elif isinstance(item_kind, int):
+                    # It's an integer, convert to enum then get name
+                    try:
+                        kind_name = lsp_types.CompletionItemKind(item_kind).name.lower()
+                    except (ValueError, KeyError):
+                        kind_name = ''
+                else:
+                    kind_name = ''
+            else:
+                kind_name = ''
+            
+            word_entry = '{}\t{}\t{}|{}'.format(
+                add_html_tags(item, word1),
+                short_version(kind_name),
+                message_id,
+                i
+            )
+            words.append(word_entry)
+        
+        sel = get_first(i for i, item in enumerate(items) if item.get('preselect') is True)
         sel = sel or 0
         
         ed.complete_alt('\n'.join(words), SNIP_ID, len_chars=0, selected=sel)
@@ -2634,11 +2771,37 @@ class CompletionMan:
             x2 = x0+len(word2)
         
         line_txt = ed.get_text_line(y0)
-        is_callable = item.get('kind') in CALLABLE_COMPLETIONS
-        is_snippet = item.get('insertTextFormat') == InsertTextFormat.SNIPPET
+        
+        # Check item kind - handle both int and enum
+        item_kind = item.get('kind')
+        if item_kind is not None:
+            if isinstance(item_kind, int):
+                # Convert int to enum for comparison
+                try:
+                    item_kind = lsp_types.CompletionItemKind(item_kind)
+                except (ValueError, KeyError):
+                    item_kind = None
+        
+        is_callable = item_kind in CALLABLE_COMPLETIONS if item_kind else False
+        
+        # Check insertTextFormat - handle both int and enum
+        insert_format = item.get('insertTextFormat')
+        if insert_format is not None:
+            if isinstance(insert_format, int):
+                # Compare as int
+                is_snippet = insert_format == 2  # InsertTextFormat.Snippet = 2
+            elif hasattr(insert_format, 'value'):
+                # It's an enum, compare values
+                is_snippet = insert_format.value == 2
+            else:
+                # Compare directly (might be enum)
+                is_snippet = insert_format == lsp_types.InsertTextFormat.Snippet
+        else:
+            is_snippet = False
 
         cached_x = self.carets[0][0]
         cached_x_diff = x0-cached_x
+        
         if item.get('textEdit') is not None:
             x1,y1,x2,y2 = EditorDoc.range2carets(item.get('textEdit')['range'])
             text = item.get('textEdit')['newText']
@@ -2664,7 +2827,7 @@ class CompletionMan:
         edit = CompletionEdit((x1, y1, x2, y2), text, x0, y0, word1, word2, is_callable, is_snippet, cached_x) 
         CompletionMan.apply_completion_edit(edit)
         
-        # additinal edits
+        # additional edits
         if item.get('additionalTextEdits') is not None:
             for edit in item.get('additionalTextEdits'):
                 EditorDoc.apply_edit(ed, edit)
