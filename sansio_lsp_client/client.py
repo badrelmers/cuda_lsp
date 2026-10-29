@@ -1,7 +1,11 @@
 import enum
 #import pprint
 import typing as t
-
+from lsprotocol import types as lsp_types
+import types
+class PluginHover(lsp_types.Hover):
+    message_id: int = None
+    
 from .events import (
     Completion,
     ConfigurationRequest,
@@ -308,13 +312,41 @@ class Client:
                 ]
             event = WillSaveWaitUntilEdits(edits=edits)
 
+
+        elif method == "textDocument/hover1":
+            if response.result is not None:
+                event = Converter.structure(response.result, lsp_types.Hover)
+            else:
+                event = lsp_types.Hover(contents=[])  # null response
+            event.message_id = response.id
+
+        elif method == "textDocument/hover2":
+            if response.result is not None:
+                structured_data = Converter.structure(response.result, lsp_types.Hover)
+                event = types.SimpleNamespace(**Converter.unstructure(structured_data))
+            else:
+                event = types.SimpleNamespace(contents=[], range=None)  # null response
+
+            event.message_id = response.id
+            
+        elif method == "textDocument/hover3":
+            if response.result is not None:
+                hover = Converter.structure(response.result, lsp_types.Hover)
+                event_dict = hover.__dict__
+            else:
+                hover = lsp_types.Hover(contents=[])
+                event_dict = hover.__dict__
+            event_dict['message_id'] = response.id
+            event = SimpleNamespace(**event_dict)
+            
+            
         elif method == "textDocument/hover":
             if response.result is not None:
-                event = Converter.structure(response.result, Hover)
+                event = Converter.structure(response.result, PluginHover)
             else:
-                event = Hover(contents=[])  # null response
-            # event.message_id = response.id
-
+                event = PluginHover(contents=[])  # null response
+            event.message_id = response.id
+            
         elif method == "textDocument/foldingRange":
             event = MFoldingRanges(
                 message_id=response.id,
@@ -492,25 +524,16 @@ class Client:
         else:
             raise NotImplementedError(request)
 
-    def recv(self, data: bytes) -> t.Iterator[t.Tuple[t.Optional[Id], Event]]:
-        """Parse received data and yield (message_id, event) tuples.
-        
-        Returns:
-            Iterator of (message_id, event) tuples where:
-            - message_id: The ID from our original request (for responses), or None (for server requests/notifications)
-            - event: The parsed Event object
-        """
+    def recv(self, data: bytes) -> t.Iterator[Event]:
+        self._recv_buf += data
         # Make sure to use lots of iterators, so that if one message fails to
         # parse, the messages before it are yielded successfully before the
         # error, and the messages after it are left in _recv_buf.
-        self._recv_buf += data
         for message in _parse_messages(self._recv_buf):
             if isinstance(message, Response):
-                event = self._handle_response(message)
-                yield (message.id, event)
+                yield self._handle_response(message)
             else:
-                event = self._handle_request(message)
-                yield (None, event)  # Server requests/notifications don't have our message_id
+                yield self._handle_request(message)
 
     def send(self) -> bytes:
         send_buf = self._send_buf[:]

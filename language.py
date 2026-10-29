@@ -11,7 +11,6 @@ from collections import namedtuple, defaultdict
 from cattrs.errors import BaseValidationError
 from cattrs.v import transform_error
 import exceptiongroup  # patches TracebackException & sys.excepthook by default
-from lsprotocol import types as lsp_types
 
 import email.parser
 import email.message
@@ -377,7 +376,7 @@ class Language:
                 delta=10,
             )
 
-        self.request_positions = {} # RequestPos. The message_id we track here is for responses to OUR requests.
+        self.request_positions = {} # RequestPos
         self.diagnostics_man = DiagnosticsMan(lintstr, underline_style, self.plog)
         self.progresses = {} # token -> progress start message
 
@@ -654,7 +653,7 @@ class Language:
                 event_iter = self.client.recv(data)
                 while True:
                     try:
-                        message_id, msg = next(event_iter)
+                        msg = next(event_iter)
                     except StopIteration:
                         # Normal end of generator
                         break
@@ -729,7 +728,7 @@ class Language:
                     
                     # Now handle the message - with separate error handling
                     try:
-                        self._on_lsp_msg(msg, message_id=message_id)
+                        self._on_lsp_msg(msg)
                     except Exception as err:
                         # Error during message processing
                         print(f'ERROR: LSP Message handler error: {LOG_NAME}: {self.lang_str} - {err}')
@@ -791,7 +790,7 @@ class Language:
             traceback.print_exc()
 
 
-    def _on_lsp_msg(self, msg, message_id=None):
+    def _on_lsp_msg(self, msg):
         if DEBUG_MESSAGES:
             self._dbg_msgs = (self._dbg_msgs + [msg])[-128:]
 
@@ -812,11 +811,12 @@ class Language:
             msg.reply(folders=self.workspace_folders)
 
         elif msgtype == events.Completion:
-            reqpos = self.request_positions.pop(message_id, None)
+
+            reqpos = self.request_positions.pop(msg.message_id, None)
 
             if msg.completion_list:
                 items = msg.completion_list['items']
-                pass;       LOG and print(f'got completion({len(items)}): {time.time():.3f} {message_id} in {list(self.request_positions)}')
+                pass;       LOG and print(f'got completion({len(items)}): {time.time():.3f} {msg.message_id} in {list(self.request_positions)}')
             else:
                 items = []
 
@@ -829,73 +829,39 @@ class Language:
                 try:
                     compl = CompletionMan(self, carets=reqpos.carets, h_ed=reqpos.h_ed)
                     pass;       LOG_CACHE and print("using fresh results.","items:",len(items)," incomplete:",msg.completion_list['isIncomplete'])
-                    _last_complete = compl.prepare_complete(message_id, items, msg.completion_list['isIncomplete'] == 'true')
+                    _last_complete = compl.prepare_complete(msg.message_id, items, msg.completion_list['isIncomplete'] == 'true')
                     if _last_complete:
                         self._last_complete = _last_complete
                         compl.show_complete(self._last_complete.message_id, self._last_complete.filtered_items)
                 except AssertionError as e:
                     print("NOTE:",e)
 
-        elif msgtype == lsp_types.Hover:
-            if message_id in self.request_positions:
-                _reqpos = self.request_positions.pop(message_id)
-                
+        elif msgtype == events.Hover:
+            if msg.message_id in self.request_positions:
+                _reqpos = self.request_positions.pop(msg.message_id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
-                    # 1. Normalize contents to a list for consistent processing
-                    contents = msg.contents
-                    if not isinstance(contents, list):
-                        items = [contents] if contents else []
-                    else:
-                        items = contents
-
-                    if items:
-                        # 2. Define a parser for any version of LSP Hover content
-                        def parse_item(item):
-                            """Returns (text_value, markup_kind, language_id)"""
-                            # Case: Simple string (Deprecated but common)
-                            if isinstance(item, str):
-                                return item, lsp_types.MarkupKind.Markdown, None
-                            
-                            # Case: MarkupContent (The modern standard)
-                            if isinstance(item, lsp_types.MarkupContent):
-                                return item.value, item.kind, None
-                            
-                            # Case: MarkedStringWithLanguage (Deprecated code blocks)
-                            # We wrap this in markdown fences so the UI can highlight it. This ensures that even if our Hint renderer only understands Markdown, the code snippet will still be highlighted correctly.
-                            if hasattr(item, 'language') and hasattr(item, 'value'):
-                                lang = item.language
-                                val = f"```{lang}\n{item.value}\n```"
-                                return val, lsp_types.MarkupKind.Markdown, lang
-                            
-                            return str(item), lsp_types.MarkupKind.PlainText, None
-
-                        # 3. Extract data from all items
-                        parsed_items = [parse_item(it) for it in items]
-                        
-                        # Use the first item to determine the Hint's primary metadata
-                        # (The renderer usually uses one highlight mode for the whole hint)
-                        _, main_kind, main_lang = parsed_items[0]
-                        
-                        # 4. Combine all items into one string for display
-                        # When there are multiple items in a hover (common in languages like Rust or C++), it joins them with a thematic break (---), which is the standard way to separate hover sections in VS Code and other editors.
-                        full_text = "\n\n---\n\n".join(it[0] for it in parsed_items)
+                    first_item = msg.contents[0] if isinstance(msg.contents, list) and len(msg.contents) > 0 else msg.contents
+                    if first_item: # if received anything
+                        if isinstance(first_item, (MarkedString, str)):
+                            # for deprecated 'MarkedString' or 'str' default to 'markdown'
+                            markupkind = MarkupKind.MARKDOWN
+                        else:
+                            # can be a list (supposedly)
+                            markupkind = getattr(first_item, 'kind', None)
 
                         filtered_cmds = self.scfg.filter_commands(self._caret_cmds)
-
-                        Hint.show(
-                            full_text,
-                            caret=_reqpos.target_pos_caret,
-                            cursor_loc_start=_reqpos.cursor_ed,
-                            markupkind=main_kind,
-                            language=main_lang,
-                            caret_cmds=filtered_cmds,
+                        Hint.show(msg.m_str(),
+                                caret=_reqpos.target_pos_caret,   cursor_loc_start=_reqpos.cursor_ed,
+                                markupkind=markupkind,
+                                language=getattr(first_item, 'language', None),
+                                caret_cmds=filtered_cmds,
                         )
                     else:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Hover - no info')
-                        
+
         elif msgtype == events.SignatureHelp:
-            if message_id in self.request_positions:
-                _reqpos = self.request_positions.pop(message_id)
+            if msg.message_id in self.request_positions:
+                _reqpos = self.request_positions.pop(msg.message_id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     hint = msg.get_hint_str()
                     if hint:
@@ -912,24 +878,24 @@ class Language:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Signature help - no info')
 
         elif msgtype == events.SemanticTokens:
-            reqpos = self.request_positions.pop(message_id)
+            reqpos = self.request_positions.pop(msg.message_id)
             self.on_semantic_tokens(reqpos.h_ed, resultId=msg.resultId, data=msg.data)
 
         #GOTOs
         elif msgtype in GOTO_EVENT_TYPES:
             skip_dlg = msgtype == events.Definition
             dlg_caption = GOTO_TITLES.get(msgtype, f'Go to {msgtype.__name__}')
-            reqpos = self.request_positions.pop(message_id)
+            reqpos = self.request_positions.pop(msg.message_id)
             self.do_goto(items=msg.result, dlg_caption=dlg_caption, skip_dlg=skip_dlg, reqpos=reqpos)
 
         elif msgtype == events.MDocumentSymbols:
-            _reqpos = self.request_positions.pop(message_id)
+            _reqpos = self.request_positions.pop(msg.message_id)
             if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed  and  self.treeman:
                 self.treeman.fill_tree(msg.result)
 
         elif msgtype == events.DocumentFormatting:
-            if message_id in self.request_positions:
-                _reqpos = self.request_positions.pop(message_id)
+            if msg.message_id in self.request_positions:
+                _reqpos = self.request_positions.pop(msg.message_id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     ed.set_prop(PROP_RO, False)     # doc is set 'RO' during format-on-save
 
@@ -964,8 +930,8 @@ class Language:
             self.plog.log(msg)
 
         elif msgtype == events.ResponseError:
-            _reqpos = self.request_positions.pop(message_id, None)    # discard
-            data = self.metadata_goto_requests.pop(message_id, None)
+            _reqpos = self.request_positions.pop(msg.message_id, None)    # discard
+            data = self.metadata_goto_requests.pop(msg.message_id, None)
             if data:
                 # Log error for OmniSharp metadata
                 errstr = f'OmniSharp Metadata ResponseError[{msg.code}]: {msg.message}'
@@ -985,12 +951,12 @@ class Language:
             #self.exit()
 
         elif msgtype == events.Metadata:
-            data = self.metadata_goto_requests.pop(message_id, None)
+            data = self.metadata_goto_requests.pop(msg.message_id, None)
             if data:
                 reqpos, targetrange, dlg_caption = data
                 self._handle_metadata(msg.result, targetrange, reqpos, dlg_caption)
             else:
-                print(f'{LOG_NAME}: {self.lang_str} - unknown Metadata id: {message_id}')
+                print(f'{LOG_NAME}: {self.lang_str} - unknown Metadata id: {msg.message_id}')
                 
         else:
             print(f'{LOG_NAME}: {self.lang_str} - unknown Message type: {msgtype}')
