@@ -49,6 +49,10 @@ Command = lsp_types.Command
 InsertTextFormat = lsp_types.InsertTextFormat
 TextEdit = lsp_types.TextEdit
 TextDocumentEdit = lsp_types.TextDocumentEdit
+TextDocumentContentChangeEvent = t.Union[
+    lsp_types.TextDocumentContentChangePartial,
+    lsp_types.TextDocumentContentChangeWholeDocument,
+]
 Location = lsp_types.Location
 LocationLink = lsp_types.LocationLink
 Diagnostic = lsp_types.Diagnostic
@@ -104,7 +108,7 @@ def make_text_document_content_change_event(
     change_end: Position,
     change_text: str,
     old_text: str,
-) -> lsp_types.TextDocumentContentChangeEvent:
+) -> lsp_types.TextDocumentContentChangePartial:
     change_range = Range(start=change_start, end=change_end)
     range_length = change_range.calculate_length(old_text)
     return lsp_types.TextDocumentContentChangePartial(
@@ -114,7 +118,7 @@ def make_text_document_content_change_event(
     )
 
 
-def make_whole_document_change_event(change_text: str) -> lsp_types.TextDocumentContentChangeEvent:
+def make_whole_document_change_event(change_text: str) -> lsp_types.TextDocumentContentChangeWholeDocument:
     return lsp_types.TextDocumentContentChangeWholeDocument(text=change_text)
 
 

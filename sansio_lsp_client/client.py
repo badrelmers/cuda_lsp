@@ -48,6 +48,7 @@ from .structs import (
     CompletionContext,
     CompletionItem,
     CompletionItemKind,
+    TextDocumentContentChangeEvent,
     CompletionList,
     Converter,
     FormattingOptions,
