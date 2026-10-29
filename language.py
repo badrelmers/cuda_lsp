@@ -50,18 +50,33 @@ import attrs
 from lsprotocol import types as lsp
 
 from .sansio_lsp_client import client as lsp_client_mod
-from .sansio_lsp_client import events
 from .sansio_lsp_client.io_handler import unstructure as lsp_unstructure
 
 from .snippet_engine import Snippet, VS_SNIPPET
 
 
 def _dbg_asdict(obj):
-    """ Debug helper: dump an attrs object (events etc) into a plain dict. """
+    """ Debug helper: dump an attrs object (lsprotocol messages etc) into a plain dict. """
     try:
         return attrs.asdict(obj, recurse=True)
     except Exception:
         return {k: str(v) for k, v in attrs.asdict(obj, recurse=True).items()}
+
+
+def hover_contents_str(contents):
+    """ Render hover contents (lsp: MarkupContent | MarkedString | MarkedString[])
+    as a markdown-compatible string.
+    """
+    def item_str(item): #SKIP
+        if isinstance(item, lsp.MarkedStringWithLanguage):
+            return f'[{item.language}]\n{item.value}'
+        elif isinstance(item, lsp.MarkupContent):
+            return f'[{item.kind}]\n{item.value}'
+        return item if isinstance(item, str) else str(item) # str
+
+    if isinstance(contents, list):
+        return '\n'.join((item_str(item) for item in contents))
+    return item_str(contents)
 
 import traceback
 import datetime
@@ -88,12 +103,12 @@ MAX_FORMAT_ON_SAVE_WAIT = 1 # sec
 MIN_TIMER_TIME = 10     # ms
 MAX_TIMER_TIME = 10    # ms
 
-GOTO_EVENT_TYPES = {
-    events.Definition,
-    events.References,
-    events.Implementation,
-    events.TypeDefinition,
-    events.Declaration,
+GOTO_RESPONSE_TYPES = {
+    lsp.DefinitionResponse,
+    lsp.ReferencesResponse,
+    lsp.ImplementationResponse,
+    lsp.TypeDefinitionResponse,
+    lsp.DeclarationResponse,
 }
 CALLABLE_COMPLETIONS = {
     lsp.CompletionItemKind.Method,
@@ -108,11 +123,11 @@ CompletionEdit = namedtuple('CompletionEdit', 'replace_range replace_text x y wo
 Test = namedtuple('Test', 'lexer initial_text replace_range replace_text result_text is_callable is_snippet')
 
 GOTO_TITLES = {
-    events.Definition:      _('Go to: definition'),
-    events.References:      _('Go to: references'),
-    events.Implementation:  _('Go to: implementation'),
-    events.TypeDefinition:  _('Go to: type definition'),
-    events.Declaration:     _('Go to: declaration'),
+    lsp.DefinitionResponse:     _('Go to: definition'),
+    lsp.ReferencesResponse:     _('Go to: references'),
+    lsp.ImplementationResponse: _('Go to: implementation'),
+    lsp.TypeDefinitionResponse: _('Go to: type definition'),
+    lsp.DeclarationResponse:    _('Go to: declaration'),
 }
 
 
@@ -477,50 +492,53 @@ class Language:
 
         msgtype = type(msg)
 
-        if msgtype == events.Initialized:
-            self.scfg = ServerConfig(msg, self.langids, self.lang_str)
+        if msgtype is lsp.InitializeResponse:
+            self.scfg = ServerConfig(msg.result.capabilities, self.langids, self.lang_str)
             app_proc(PROC_EXEC_PLUGIN, 'cuda_lsp,on_lang_inited,'+self.name)
 
-        elif msgtype == events.RegisterCapabilityRequest:
-            self.scfg.on_register(msg)
-            msg.reply() # send confirmation reply to server
+        elif msgtype is lsp.RegistrationRequest:
+            self.scfg.on_register(msg.params.registrations)
+            self.client.respond(msg.id, {}) # send confirmation reply to server
             self.process_queues()
             app_proc(PROC_EXEC_PLUGIN, 'cuda_lsp,on_lang_inited,'+self.name)
 
-        elif msgtype == events.WorkspaceFolders:
-            msg.reply(folders=self.workspace_folders)
+        elif msgtype is lsp.WorkspaceFoldersRequest:
+            self.client.respond(msg.id, self.workspace_folders)
 
-        elif msgtype == events.Completion:
+        elif msgtype is lsp.CompletionResponse:
+            # items are kept as raw dicts (perf optimization) - see client.py
 
-            reqpos = self.request_positions.pop(msg.message_id, None)
+            reqpos = self.request_positions.pop(msg.id, None)
 
-            if msg.completion_list:
-                items = msg.completion_list['items']
-                pass;       LOG and print(f'got completion({len(items)}): {time.time():.3f} {msg.message_id} in {list(self.request_positions)}')
+            completion_list = msg.result
+            if completion_list:
+                items = completion_list['items']
+                pass;       LOG and print(f'got completion({len(items)}): {time.time():.3f} {msg.id} in {list(self.request_positions)}')
             else:
                 items = []
 
             if items is None:
                 items = []
-            if msg.completion_list is None:
-                msg.completion_list = {'isIncomplete': 'false'} # dummy data if CompletionList==null
+            if completion_list is None:
+                completion_list = {'isIncomplete': 'false'} # dummy data if CompletionList==null
 
             if reqpos:
                 try:
                     compl = CompletionMan(self, carets=reqpos.carets, h_ed=reqpos.h_ed)
-                    pass;       LOG_CACHE and print("using fresh results.","items:",len(items)," incomplete:",msg.completion_list['isIncomplete'])
-                    _last_complete = compl.prepare_complete(msg.message_id, items, msg.completion_list['isIncomplete'] == 'true')
+                    pass;       LOG_CACHE and print("using fresh results.","items:",len(items)," incomplete:",completion_list['isIncomplete'])
+                    _last_complete = compl.prepare_complete(msg.id, items, completion_list['isIncomplete'] == 'true')
                     if _last_complete:
                         self._last_complete = _last_complete
                         compl.show_complete(self._last_complete.message_id, self._last_complete.filtered_items)
                 except AssertionError as e:
                     print("NOTE:",e)
 
-        elif msgtype == events.Hover:
-            if msg.message_id in self.request_positions:
-                _reqpos = self.request_positions.pop(msg.message_id)
+        elif msgtype is lsp.HoverResponse:
+            if msg.id in self.request_positions:
+                _reqpos = self.request_positions.pop(msg.id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
-                    first_item = msg.contents[0] if isinstance(msg.contents, list) and len(msg.contents) > 0 else msg.contents
+                    contents = msg.result.contents if msg.result is not None else None
+                    first_item = contents[0] if isinstance(contents, list) and len(contents) > 0 else contents
                     if first_item: # if received anything
                         if isinstance(first_item, (lsp.MarkedStringWithLanguage, str)):
                             # for deprecated 'MarkedString' or 'str' default to 'markdown'
@@ -530,7 +548,7 @@ class Language:
                             markupkind = getattr(first_item, 'kind', None)
 
                         filtered_cmds = self.scfg.filter_commands(self._caret_cmds)
-                        Hint.show(msg.m_str(),
+                        Hint.show(hover_contents_str(contents),
                                 caret=_reqpos.target_pos_caret,   cursor_loc_start=_reqpos.cursor_ed,
                                 markupkind=markupkind,
                                 language=getattr(first_item, 'language', None),
@@ -539,43 +557,47 @@ class Language:
                     else:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Hover - no info')
 
-        elif msgtype == events.SignatureHelp:
-            if msg.message_id in self.request_positions:
-                _reqpos = self.request_positions.pop(msg.message_id)
+        elif msgtype is lsp.SignatureHelpResponse:
+            if msg.id in self.request_positions:
+                _reqpos = self.request_positions.pop(msg.id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
-                    hint = msg.get_hint_str()
+                    sighelp = msg.result
+                    hint = None
+                    if sighelp is not None and len(sighelp.signatures) > 0:
+                        hint = sighelp.signatures[sighelp.active_signature or 0].label
                     if hint:
                         #hint = replace_unbracketed(hint, ',', ',\n\t', brackets={'{':'}', '[':']'})
                         #caret_x, caret_y = _reqpos.carets[0][:2]
                         # 8 - default duration
                         #msg_status_alt(hint, 8, pos=HINTPOS_TEXT_BRACKET, x=caret_x, y=caret_y)
                         
-                        SignaturesDialog.set_text(msg.get_signatures())
+                        SignaturesDialog.set_text((sighelp.signatures, sighelp.active_signature, sighelp.active_parameter))
                         SignaturesDialog.show()
                         
                     else:
                         SignaturesDialog.hide()
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Signature help - no info')
 
-        elif msgtype == events.SemanticTokens:
-            reqpos = self.request_positions.pop(msg.message_id)
-            self.on_semantic_tokens(reqpos.h_ed, resultId=msg.result_id, data=msg.data)
+        elif msgtype is lsp.SemanticTokensResponse:
+            reqpos = self.request_positions.pop(msg.id)
+            result = msg.result
+            self.on_semantic_tokens(reqpos.h_ed, resultId=(result.result_id if result is not None else None), data=(result.data if result is not None else []))
 
         #GOTOs
-        elif msgtype in GOTO_EVENT_TYPES:
-            skip_dlg = msgtype == events.Definition
+        elif msgtype in GOTO_RESPONSE_TYPES:
+            skip_dlg = msgtype is lsp.DefinitionResponse
             dlg_caption = GOTO_TITLES.get(msgtype, f'Go to {msgtype.__name__}')
-            reqpos = self.request_positions.pop(msg.message_id)
+            reqpos = self.request_positions.pop(msg.id)
             self.do_goto(items=msg.result, dlg_caption=dlg_caption, skip_dlg=skip_dlg, reqpos=reqpos)
 
-        elif msgtype == events.MDocumentSymbols:
-            _reqpos = self.request_positions.pop(msg.message_id)
+        elif msgtype is lsp.DocumentSymbolResponse:
+            _reqpos = self.request_positions.pop(msg.id)
             if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed  and  self.treeman:
-                self.treeman.fill_tree(msg.result)
+                self.treeman.fill_tree(msg.result or [])
 
-        elif msgtype == events.DocumentFormatting:
-            if msg.message_id in self.request_positions:
-                _reqpos = self.request_positions.pop(msg.message_id)
+        elif msgtype in (lsp.DocumentFormattingResponse, lsp.DocumentRangeFormattingResponse):
+            if msg.id in self.request_positions:
+                _reqpos = self.request_positions.pop(msg.id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     ed.set_prop(PROP_RO, False)     # doc is set 'RO' during format-on-save
 
@@ -591,53 +613,63 @@ class Language:
                     else:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Document formatting - no info')
 
-        elif msgtype == events.PublishDiagnostics:
+        elif msgtype is lsp.PublishDiagnosticsNotification:
             if IS_WIN:
-                msg.uri = normalize_drive_letter(msg.uri)
-            self.diagnostics_man.set_diagnostics(uri=msg.uri, diag_list=msg.diagnostics)
+                msg.params.uri = normalize_drive_letter(msg.params.uri)
+            self.diagnostics_man.set_diagnostics(uri=msg.params.uri, diag_list=msg.params.diagnostics)
 
-        elif msgtype == events.ConfigurationRequest:
-            cfgs = [ServerConfig.get_configuration(self._cfg, cfgitem) for cfgitem in msg.items]
-            msg.reply(cfgs)
+        elif msgtype is lsp.ConfigurationRequest:
+            cfgs = [ServerConfig.get_configuration(self._cfg, cfgitem) for cfgitem in msg.params.items]
+            self.client.respond(msg.id, cfgs)
 
-        elif msgtype == events.LogMessage:
+        elif msgtype is lsp.LogMessageNotification:
             # abandoning server - ignore logs
             if self._shutting_down is not None:
                 return
-            self.plog.log(msg)
+            self.plog.log(msg.params)
 
-        elif msgtype == events.ShowMessage:
-            self.plog.log(msg)
+        elif msgtype is lsp.ShowMessageNotification:
+            self.plog.log(msg.params)
 
-        elif msgtype == events.ResponseError:
-            _reqpos = self.request_positions.pop(msg.message_id, None)    # discard
-            data = self.metadata_goto_requests.pop(msg.message_id, None)
+        elif msgtype is lsp.ResponseErrorMessage:
+            _reqpos = self.request_positions.pop(msg.id, None)    # discard
+            data = self.metadata_goto_requests.pop(msg.id, None)
             if data:
                 # Log error for OmniSharp metadata
-                errstr = f'OmniSharp Metadata ResponseError[{msg.code}]: {msg.message}'
+                errstr = f'OmniSharp Metadata ResponseError[{msg.error.code}]: {msg.error.message}'
                 self.plog.log_str(errstr, type_=_('Response Error'), severity=SEVERITY_ERR)
             else:
-                errstr = f'ResponseError[{msg.code}]: {msg.message}'
+                errstr = f'ResponseError[{msg.error.code}]: {msg.error.message}'
                 self.plog.log_str(errstr, type_=_('Response Error'), severity=SEVERITY_ERR)
 
-        elif isinstance(msg, events.WorkDoneProgressCreate)  or  issubclass(msgtype, events.Progress):
+        elif msgtype in (lsp.WorkDoneProgressCreateRequest, lsp.ProgressNotification):
             self._on_progress(msg)
 
-        elif msgtype == events.Shutdown:
+        elif msgtype is lsp.ShutdownResponse:
             print(f'{LOG_NAME}: {self.lang_str}[{self.client_state_str}] - got shutdown response, exiting')
             self.client.exit()
             self.process_queues()
             self.shutdown_start_time = time.time()
             #self.exit()
 
-        elif msgtype == events.Metadata:
-            data = self.metadata_goto_requests.pop(msg.message_id, None)
-            if data:
+        elif isinstance(msg, dict):
+            # Raw (non-spec) messages, not typed by lsprotocol:
+            # OmniSharp 'o#/metadata' responses and custom notifications like
+            # Roslyn's 'workspace/projectInitializationComplete'.
+            msg_id = msg.get('id')
+
+            data = self.metadata_goto_requests.pop(msg_id, None)
+            if data is not None:
+                # OmniSharp 'o#/metadata' response
                 reqpos, targetrange, dlg_caption = data
-                self._handle_metadata(msg.result, targetrange, reqpos, dlg_caption)
+                result = msg.get('result')
+                if not isinstance(result, dict):
+                    result = None
+                self._handle_metadata(result, targetrange, reqpos, dlg_caption)
+
             else:
-                print(f'{LOG_NAME}: {self.lang_str} - unknown Metadata id: {msg.message_id}')
-                
+                print(f'{LOG_NAME}: {self.lang_str} - unknown Message type: {msgtype}')
+
         else:
             print(f'{LOG_NAME}: {self.lang_str} - unknown Message type: {msgtype}')
 
@@ -1247,28 +1279,31 @@ class Language:
 
 
     def _on_progress(self, msg):
-        if isinstance(msg, events.WorkDoneProgressCreate):
+        if isinstance(msg, lsp.WorkDoneProgressCreateRequest):
             # on buggy servers token can already exist at this stage.
             # such server bugs must be silently ignored without crashing our plugin.
-            self.progresses.setdefault(msg.token, None) # set to None ONLY if it desn't exist
-            msg.reply()
+            self.progresses.setdefault(msg.params.token, None) # set to None ONLY if it desn't exist
+            self.client.respond(msg.id)
 
-        elif isinstance(msg, events.WorkDoneProgress):
-            val = msg.value
+        elif isinstance(msg, lsp.ProgressNotification):
+            token = msg.params.token
+            val = msg.params.value   # lsp.WorkDoneProgressBegin | WorkDoneProgressReport | WorkDoneProgressEnd
             title = None
-            if isinstance(msg, events.WorkDoneProgressBegin):
-                self.progresses[msg.token] = msg
+            if isinstance(val, lsp.WorkDoneProgressBegin):
+                self.progresses[token] = val
                 title = val.title
                 msg_str = f': {val.message}'  if val.message else ''
 
-            elif isinstance(msg, events.WorkDoneProgressReport):
-                title = self.progresses[msg.token].value.title
+            elif isinstance(val, lsp.WorkDoneProgressReport):
+                begin = self.progresses.get(token)
+                title = begin.title if begin is not None else None
                 msg_str = ''
                 if val.message:                     msg_str = f': {val.message}'
                 elif val.percentage is not None:    msg_str = f' [{val.percentage}%]'
 
-            elif isinstance(msg, events.WorkDoneProgressEnd):
-                title = self.progresses.pop(msg.token).value.title # deletes start-message
+            elif isinstance(val, lsp.WorkDoneProgressEnd):
+                begin = self.progresses.pop(token, None) # deletes start-message
+                title = begin.title if begin is not None else None
                 msg_str = f': {val.message}'  if val.message else  ' [Done]'
 
             if title:
@@ -1666,10 +1701,9 @@ AUTO_METHODS = {
 }
 
 class ServerConfig:
-    def __init__(self, initialized, langids, lang_str):
-        """ initialized - events.Initialized (capabilities: lsp.ServerCapabilities)
+    def __init__(self, capabilities, langids, lang_str):
+        """ capabilities - lsp.ServerCapabilities (from lsp.InitializeResponse)
         """
-        capabilities: lsp.ServerCapabilities = initialized.capabilities
         self.capabs = [] # lsp.Registration (registerOptions stays a raw dict)
         self.lang_str = lang_str
 
@@ -1747,19 +1781,19 @@ class ServerConfig:
                 _opts.update(capval)
             reg(meth, _opts)
 
-    def on_register(self, dynreg):
-        """ process dynamic registration request: RegisterMethodRequest
+    def on_register(self, registrations):
+        """ process dynamic registration request (lsp.RegistrationParams.registrations)
         """
         # check for 'documentSelector' in registerOptions
         # "If set to null the document selector provided on the client side will be used." (c) LSP spec
         reg: lsp.Registration
-        for reg in dynreg.registrations:
+        for reg in registrations:
             if not isinstance(reg.register_options, dict):
                 reg.register_options = self._default_opts
             elif 'documentSelector' not in reg.register_options:
                 reg.register_options['documentSelector'] = self._default_selector
 
-        self.capabs.extend(dynreg.registrations)
+        self.capabs.extend(registrations)
 
     def method_opts(self, method_name, doc=None, ed_self=None, langid=None):
         """ returns: options dict or None

@@ -1,62 +1,33 @@
 """Sans-I/O LSP client state machine.
 
 Sends requests/notifications and turns incoming server messages into
-`events` objects. All LSP payloads are typed with `lsprotocol.types` and
-(de)serialized with the cattrs converter from `lsprotocol.converters`.
+`lsprotocol` message objects. There are **no hand-written LSP types here**:
+
+* JSON-RPC envelopes and payloads come exclusively from
+  ``lsprotocol.types`` (e.g. ``HoverResponse``, ``ShowMessageNotification``,
+  ``RegistrationRequest``, ``ResponseErrorMessage``),
+* method-to-type dispatch uses lsprotocol's own ``METHOD_TO_TYPES`` table,
+* (de)serialization uses the cattrs converter from
+  ``lsprotocol.converters``.
+
+Messages for methods unknown to the LSP specification (e.g. Roslyn's
+``workspace/projectInitializationComplete`` or OmniSharp's ``o#/metadata``)
+are yielded as the raw parsed JSON dict, since lsprotocol has no types for
+them.
 """
 
 import enum
 import typing as t
 
+import attrs
 from lsprotocol import types as lsp
+from lsprotocol.types import METHOD_TO_TYPES
 
-from .events import (
-    Completion,
-    ConfigurationRequest,
-    Declaration,
-    Definition,
-    DocumentFormatting,
-    Event,
-    Hover,
-    Implementation,
-    Initialized,
-    LogMessage,
-    MCallHierarchItems,
-    MDocumentSymbols,
-    MFoldingRanges,
-    MInlayHints,
-    Metadata,
-    MWorkspaceSymbols,
-    MethodResponse,
-    Progress,
-    PublishDiagnostics,
-    References,
-    RegisterCapabilityRequest,
-    ResponseError,
-    SemanticTokens,
-    ServerRequest,
-    ShowMessage,
-    ShowMessageRequest,
-    Shutdown,
-    SignatureHelp,
-    TypeDefinition,
-    WillSaveWaitUntilEdits,
-    WorkDoneProgress,
-    WorkDoneProgressBegin,
-    WorkDoneProgressCreate,
-    WorkDoneProgressEnd,
-    WorkDoneProgressReport,
-    WorkspaceEdit,
-    WorkspaceFolders,
-    WorkspaceProjectInitializationComplete,
-)
 from .io_handler import (
     Id,
     JSONDict,
     JSONList,
     ProgressToken,
-    Request,
-    Response,
     _make_request,
     _make_response,
     _parse_messages,
@@ -72,8 +43,6 @@ __all__ = [
     "JSONDict",
     "JSONList",
     "ProgressToken",
-    "Request",
-    "Response",
 ]
 
 
@@ -169,6 +138,30 @@ CAPABILITIES: JSONDict = {
 }
 
 
+def _to_raw(value: t.Any) -> t.Any:
+    """Convert a value to JSON-serializable data.
+
+    lsprotocol/attrs objects (and lists/tuples thereof) are unstructured
+    with the shared converter; raw JSON data is passed through unchanged.
+    """
+    if isinstance(value, (list, tuple)):
+        return [_to_raw(v) for v in value]
+    if value is not None and attrs.has(type(value)):
+        return unstructure(value)
+    return value
+
+
+# Methods whose result is `Location | Location[] | LocationLink[]`.
+_GOTO_RESPONSE_METHODS = frozenset(
+    (
+        "textDocument/definition",
+        "textDocument/implementation",
+        "textDocument/declaration",
+        "textDocument/typeDefinition",
+    )
+)
+
+
 class Client:
     # TODO: Save the encoding given here.
     def __init__(
@@ -189,16 +182,13 @@ class Client:
         self._send_buf = bytearray()
 
         # Keeps track of which IDs match to which unanswered requests.
-        self._unanswered_requests: t.Dict[Id, Request] = {}
+        self._unanswered_requests: t.Dict[Id, str] = {}
 
         # Just a simple counter to make sure we have unique IDs. We could make
         # sure that this fits into a JSONRPC Number, seeing as Python supports
         # bignums, but I think that's an unlikely enough case that checking for
         # it would just litter the code unnecessarily.
         self._id_counter = 0
-
-        # Store type of '$/progress' for parsing
-        self._progress_tokens_map: t.Dict[ProgressToken, t.Type[Progress]] = {}
 
         # We'll just immediately send off an "initialize" request.
         self._send_request(
@@ -237,7 +227,7 @@ class Client:
         self._id_counter += 1
 
         self._send_buf += _make_request(method=method, params=params, id=id)
-        self._unanswered_requests[id] = Request(id=id, method=method, params=params)
+        self._unanswered_requests[id] = method
         return id
 
     def _send_notification(
@@ -253,77 +243,64 @@ class Client:
     ) -> None:
         self._send_buf += _make_response(id=id, result=result, error=error)
 
-    # helpers for structuring common response payload shapes ---------------
+    # ------------------------------------------------------------------
+    # Incoming messages: raw JSON dict -> lsprotocol message objects
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def _structure_or_none(
-        result: t.Any, cls: t.Any
-    ) -> t.Optional[t.Any]:
-        """Structure `result` with cattrs; None stays None."""
-        if result is None:
-            return None
-        return structure(result, cls)
+    def _structure_progress_params(params: JSONDict) -> lsp.ProgressParams:
+        """Structure ``$/progress`` params.
 
-    @staticmethod
-    def _structure_goto_result(
-        result: t.Any,
-    ) -> t.Optional[t.Union[lsp.Location, t.List[t.Union[lsp.Location, lsp.LocationLink]]]]:
-        """Structure Definition/Declaration/Implementation/TypeDefinition result.
-
-        Per spec it is `Location | Location[] | LocationLink[] | null`;
-        disambiguation is done on the 'targetUri' key of LocationLink.
+        ``ProgressParams.value`` is typed ``LSPAny`` in the spec (progress
+        values are extensible), so the converter leaves it as a raw dict.
+        The well-known ``window/workDoneProgress`` kinds are structured into
+        their lsprotocol classes here; unknown kinds stay raw.
         """
-        if result is None:
-            return None
-        if isinstance(result, list):
-            structured = []
-            for item in result:
-                if isinstance(item, dict) and "targetUri" in item:
-                    structured.append(structure(item, lsp.LocationLink))
-                else:
-                    structured.append(structure(item, lsp.Location))
-            return structured
-        if isinstance(result, dict) and "targetUri" in result:
-            return structure(result, lsp.LocationLink)
-        return structure(result, lsp.Location)
+        p = structure(params, lsp.ProgressParams)
+        value = p.value
+        if isinstance(value, dict):
+            kind = value.get("kind")
+            if kind == "begin":
+                p.value = structure(value, lsp.WorkDoneProgressBegin)
+            elif kind == "report":
+                p.value = structure(value, lsp.WorkDoneProgressReport)
+            elif kind == "end":
+                p.value = structure(value, lsp.WorkDoneProgressEnd)
+        return p
 
-    @staticmethod
-    def _structure_symbols(result: t.Any) -> t.Optional[
-        t.Union[t.List[lsp.SymbolInformation], t.List[lsp.DocumentSymbol]]
-    ]:
-        """Structure documentSymbol result: DocumentSymbol[] or SymbolInformation[].
+    def _handle_request(self, content: JSONDict) -> t.Any:
+        """Handle a server->client request or notification."""
+        method: str = content["method"]
 
-        Disambiguation is done on the 'location' key of SymbolInformation.
-        """
-        if result is None:
-            return None
-        if not isinstance(result, list):
-            raise ValueError(f"bad documentSymbol result: {result!r}")
-        if not result:
-            return []
-        if isinstance(result[0], dict) and "location" in result[0]:
-            return structure(result, t.List[lsp.SymbolInformation])
-        return structure(result, t.List[lsp.DocumentSymbol])
+        if method == "$/progress":
+            # if "window/workDoneProgress/create" request from server was missing -
+            # it's not an error: the notification is still parsed fine.
+            # such server bugs must be silently ignored without crashing our plugin.
+            return lsp.ProgressNotification(
+                params=self._structure_progress_params(content.get("params") or {})
+            )
 
-    # response from server
-    def _handle_response(self, response: Response) -> Event:
-        assert response.id is not None
-        request = self._unanswered_requests.pop(response.id)
+        types = METHOD_TO_TYPES.get(method)
+        if types is None:
+            # Not part of the LSP spec (e.g. Roslyn's
+            # 'workspace/projectInitializationComplete'): no lsprotocol type
+            # exists, yield the raw parsed message.
+            return content
+
+        return structure(content, types[0])
+
+    def _handle_response(self, content: JSONDict) -> t.Any:
+        """Handle a response to one of our requests."""
+        response_id = content.get("id")
+        method = self._unanswered_requests.pop(response_id, None)
+        if method is None:
+            # Response to a request we never made (or already answered) -
+            # a server bug; don't let it kill the message stream.
+            return content
 
         # FIXME: The errors have meanings.
-        if response.error is not None:
-            # raise RuntimeError("Response error!\n\n" + pprint.pformat(response.error))
-            err = ResponseError(
-                message_id=response.id,
-                code=response.error.get("code", 0),
-                message=response.error.get("message", ""),
-                data=response.error.get("data"),
-            )
-            return err
-
-        event: Event
-
-        method = request.method
+        if content.get("error") is not None:
+            return structure(content, lsp.ResponseErrorMessage)
 
         if method == "initialize":
             assert self._state == ClientState.WAITING_FOR_INITIALIZED
@@ -333,258 +310,83 @@ class Client:
             self._send_notification("workspace/didChangeConfiguration", params={
                 "settings": self.settings
             })
-            init_result = structure(response.result, lsp.InitializeResult)
-            event = Initialized(capabilities=init_result.capabilities)
             self._state = ClientState.NORMAL
+            return structure(content, lsp.InitializeResponse)
 
-        elif method == "shutdown":
+        if method == "shutdown":
             assert self._state == ClientState.WAITING_FOR_SHUTDOWN
-            event = Shutdown()
             self._state = ClientState.SHUTDOWN
+            return structure(content, lsp.ShutdownResponse)
 
-        elif method == "textDocument/completion":
-            completion_list = None
+        if method == "textDocument/completion":
+            # ! structuring the completion list is expensive and not really
+            # needed: items are kept as raw dicts (perf optimization).
+            result = content.get("result")
+            if isinstance(result, list):
+                # legacy: bare CompletionItem[] -> CompletionList shape
+                result = {"isIncomplete": False, "items": result}
+            return lsp.CompletionResponse(id=response_id, result=result)
 
-            if isinstance(response.result, dict):
-                completion_list = response.result
-            elif isinstance(response.result, list):
-                completion_list = {
-                    'isIncomplete': 'false',
-                    'items': response.result,
-                }
+        types = METHOD_TO_TYPES.get(method)
+        if types is None or types[1] is None:
+            # Custom method not in the LSP spec (e.g. OmniSharp 'o#/metadata'):
+            # no lsprotocol response type exists, yield the raw parsed message.
+            return content
 
-            ## ! structuring the completion list is expensive and not really
-            ## needed: items are kept as raw dicts (perf optimization).
-            event = Completion(
-                message_id=response.id, completion_list=completion_list
-            )
-
-        elif method == "textDocument/willSaveWaitUntil":
-            event = WillSaveWaitUntilEdits(
-                edits=self._structure_or_none(response.result, t.List[lsp.TextEdit])
-            )
-
-        elif method == "textDocument/hover":
-            if response.result is not None:
-                hover = structure(response.result, lsp.Hover)
-                event = Hover(contents=hover.contents, range=hover.range)
-            else:
-                event = Hover(contents=[])  # null response
-            event.message_id = response.id
-
-        elif method == "textDocument/foldingRange":
-            raw = response.result if response.result is not None else []
-            event = MFoldingRanges(
-                message_id=response.id,
-                result=structure(raw, t.List[lsp.FoldingRange]),
-            )
-
-        elif method == "textDocument/signatureHelp":
-            if response.result is not None:
-                sighelp = structure(response.result, lsp.SignatureHelp)
-                event = SignatureHelp(
-                    signatures=list(sighelp.signatures),
-                    active_signature=sighelp.active_signature,
-                    active_parameter=sighelp.active_parameter,
+        if method in _GOTO_RESPONSE_METHODS:
+            result = content.get("result")
+            if isinstance(result, dict) and "targetUri" in result:
+                # Non-conformant server sent a single LocationLink *object*
+                # (the spec only allows LocationLink[]). lsprotocol's
+                # Location hook would misread it as a Location and fail;
+                # structure it explicitly instead.
+                return types[1](
+                    id=response_id, result=structure(result, lsp.LocationLink)
                 )
-            else:
-                event = SignatureHelp(signatures=[])  # null response
-            event.message_id = response.id
 
-        elif method == "textDocument/documentSymbol":
-            raw = response.result if response.result is not None else []
-            event = MDocumentSymbols(
-                message_id=response.id,
-                result=self._structure_symbols(raw),
-            )
+        return structure(content, types[1])
 
-        elif method == "textDocument/inlayHint":
-            event = MInlayHints(
-                message_id=response.id,
-                result=self._structure_or_none(response.result, t.List[lsp.InlayHint]),
-            )
+    def _handle_message(self, content: JSONDict) -> t.Any:
+        if "method" in content:
+            return self._handle_request(content)
+        return self._handle_response(content)
 
-        elif method == "textDocument/rename":
-            if response.result is not None and isinstance(response.result, dict):
-                if "documentChanges" in response.result:
-                    document_changes = [
-                        structure(change, lsp.TextDocumentEdit)
-                        for change in response.result["documentChanges"]
-                    ]
-                    event = WorkspaceEdit(
-                        message_id=response.id, document_changes=document_changes
-                    )
-                elif "changes" in response.result:
-                    changes = structure(
-                        response.result["changes"],
-                        t.Dict[str, t.List[lsp.TextEdit]],
-                    )
-                    event = WorkspaceEdit(
-                        message_id=response.id, changes=changes
-                    )
-                else:
-                    event = WorkspaceEdit(message_id=response.id)
-            else:
-                event = WorkspaceEdit(message_id=response.id)
+    # ------------------------------------------------------------------
+    # Public I/O
+    # ------------------------------------------------------------------
 
-        elif method == "textDocument/semanticTokens/full":
-            if response.result is None:
-                event = SemanticTokens(data=[])
-            else:
-                tokens = structure(response.result, lsp.SemanticTokens)
-                event = SemanticTokens(result_id=tokens.result_id, data=list(tokens.data))
-            event.message_id = response.id
-
-        #GOTOs
-        elif method == "textDocument/definition":
-            event = Definition(result=self._structure_goto_result(response.result))
-            event.message_id = response.id
-
-        elif method == "textDocument/references":
-            event = References(
-                result=self._structure_or_none(response.result, t.List[lsp.Location])
-            )
-
-        elif method == "textDocument/implementation":
-            event = Implementation(result=self._structure_goto_result(response.result))
-
-        elif method == "textDocument/declaration":
-            event = Declaration(result=self._structure_goto_result(response.result))
-
-        elif method == "textDocument/typeDefinition":
-            event = TypeDefinition(result=self._structure_goto_result(response.result))
-
-        elif method == "textDocument/prepareCallHierarchy":
-            event = MCallHierarchItems(
-                result=self._structure_or_none(
-                    response.result, t.List[lsp.CallHierarchyItem]
-                )
-            )
-
-        elif method in ("textDocument/formatting", "textDocument/rangeFormatting"):
-            event = DocumentFormatting(
-                result=self._structure_or_none(response.result, t.List[lsp.TextEdit])
-            )
-
-        # WORKSPACE
-        elif method == "workspace/symbol":
-            event = MWorkspaceSymbols(
-                result=self._structure_or_none(
-                    response.result, t.List[lsp.SymbolInformation]
-                )
-            )
-
-        elif method == "o#/metadata":
-            metadata_result = response.result if isinstance(response.result, dict) else None
-            event = Metadata(message_id=response.id, result=metadata_result)
-
-        else:
-            raise NotImplementedError((response, request))
-
-        if isinstance(event, MethodResponse):
-            event.message_id = response.id
-
-        return event
-
-    # request from server
-    def _handle_request(self, request: Request) -> Event:
-        params = request.params if isinstance(request.params, dict) else {}
-
-        def bind_server_request(event: ServerRequest) -> Event:
-            assert request.id is not None
-            event._id = request.id
-            event._client = self
-            return event
-
-        if request.method == "workspace/workspaceFolders":
-            # We don't need to parse WorkspaceFolders server's request!
-            # because according to LSP specs "params: none"
-            # Just create empty event and return it
-            return bind_server_request(WorkspaceFolders(result=None))
-
-        elif request.method == "workspace/configuration":
-            p = structure(params, lsp.ConfigurationParams)
-            return bind_server_request(ConfigurationRequest(items=list(p.items)))
-
-        elif request.method == "workspace/projectInitializationComplete":
-            return WorkspaceProjectInitializationComplete()
-
-        elif request.method == "window/showMessage":
-            p = structure(params, lsp.ShowMessageParams)
-            return ShowMessage(type=p.type, message=p.message)
-
-        elif request.method == "window/showMessageRequest":
-            p = structure(params, lsp.ShowMessageRequestParams)
-            event = ShowMessageRequest(
-                type=p.type,
-                message=p.message,
-                actions=list(p.actions) if p.actions is not None else None,
-            )
-            return bind_server_request(event)
-
-        elif request.method == "window/logMessage":
-            p = structure(params, lsp.LogMessageParams)
-            return LogMessage(type=p.type, message=p.message)
-
-        elif request.method == "textDocument/publishDiagnostics":
-            p = structure(params, lsp.PublishDiagnosticsParams)
-            return PublishDiagnostics(uri=p.uri, diagnostics=list(p.diagnostics))
-
-        elif request.method == "window/workDoneProgress/create":
-            token = params.get("token")
-            self._progress_tokens_map[token] = WorkDoneProgress
-            return bind_server_request(WorkDoneProgressCreate(token=token))
-
-        elif request.method == "client/registerCapability":
-            p = structure(params, lsp.RegistrationParams)
-            return bind_server_request(
-                RegisterCapabilityRequest(registrations=list(p.registrations))
-            )
-
-        elif request.method == "$/progress":
-            token = params.get("token")
-            self._progress_tokens_map.setdefault(token, WorkDoneProgress)
-
-            # if "window/workDoneProgress/create" request from server was missing -
-            # pretend it actually was already recieved. i think there is no harm in that.
-            # such server bugs must be silently ignored without crashing our plugin.
-            value = params.get("value") or {}
-            kind = value.get("kind")
-
-            if kind == "begin":
-                return WorkDoneProgressBegin(
-                    token=token, value=structure(value, lsp.WorkDoneProgressBegin)
-                )
-            elif kind == "report":
-                return WorkDoneProgressReport(
-                    token=token, value=structure(value, lsp.WorkDoneProgressReport)
-                )
-            elif kind == "end":
-                self._progress_tokens_map.pop(token, None)  # prevent the dictionary from growing indefinitely.
-                return WorkDoneProgressEnd(
-                    token=token, value=structure(value, lsp.WorkDoneProgressEnd)
-                )
-            else:
-                raise ValueError(f"Unknown progress kind: {kind}")
-
-        else:
-            raise NotImplementedError(request)
-
-    def recv(self, data: bytes) -> t.Iterator[Event]:
+    def recv(self, data: bytes) -> t.Iterator[t.Any]:
         self._recv_buf += data
         # Make sure to use lots of iterators, so that if one message fails to
         # parse, the messages before it are yielded successfully before the
         # error, and the messages after it are left in _recv_buf.
-        for message in _parse_messages(self._recv_buf):
-            if isinstance(message, Response):
-                yield self._handle_response(message)
-            else:
-                yield self._handle_request(message)
+        for content in _parse_messages(self._recv_buf):
+            yield self._handle_message(content)
 
     def send(self) -> bytes:
         send_buf = self._send_buf[:]
         self._send_buf.clear()
         return send_buf
+
+    def respond(
+        self,
+        id: Id,
+        result: t.Any = None,
+        error: t.Optional[lsp.ResponseError] = None,
+    ) -> None:
+        """Reply to a server->client request.
+
+        ``result`` may be raw JSON data or lsprotocol objects (or lists
+        thereof); lsprotocol objects are unstructured automatically.
+
+        No bytes are actually returned from this method, the reply's bytes
+        are added to the client's internal send buffer.
+        """
+        self._send_response(
+            id=id,
+            result=_to_raw(result),
+            error=(unstructure(error) if error is not None else None),
+        )
 
     def shutdown(self) -> None:
         assert self._state == ClientState.NORMAL
@@ -600,6 +402,10 @@ class Client:
     def cancel_last_request(self) -> None:
         params = unstructure(lsp.CancelParams(id=self._id_counter - 1))
         self._send_notification(method="$/cancelRequest", params=params)
+
+    # ------------------------------------------------------------------
+    # Client -> server notifications
+    # ------------------------------------------------------------------
 
     def did_open(self, text_document: lsp.TextDocumentItem) -> None:
         assert self._state == ClientState.NORMAL
@@ -677,6 +483,10 @@ class Client:
         self._send_notification(
             method="workspace/didChangeWorkspaceFolders", params=unstructure(params)
         )
+
+    # ------------------------------------------------------------------
+    # Client -> server requests (return the request id)
+    # ------------------------------------------------------------------
 
     def completion(
         self,

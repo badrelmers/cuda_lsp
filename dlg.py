@@ -9,9 +9,6 @@ import cudatext_cmd as cmds
 
 from lsprotocol import types as lsp
 
-# imported on ~access
-#from .sansio_lsp_client import LogMessage, ShowMessage
-
 LogMsg = namedtuple('LogMsg', 'msg type severity')
 
 _   = apx.get_translation(__file__)  # I18N
@@ -394,17 +391,15 @@ class PanelLog:
     TAG_ED_MENU_WRAP = 'ed_wrap'
 
     def __init__(self, panel_name, state=None):
-        global LogMessage, ShowMessage
-        from .sansio_lsp_client import LogMessage, ShowMessage
         PanelLog.panels[panel_name] = self
         PanelLog.type_captions = {
-            ShowMessage: TYPE_MSG,
-            LogMessage: TYPE_LOG,
+            lsp.ShowMessageParams: TYPE_MSG,
+            lsp.LogMessageParams: TYPE_LOG,
         }
 
         self.name = panel_name
 
-        self._msgs = [] # ShowMessage, LogMessage, tuple(type_, str)
+        self._msgs = [] # lsp.ShowMessageParams, lsp.LogMessageParams, tuple(type_, str)
         self._extra_types = set() # server stderr, etc
         self.diag_filename_info = {}
         # filter panel: disabled "categories"
@@ -638,7 +633,7 @@ class PanelLog:
             self._memo.set_prop(PROP_LINE_TOP, self._memo.get_prop(PROP_LINE_TOP))
         ##
 
-    def log(self, msg):   # events: ShowMessage, LogMessage
+    def log(self, msg):   # lsp: ShowMessageParams, LogMessageParams
         severity_str = SEVERITY_MAP[msg.type.value]
         self.log_str(msg.message, type_=type(msg), severity=severity_str, scroll=True)
 

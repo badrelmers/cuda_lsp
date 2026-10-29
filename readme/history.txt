@@ -1,7 +1,11 @@
 2026.10.27
-* change: replaced 'pydantic' dependency with pure-Python 'attrs'+'cattrs'+'lsprotocol' (LSP types now come from the official lsprotocol package); bundled in subfolder lsp_modules, supports Python 3.8...3.14+, no compiled binaries needed anymore
+* change: replaced 'pydantic' dependency with pure-Python 'attrs'+'cattrs'+'lsprotocol'; bundled in subfolder lsp_modules, supports Python 3.8...3.14+, no compiled binaries needed anymore
+* change: lsprotocol is now used exclusively for ALL LSP types: sansio_lsp_client yields lsprotocol message objects (e.g. lsp.HoverResponse, lsp.PublishDiagnosticsNotification, lsp.RegistrationRequest, lsp.ResponseErrorMessage), dispatched via lsprotocol's METHOD_TO_TYPES table; hand-written event/struct classes (events.py, structs.py) and the custom JSON-RPC envelope were removed
+* change: replies to server requests are now sent via client.respond(id, result) instead of event.reply()
+* change: completion response items are kept as raw dicts (perf: no per-item object creation)
 - fix: 'workspace/didChangeWorkspaceFolders' notification now uses the spec-required 'event' wrapper
 - fix: diagnostics without 'severity' field no longer break the diagnostics panel
+- fix: unknown server methods / unknown response ids no longer kill the receive batch (raw passthrough)
 
 2026.07.08
 - fix: avoid deprecated API: PROP_SCROLL_HORZ (by Alexey T.)
@@ -195,7 +199,7 @@
 
 2021.04.26
 + add: plugin allows to configure server per-project, using *.cuda-proj-lsp files located 
-	near *.cuda-proj file (for example Golang server supports this)
+        near *.cuda-proj file (for example Golang server supports this)
 + add: command "Configure server for current project"
 
 2021.04.19

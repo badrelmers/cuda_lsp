@@ -1,17 +1,18 @@
 """Sans-I/O JSON-RPC transport layer for the Language Server Protocol.
 
-Handles the "Content-Length" framing used by LSP, plus creation and parsing
-of raw JSON-RPC messages (requests, notifications, responses).
+Handles the "Content-Length" framing used by LSP, plus creation of raw
+JSON-RPC messages (requests, notifications, responses).
 
-All LSP payload types come from `lsprotocol`; (de)serialization is done with
-the cattrs converter provided by `lsprotocol.converters`.
+This module deals with *raw JSON data only*: every LSP type (including the
+JSON-RPC message envelopes, e.g. ``lsprotocol.types.HoverResponse``) comes
+from `lsprotocol`; (de)serialization is done with the cattrs converter
+provided by ``lsprotocol.converters``.
 """
 
 import json
 import re
 import typing as t
 
-import attrs
 from lsprotocol.converters import get_converter as _get_lsp_converter
 
 JSONDict = t.Dict[str, t.Any]
@@ -41,26 +42,8 @@ def unstructure(obj: t.Any) -> t.Any:
 
 
 # ---------------------------------------------------------------------------
-# JSON-RPC envelope (not part of lsprotocol's type definitions)
+# Outgoing messages: raw JSON -> bytes
 # ---------------------------------------------------------------------------
-
-
-@attrs.define
-class Request:
-    """A JSON-RPC request or notification, from either side of the wire."""
-
-    method: str
-    id: t.Optional[Id] = None
-    params: t.Optional[t.Union[JSONList, JSONDict]] = None
-
-
-@attrs.define
-class Response:
-    """A JSON-RPC response message sent from server to client."""
-
-    id: t.Optional[Id] = None
-    result: t.Optional[t.Union[JSONList, JSONDict]] = None
-    error: t.Optional[JSONDict] = None
 
 
 def _make_headers(content_length: int, encoding: str = "utf-8") -> bytes:
@@ -132,6 +115,10 @@ def _make_response(
     return request
 
 
+# ---------------------------------------------------------------------------
+# Incoming messages: bytes -> raw JSON dicts
+# ---------------------------------------------------------------------------
+
 # Example: "application/vscode-jsonrpc; charset=utf-8" -->
 # ("application/vscode-jsonrpc", {"charset": "utf-8"})
 def _parse_content_type(header: str) -> t.Tuple[str, t.Dict[str, str]]:
@@ -146,21 +133,6 @@ def _parse_content_type(header: str) -> t.Tuple[str, t.Dict[str, str]]:
     return content_type, metadata
 
 
-def _message_from_dict(data: JSONDict) -> t.Union[Request, Response]:
-    """Build a Request/Response envelope from a parsed JSON-RPC message."""
-    if "method" in data:
-        return Request(
-            method=data["method"],
-            id=data.get("id"),
-            params=data.get("params"),
-        )
-    return Response(
-        id=data.get("id"),
-        result=data.get("result"),
-        error=data.get("error"),
-    )
-
-
 # _parse_messages is kind of tricky.
 #
 # It used to work like this:
@@ -168,7 +140,7 @@ def _message_from_dict(data: JSONDict) -> t.Union[Request, Response]:
 #   - Yield parsed things (Responses and Requests)
 #   - Raise IncompleteResponseError if parsing fails by running out of bytes
 #
-# Then, if the bytes contained two valid things (Responses or Requests) and
+# Then, if the bytes contained two valid things (Responses and Requests) and
 # then only a part of another thing, this function would first parse and yield
 # the valid things and then raise IncompleteResponseError, outputting no
 # information about which bytes hadn't been parsed yet. The code calling this
@@ -186,7 +158,7 @@ def _message_from_dict(data: JSONDict) -> t.Union[Request, Response]:
 # iterator when a message was parsed but no things were created.
 def _parse_one_message(
     response_buf: bytearray,
-) -> t.Optional[t.Iterable[t.Union[Request, Response]]]:
+) -> t.Optional[t.Iterable[JSONDict]]:
     """Parse a single JSON-RPC message from a bytearray.
 
     Args:
@@ -194,7 +166,7 @@ def _parse_one_message(
 
     Returns:
         None if there's not enough data for a complete message,
-        or an iterable of Request or Response objects if a message was parsed
+        or an iterable of parsed JSON dicts if a message was parsed
         successfully.
 
     Note: This function modifies response_buf by removing parsed data."""
@@ -240,8 +212,8 @@ def _parse_one_message(
     # This is a good place for deleting unnecessary stuff from response_buf
     # because if the code below fails, then leaving the cause of failure to
     # response_buf would cause this function to fail every time in the future
-    # when called with the same response_buf. I think I've had this issue a
-    # long time ago, and it was annoying how one response parsing error would
+    # when called with the same response_buf. I think I've had this issue
+    # a long time ago, and it was annoying how one response parsing error would
     # also block the parsing of any future responses.
     if unused_bytes_count == 0:  # 'del response_buf[:-0]' does wrong thing
         response_buf.clear()
@@ -252,20 +224,20 @@ def _parse_one_message(
 
     if isinstance(content, list):
         # This is in response to a batch operation.
-        return map(_message_from_dict, content)
+        return [c for c in content if isinstance(c, dict)]
     else:
-        return [_message_from_dict(content)]
+        return [content]
 
 
-def _parse_messages(response_buf: bytearray) -> t.Iterator[t.Union[Response, Request]]:
+def _parse_messages(response_buf: bytearray) -> t.Iterator[JSONDict]:
     """Parse all complete JSON-RPC messages from a bytearray.
 
     Args:
         response_buf: A bytearray containing zero or more JSON-RPC messages.
 
     Returns:
-        An iterator yielding Request or Response objects for each complete
-        message. Partial messages at the end of the buffer are left for future
+        An iterator yielding the parsed JSON dict of each complete message.
+        Partial messages at the end of the buffer are left for future
         parsing.
 
     Note: This function modifies response_buf by removing parsed data."""
