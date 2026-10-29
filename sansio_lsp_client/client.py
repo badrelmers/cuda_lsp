@@ -253,7 +253,11 @@ class Client:
 
         # FIXME: The errors have meanings.
         if response.error is not None:
-            err = ResponseError.model_validate(response.error)
+            err = ResponseError(
+                code=response.error.get("code"),
+                message=response.error.get("message", ""),
+                data=response.error.get("data"),
+            )
             err.message_id = response.id
             return err
 
@@ -270,7 +274,7 @@ class Client:
                 "workspace/didChangeConfiguration",
                 params={"settings": self.settings},
             )
-            event = Initialized.model_validate(response.result)
+            event = Initialized(capabilities=response.result or {})
             self._state = ClientState.NORMAL
 
         elif method == "shutdown":
@@ -301,7 +305,7 @@ class Client:
 
         elif method == "textDocument/hover":
             if response.result is not None:
-                event = Hover.model_validate(response.result)
+                event = Converter.structure(response.result, Hover)
             else:
                 event = Hover(contents=[])  # null response
             event.message_id = response.id
@@ -314,7 +318,7 @@ class Client:
 
         elif method == "textDocument/signatureHelp":
             if response.result is not None:
-                event = SignatureHelp.model_validate(response.result)
+                event = Converter.structure(response.result, SignatureHelp)
             else:
                 event = SignatureHelp(signatures=[])  # null response
             event.message_id = response.id
@@ -326,7 +330,7 @@ class Client:
             )
 
         elif method == "textDocument/inlayHint":
-            event = MInlayHints.model_validate(response.result)
+            event = Converter.structure(response.result or [], MInlayHints)
             event.message_id = response.id
 
         elif method == "textDocument/rename":
@@ -352,35 +356,35 @@ class Client:
             if response.result is None:
                 event = SemanticTokens(data=[])
             else:
-                event = SemanticTokens.model_validate(response.result)
+                event = Converter.structure(response.result, SemanticTokens)
             event.message_id = response.id
 
         #GOTOs
         elif method == "textDocument/definition":
-            event = Definition.model_validate({"result": response.result})
+            event = Definition(result=response.result)
             event.message_id = response.id
 
         elif method == "textDocument/references":
-            event = References.model_validate({"result": response.result})
+            event = References(result=response.result)
 
         elif method == "textDocument/implementation":
-            event = Implementation.model_validate({"result": response.result})
+            event = Implementation(result=response.result)
 
         elif method == "textDocument/declaration":
-            event = Declaration.model_validate({"result": response.result})
+            event = Declaration(result=response.result)
 
         elif method == "textDocument/typeDefinition":
-            event = TypeDefinition.model_validate({"result": response.result})
+            event = TypeDefinition(result=response.result)
 
         elif method == "textDocument/prepareCallHierarchy":
-            event = MCallHierarchItems.model_validate({"result": response.result})
+            event = MCallHierarchItems(result=response.result)
 
         elif method in ("textDocument/formatting", "textDocument/rangeFormatting"):
-            event = DocumentFormatting.model_validate({"result": response.result})
+            event = DocumentFormatting(result=response.result)
 
         # WORKSPACE
         elif method == "workspace/symbol":
-            event = MWorkspaceSymbols.model_validate({"result": response.result})
+            event = MWorkspaceSymbols(result=response.result)
 
         elif method == "o#/metadata":
             metadata_result = response.result if isinstance(response.result, dict) else None
@@ -399,14 +403,14 @@ class Client:
         def parse_request(event_cls: t.Type[Event]) -> Event:
             if issubclass(event_cls, ServerRequest):
                 params = request.params or {}
-                event = event_cls.model_validate(params)
+                event = Converter.structure(params, event_cls)
                 assert request.id is not None
                 event._id = request.id
                 event._client = self
                 return event
             if issubclass(event_cls, ServerNotification):
                 params = request.params or {}
-                return event_cls.model_validate(params)
+                return Converter.structure(params, event_cls)
             raise TypeError(
                 "`event_cls` must be a subclass of ServerRequest or ServerNotification"
             )

@@ -70,10 +70,10 @@ from .snippet_engine import Snippet, VS_SNIPPET
 import traceback
 import datetime
 
-LOG = False
+LOG = True
 LOG_CACHE = False
 DEBUG_COMPLETION = False
-DEBUG_MESSAGES = False
+DEBUG_MESSAGES = True
 DBG = LOG
 LOG_NAME = 'LSP'
 
