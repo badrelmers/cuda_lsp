@@ -241,10 +241,12 @@ class Client:
         # Pop the matching request using the ID
         request = self._unanswered_requests.pop(response_id)
 
+        print("NOTE: =======response",response)
         # Safely check for error existence
         # FIXME: The errors have meanings.
         error_payload = response.get('error')
         if error_payload is not None:
+            print("NOTE: =======error_payload",error_payload)
             err = ResponseError(
                 code=error_payload.get("code"),
                 message=error_payload.get("message", ""),

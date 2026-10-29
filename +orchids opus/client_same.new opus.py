@@ -1,0 +1,999 @@
+import enum
+import json
+import re
+import typing as t
+
+import attrs
+from lsprotocol import converters, types as lsp_types
+
+Converter = converters.get_converter()
+
+# Type aliases for readability (from structs.py)
+JSONDict = t.Dict[str, t.Any]
+JSONList = t.List[t.Any]
+Id = t.Union[int, str]
+ProgressToken = t.Union[int, str]
+
+
+@attrs.define
+class Request:
+    """Internal request tracking structure"""
+    jsonrpc: str = attrs.field(default="2.0", init=False)
+    method: str
+    params: t.Optional[t.Union[JSONDict, JSONList]] = None
+    id: t.Optional[Id] = None
+
+
+# ============================================================================
+# Events - Custom event classes for cases where lsprotocol types don't suffice
+# ============================================================================
+
+@attrs.define
+class Event:
+    """Base class for all events"""
+    pass
+
+
+@attrs.define
+class Initialized(Event):
+    """Server initialization complete event"""
+    capabilities: JSONDict = attrs.field()
+
+
+@attrs.define
+class Shutdown(Event):
+    """Server shutdown event"""
+    pass
+
+
+@attrs.define
+class ResponseError(Event):
+    """Error response from server"""
+    code: int = attrs.field()
+    message: str = attrs.field()
+    data: t.Optional[t.Union[str, int, float, bool, t.List[t.Any], JSONDict, None]] = attrs.field(default=None)
+    message_id: t.Optional[Id] = attrs.field(default=None)
+
+
+@attrs.define
+class Completion(Event):
+    """Completion response wrapper"""
+    message_id: Id = attrs.field()
+    completion_list: t.Optional[t.Dict[str, t.Any]] = attrs.field(default=None)
+
+
+@attrs.define
+class WillSaveWaitUntilEdits(Event):
+    """Will save wait until edits response"""
+    edits: t.Optional[t.List[lsp_types.TextEdit]] = attrs.field(default=None)
+
+
+@attrs.define
+class MCallHierarchItems(Event):
+    """Call hierarchy items response wrapper"""
+    result: t.Union[t.List[lsp_types.CallHierarchyItem], None] = attrs.field()
+
+
+@attrs.define
+class MWorkspaceSymbols(Event):
+    """Workspace symbols response wrapper"""
+    message_id: t.Optional[Id] = attrs.field(default=None)
+    result: t.Union[t.List[lsp_types.SymbolInformation], None] = attrs.field()
+
+
+@attrs.define
+class MFoldingRanges(Event):
+    """Folding ranges response wrapper"""
+    message_id: t.Optional[Id] = attrs.field(default=None)
+    result: t.Optional[t.List[lsp_types.FoldingRange]] = attrs.field(default=None)
+
+
+@attrs.define
+class MInlayHints(Event):
+    """Inlay hints response wrapper"""
+    message_id: t.Optional[Id] = attrs.field(default=None)
+    result: t.Optional[t.List[lsp_types.InlayHint]] = attrs.field(default=None)
+
+
+@attrs.define
+class MDocumentSymbols(Event):
+    """Document symbols response wrapper"""
+    message_id: t.Optional[Id] = attrs.field(default=None)
+    result: t.Union[t.List[lsp_types.SymbolInformation], t.List[lsp_types.DocumentSymbol], None] = attrs.field(default=None)
+
+
+@attrs.define
+class Metadata(Event):
+    """Omnisharp metadata response"""
+    message_id: t.Optional[Id] = attrs.field(default=None)
+    result: t.Optional[JSONDict] = attrs.field(default=None)
+
+
+@attrs.define
+class SemanticTokensEvent(Event):
+    """Semantic tokens response wrapper"""
+    message_id: t.Optional[Id] = attrs.field(default=None)
+    data: t.List[int] = attrs.field(factory=list)
+    result_id: t.Optional[str] = attrs.field(default=None)
+
+
+@attrs.define
+class WorkspaceEditEvent(Event):
+    """Workspace edit response wrapper (for rename, etc.)"""
+    message_id: t.Optional[Id] = attrs.field(default=None)
+    document_changes: t.Optional[t.List[lsp_types.TextDocumentEdit]] = attrs.field(default=None)
+    changes: t.Optional[t.Dict[str, t.List[lsp_types.TextEdit]]] = attrs.field(default=None)
+
+
+@attrs.define
+class SignatureHelpEvent(Event):
+    """Signature help response wrapper with helper methods"""
+    message_id: t.Optional[Id] = attrs.field(default=None)
+    signatures: t.List[lsp_types.SignatureInformation] = attrs.field(factory=list)
+    active_signature: t.Optional[int] = attrs.field(default=None)
+    active_parameter: t.Optional[int] = attrs.field(default=None)
+
+    def get_hint_str(self) -> t.Optional[str]:
+        if len(self.signatures) == 0:
+            return None
+        active_sig = self.active_signature or 0
+        sig = self.signatures[active_sig]
+        return sig.label
+
+    def get_signatures(self):
+        if len(self.signatures) == 0:
+            return None
+        return self.signatures, self.active_signature, self.active_parameter
+
+
+# ============================================================================
+# Server Request/Notification types - need special handling for requests
+# ============================================================================
+
+# Server request IDs - stored separately from events for response handling
+@attrs.define
+class ServerRequestInfo:
+    """Tracks server request that needs a response"""
+    request_id: Id
+    method: str
+
+
+# ============================================================================
+# IO Handler functions (from io_handler.py)
+# ============================================================================
+
+_CONTENT_TYPE_PARAM_RE = re.compile(r'(\w+)\s*=\s*(?:(?:"([^"]*)")|([^;,\s]*))')
+
+
+def _make_headers(content_length: int, encoding: str = "utf-8") -> bytes:
+    headers_bytes = bytearray()
+    headers = {
+        "Content-Length": content_length,
+        "Content-Type": f"application/vscode-jsonrpc; charset={encoding}",
+    }
+    for key, value in headers.items():
+        headers_bytes += f"{key}: {value}\r\n".encode(encoding)
+    headers_bytes += b"\r\n"
+    return headers_bytes
+
+
+def _make_request(
+    method: str,
+    params: t.Optional[JSONDict] = None,
+    id: t.Optional[Id] = None,
+    *,
+    encoding: str = "utf-8",
+) -> bytes:
+    request = bytearray()
+
+    # Set up the actual JSONRPC content and encode it.
+    content: JSONDict = {"jsonrpc": "2.0", "method": method}
+    if params is not None:
+        content["params"] = params
+    if id is not None:
+        content["id"] = id
+    encoded_content = json.dumps(content).encode(encoding)
+
+    # Write the headers to the request body
+    request += _make_headers(content_length=len(encoded_content), encoding=encoding)
+
+    # Append the content to the request
+    request += encoded_content
+
+    return request
+
+
+def _make_response(
+    id: t.Union[int, str],
+    result: t.Optional[t.Union[JSONDict, JSONList]] = None,
+    error: t.Optional[JSONDict] = None,
+    *,
+    encoding: str = "utf-8",
+) -> bytes:
+    request = bytearray()
+
+    # Set up the actual JSONRPC content and encode it.
+    content: JSONDict = {"jsonrpc": "2.0", "id": id}
+    # content["result"]: The result of a request. This member is REQUIRED on success.
+    # This member MUST NOT exist if there was an error invoking the method.
+    if result is not None:
+        content["result"] = result
+    if error is not None:
+        content["error"] = error
+    elif result is None:
+        content["result"] = None  # "result": null
+
+    encoded_content = json.dumps(content).encode(encoding)
+
+    # Write the headers to the request body
+    request += _make_headers(content_length=len(encoded_content), encoding=encoding)
+
+    # Append the content to the request
+    request += encoded_content
+
+    return request
+
+
+# Example: "application/vscode-jsonrpc; charset=utf-8" --> ("application/vscode-jsonrpc", {"charset": "utf-8"})
+def _parse_content_type(header: str) -> t.Tuple[str, t.Dict[str, str]]:
+    content_type, _, param_string = header.partition(";")
+    content_type = content_type.strip().lower()
+
+    metadata = {
+        m.group(1).lower(): (m.group(2) or m.group(3))
+        for m in _CONTENT_TYPE_PARAM_RE.finditer(param_string)
+    }
+
+    return content_type, metadata
+
+
+def _parse_one_message(response_buf: bytearray) -> t.Optional[t.Iterable[dict]]:
+    """Parse a single JSON-RPC message from a bytearray.
+
+    Args:
+        response_buf: A bytearray containing JSON-RPC messages.
+
+    Returns:
+        None if there's not enough data for a complete message,
+        or the raw dicts if a message was parsed successfully.
+
+    Note: This function modifies response_buf by removing parsed data.
+    """
+    if b"\r\n\r\n" not in response_buf:
+        return None
+
+    header_lines, raw_content = bytes(response_buf).split(b"\r\n\r\n", 1)
+
+    # Many langservers don't set Content-Type header for whatever reason. We
+    # use a sane default for that.
+    #
+    # Langserver spec links to RFC 7230 which says that header names should be
+    # case-insensitive.
+    headers = {"content-type": "application/vscode-jsonrpc; charset=utf-8"}
+    for header_line in header_lines.split(b"\r\n"):
+        key, value = header_line.decode("ascii").split(": ", 1)
+        headers[key.lower()] = value
+
+    # We will now parse the Content-Type and Content-Length headers. Since for
+    # version 3.0 of the Language Server Protocol they're the only ones, we can
+    # just verify they're there and not keep them around in the Response
+    # object.
+    assert set(headers.keys()) == {"content-type", "content-length"}
+
+    # Content-Type and encoding.
+    content_type, metadata = _parse_content_type(headers["content-type"])
+    assert content_type == "application/vscode-jsonrpc"
+    encoding = metadata["charset"]
+
+    # Content-Length
+    content_length = int(headers["content-length"])
+
+    # We need to verify that the raw_content is long enough.
+    if len(raw_content) < content_length:
+        # incomplete request
+        return None
+
+    # Take only as many bytes as we need. If there's any remaining, they're
+    # the next response's.
+    unused_bytes_count = len(raw_content) - content_length
+    raw_content = raw_content[:content_length]
+
+    # This is a good place for deleting unnecessary stuff from response_buf
+    # because if the code below fails, then leaving the cause of failure to
+    # response_buf would cause this function to fail every time in the future
+    # when called with the same response_buf. I think I've had this issue a
+    # long time ago, and it was annoying how one response parsing error would
+    # also block the parsing of any future responses.
+    if unused_bytes_count == 0:  # 'del response_buf[:-0]' does wrong thing
+        response_buf.clear()
+    else:
+        del response_buf[:-unused_bytes_count]
+
+    content = json.loads(raw_content.decode(encoding))
+
+    # LSP can send a single dict or a list (batch).
+    # We ensure we return an iterable of dicts.
+    if isinstance(content, list):
+        # This is in response to a batch operation.
+        return content
+    else:
+        return [content]
+
+
+def _parse_messages(response_buf: bytearray) -> t.Optional[t.Iterable[dict]]:
+    """Parse all complete JSON-RPC messages from a bytearray.
+
+    Args:
+        response_buf: A bytearray containing zero or more JSON-RPC messages.
+
+    Returns:
+        An iterator yielding the raw dicts for each complete message.
+        Partial messages at the end of the buffer are left for future parsing.
+
+    Note: This function modifies response_buf by removing parsed data.
+    """
+    while True:
+        parsed = _parse_one_message(response_buf)
+        if parsed is None:
+            break
+        yield from parsed
+
+
+# ============================================================================
+# Client State
+# ============================================================================
+
+class ClientState(enum.Enum):
+    NOT_INITIALIZED = enum.auto()
+    WAITING_FOR_INITIALIZED = enum.auto()
+    NORMAL = enum.auto()
+    WAITING_FOR_SHUTDOWN = enum.auto()
+    SHUTDOWN = enum.auto()
+    EXITED = enum.auto()
+
+
+# NOTE: Server capabilities: resolveProvider - info about completion item -- can't use?
+CAPABILITIES: JSONDict = {
+    "textDocument": {
+        "synchronization": {
+            "didSave": True,
+            # 'willSaveWaitUntil': True,
+            "dynamicRegistration": True,
+            # 'willSave': True
+        },
+        "publishDiagnostics": {
+            "relatedInformation": True,
+            "tagSupport": {"valueSet": [1, 2]}
+        },
+        "completion": {
+            "dynamicRegistration": True,
+            "completionItem": {"snippetSupport": True},
+            "completionItemKind": {"valueSet": list(lsp_types.CompletionItemKind)},
+            "contextSupport": True,
+        },
+        "hover": {
+            "dynamicRegistration": True,
+            "contentFormat": ["markdown", "plaintext"],
+        },
+        "foldingRange": {
+            "dynamicRegistration": True,
+        },
+        "inlayHint": {
+            "dynamicRegistration": True,
+        },
+        "definition": {"dynamicRegistration": True, "linkSupport": True},
+        "signatureHelp": {
+            "dynamicRegistration": True,
+            "signatureInformation": {
+                "parameterInformation": {
+                    "labelOffsetSupport": True  # substring from label
+                },
+                "documentationFormat": ["markdown", "plaintext"],
+                "activeParameterSupport": True
+            },
+        },
+        "implementation": {"linkSupport": True, "dynamicRegistration": True},
+        "references": {"dynamicRegistration": True},
+        "callHierarchy": {"dynamicRegistration": True},
+        "declaration": {"linkSupport": True, "dynamicRegistration": True},
+        "typeDefinition": {"linkSupport": True, "dynamicRegistration": True},
+        "formatting": {"dynamicRegistration": True},
+        "rangeFormatting": {"dynamicRegistration": True},
+        "rename": {"dynamicRegistration": True},
+        "documentSymbol": {
+            "hierarchicalDocumentSymbolSupport": True,
+            "dynamicRegistration": True,
+            "symbolKind": {"valueSet": list(lsp_types.SymbolKind)},
+        },
+    },
+    "window": {
+        "showMessage": {
+            # TODO 'messageActionItem':...
+        },
+        "workDoneProgress": True,
+    },
+    "workspace": {
+        "symbol": {
+            "dynamicRegistration": True,
+            "symbolKind": {"valueSet": list(lsp_types.SymbolKind)},
+        },
+        "workspaceFolders": True,
+        # TODO 'workspaceEdit':..., 'applyEdit':..., 'executeCommand':...,
+        "configuration": True,
+        "didChangeConfiguration": {"dynamicRegistration": True},
+    },
+}
+
+
+# ============================================================================
+# Client class
+# ============================================================================
+
+class Client:
+    def __init__(
+        self,
+        process_id: t.Optional[int] = None,
+        root_uri: t.Optional[str] = None,
+        workspace_folders: t.Optional[t.List[lsp_types.WorkspaceFolder]] = None,
+        trace: str = "off",
+        settings: t.Optional[JSONDict] = None,
+    ) -> None:
+        self._state = ClientState.NOT_INITIALIZED
+
+        # Used to save data as it comes in (from `receive_bytes`) until we have
+        # a full request.
+        self._recv_buf = bytearray()
+
+        # Things that we still need to send.
+        self._send_buf = bytearray()
+
+        # Keeps track of which IDs match to which unanswered requests.
+        self._unanswered_requests: t.Dict[Id, Request] = {}
+
+        # Just a simple counter to make sure we have unique IDs.
+        self._id_counter = 0
+
+        # Store type of '$/progress' for parsing
+        self._progress_tokens_map: t.Dict[ProgressToken, str] = {}
+
+        # Settings for workspace/didChangeConfiguration
+        self.settings = settings or {}
+
+        # We'll just immediately send off an "initialize" request.
+        self._send_request(
+            method="initialize",
+            params={
+                "processId": process_id,
+                "rootUri": root_uri,
+                "workspaceFolders": (
+                    None
+                    if workspace_folders is None
+                    else [Converter.unstructure(f) for f in workspace_folders]
+                ),
+                "trace": trace,
+                "capabilities": CAPABILITIES,
+                "initializationOptions": self.settings,
+            },
+        )
+        self._state = ClientState.WAITING_FOR_INITIALIZED
+
+    @property
+    def state(self) -> ClientState:
+        return self._state
+
+    @property
+    def is_initialized(self) -> bool:
+        return (
+            self._state != ClientState.NOT_INITIALIZED
+            and self._state != ClientState.WAITING_FOR_INITIALIZED
+        )
+
+    def _send_request(self, method: str, params: t.Optional[JSONDict] = None) -> Id:
+        id: Id = self._id_counter
+        self._id_counter += 1
+
+        self._send_buf += _make_request(method=method, params=params, id=id)
+        self._unanswered_requests[id] = Request(id=id, method=method, params=params)
+        return id
+
+    def _send_notification(self, method: str, params: t.Optional[JSONDict] = None) -> None:
+        self._send_buf += _make_request(method=method, params=params)
+
+    def send_response(
+        self,
+        id: Id,
+        result: t.Optional[t.Union[JSONDict, JSONList]] = None,
+        error: t.Optional[JSONDict] = None,
+    ) -> None:
+        """Send a response to a server request. Public method for language.py to use."""
+        self._send_buf += _make_response(id=id, result=result, error=error)
+
+    # response from server
+    def _handle_response(self, response: t.Any) -> Event:
+        # Use .get() to avoid KeyError
+        response_id = response.get('id')
+        assert response_id is not None
+
+        # Pop the matching request using the ID
+        request = self._unanswered_requests.pop(response_id)
+
+        # Safely check for error existence
+        error_payload = response.get('error')
+        if error_payload is not None:
+            err = ResponseError(
+                code=error_payload.get("code"),
+                message=error_payload.get("message", ""),
+                data=error_payload.get("data"),
+            )
+            err.message_id = response_id
+            return err
+
+        event: Event
+        method = request.method
+        result = response.get('result')  # result can be None, list, or dict
+
+        if method == "initialize":
+            assert self._state == ClientState.WAITING_FOR_INITIALIZED
+            self._send_notification("initialized", params={})  # params=None doesn't work with gopls
+            self._send_notification(
+                "workspace/didChangeConfiguration",
+                params={"settings": self.settings},
+            )
+            event = Initialized(capabilities=result or {})
+            self._state = ClientState.NORMAL
+
+        elif method == "shutdown":
+            assert self._state == ClientState.WAITING_FOR_SHUTDOWN
+            event = Shutdown()
+            self._state = ClientState.SHUTDOWN
+
+        elif method == "textDocument/completion":
+            completion_list = None
+            if isinstance(result, dict):
+                completion_list = result
+            elif isinstance(result, list):
+                completion_list = {
+                    "isIncomplete": False,
+                    "items": result,
+                }
+            event = Completion(message_id=response_id, completion_list=completion_list)
+
+        elif method == "textDocument/willSaveWaitUntil":
+            edits = None
+            if isinstance(result, list):
+                edits = [Converter.structure(entry, lsp_types.TextEdit) for entry in result]
+            event = WillSaveWaitUntilEdits(edits=edits)
+
+        elif method == "textDocument/hover":
+            # Return lsprotocol Hover directly
+            event = Converter.structure(result, lsp_types.Hover) if result else None
+
+        elif method == "textDocument/foldingRange":
+            event = MFoldingRanges(
+                message_id=response_id,
+                result=result if result is not None else [],
+            )
+
+        elif method == "textDocument/signatureHelp":
+            if result is not None:
+                sig_help = Converter.structure(result, lsp_types.SignatureHelp)
+                event = SignatureHelpEvent(
+                    message_id=response_id,
+                    signatures=sig_help.signatures,
+                    active_signature=sig_help.active_signature,
+                    active_parameter=sig_help.active_parameter,
+                )
+            else:
+                event = SignatureHelpEvent(message_id=response_id, signatures=[])
+
+        elif method == "textDocument/documentSymbol":
+            event = MDocumentSymbols(
+                message_id=response_id,
+                result=result if result is not None else [],
+            )
+
+        elif method == "textDocument/inlayHint":
+            hints = [Converter.structure(h, lsp_types.InlayHint) for h in (result or [])]
+            event = MInlayHints(message_id=response_id, result=hints)
+
+        elif method == "textDocument/rename":
+            if result is not None and isinstance(result, dict):
+                if "documentChanges" in result:
+                    document_changes = [
+                        Converter.structure(change, lsp_types.TextDocumentEdit)
+                        for change in result["documentChanges"]
+                    ]
+                    event = WorkspaceEditEvent(
+                        message_id=response_id, document_changes=document_changes
+                    )
+                elif "changes" in result:
+                    event = WorkspaceEditEvent(
+                        message_id=response_id, changes=result["changes"]
+                    )
+                else:
+                    event = WorkspaceEditEvent(message_id=response_id)
+            else:
+                event = WorkspaceEditEvent(message_id=response_id)
+
+        elif method == "textDocument/semanticTokens/full":
+            if result is None:
+                event = SemanticTokensEvent(data=[])
+            else:
+                tokens = Converter.structure(result, lsp_types.SemanticTokens)
+                event = SemanticTokensEvent(
+                    message_id=response_id,
+                    data=tokens.data,
+                    result_id=tokens.result_id,
+                )
+
+        elif method == "textDocument/definition":
+            event = Converter.structure(response, lsp_types.DefinitionResponse)
+
+        elif method == "textDocument/references":
+            event = Converter.structure(response, lsp_types.ReferencesResponse)
+
+        elif method == "textDocument/implementation":
+            event = Converter.structure(response, lsp_types.ImplementationResponse)
+
+        elif method == "textDocument/declaration":
+            event = Converter.structure(response, lsp_types.DeclarationResponse)
+
+        elif method == "textDocument/typeDefinition":
+            event = Converter.structure(response, lsp_types.TypeDefinitionResponse)
+
+        elif method == "textDocument/prepareCallHierarchy":
+            event = MCallHierarchItems(result=result)
+
+        elif method == "textDocument/formatting":
+            event = Converter.structure(response, lsp_types.DocumentFormattingResponse)
+
+        elif method == "textDocument/rangeFormatting":
+            event = Converter.structure(response, lsp_types.DocumentRangeFormattingResponse)
+
+        elif method == "workspace/symbol":
+            event = MWorkspaceSymbols(message_id=response_id, result=result)
+
+        elif method == "o#/metadata":
+            metadata_result = result if isinstance(result, dict) else None
+            event = Metadata(message_id=response_id, result=metadata_result)
+
+        else:
+            raise NotImplementedError((response, request))
+
+        return event
+
+    # request from server
+    def _handle_request(self, request: t.Any) -> t.Tuple[Event, t.Optional[ServerRequestInfo]]:
+        """Handle a request or notification from the server.
+        
+        Returns:
+            Tuple of (event, server_request_info) where server_request_info is non-None
+            for requests that need a response.
+        """
+        method = request.get('method')
+        params = request.get('params') or {}
+        request_id = request.get('id')
+
+        server_req_info = None
+        if request_id is not None:
+            server_req_info = ServerRequestInfo(request_id=request_id, method=method)
+
+        event: Event
+
+        if method == "workspace/workspaceFolders":
+            # Server wants workspace folders - return as lsprotocol type
+            event = lsp_types.WorkspaceFoldersServerCapabilities()
+
+        elif method == "workspace/configuration":
+            # Configuration request - use lsprotocol type
+            event = Converter.structure(params, lsp_types.ConfigurationParams)
+
+        elif method == "workspace/projectInitializationComplete":
+            # Custom notification (omnisharp)
+            event = Event()
+
+        elif method == "window/showMessage":
+            event = Converter.structure(params, lsp_types.ShowMessageParams)
+
+        elif method == "window/showMessageRequest":
+            event = Converter.structure(params, lsp_types.ShowMessageRequestParams)
+
+        elif method == "window/logMessage":
+            event = Converter.structure(params, lsp_types.LogMessageParams)
+
+        elif method == "textDocument/publishDiagnostics":
+            event = Converter.structure(params, lsp_types.PublishDiagnosticsParams)
+
+        elif method == "window/workDoneProgress/create":
+            token = params.get('token')
+            if token is not None:
+                self._progress_tokens_map[token] = "WorkDoneProgress"
+            event = Converter.structure(params, lsp_types.WorkDoneProgressCreateParams)
+
+        elif method == "client/registerCapability":
+            event = Converter.structure(params, lsp_types.RegistrationParams)
+
+        elif method == "$/progress":
+            token = params.get('token')
+            progress_type = self._progress_tokens_map.get(token)
+
+            # if "window/workDoneProgress/create" request from server was missing -
+            # pretend it actually was already received
+            if progress_type is None:
+                self._progress_tokens_map[token] = "WorkDoneProgress"
+
+            value = params.get('value', {})
+            kind = value.get('kind')
+
+            if kind == "begin":
+                event = Converter.structure(value, lsp_types.WorkDoneProgressBegin)
+            elif kind == "report":
+                event = Converter.structure(value, lsp_types.WorkDoneProgressReport)
+            elif kind == "end":
+                if token in self._progress_tokens_map:
+                    del self._progress_tokens_map[token]
+                event = Converter.structure(value, lsp_types.WorkDoneProgressEnd)
+            else:
+                raise ValueError(f"Unknown progress kind: {kind}")
+
+        else:
+            raise NotImplementedError(request)
+
+        return event, server_req_info
+
+    def recv(self, data: bytes) -> t.Iterator[t.Tuple[t.Optional[Id], Event, t.Optional[ServerRequestInfo]]]:
+        """Parse received data and yield (message_id, event, server_request_info) tuples.
+        
+        Returns:
+            Iterator of tuples where:
+            - message_id: The ID from our original request (for responses), or None
+            - event: The parsed Event object or lsprotocol type
+            - server_request_info: Info about server request needing response, or None
+        """
+        self._recv_buf += data
+        for message in _parse_messages(self._recv_buf):
+            # Distinguish between Response and Request/Notification
+            if "method" not in message:
+                # It's a Response
+                event = self._handle_response(message)
+                yield (message['id'], event, None)
+            else:
+                # It's a Request or Notification
+                event, server_req_info = self._handle_request(message)
+                yield (None, event, server_req_info)
+
+    def send(self) -> bytes:
+        send_buf = self._send_buf[:]
+        self._send_buf.clear()
+        return send_buf
+
+    def shutdown(self) -> None:
+        assert self._state == ClientState.NORMAL
+        self._send_request(method="shutdown")
+        self._state = ClientState.WAITING_FOR_SHUTDOWN
+
+    def exit(self) -> None:
+        assert self._state == ClientState.SHUTDOWN
+        self._send_notification(method="exit", params={})
+        self._state = ClientState.EXITED
+
+    def cancel_last_request(self) -> None:
+        self._send_notification(
+            method="$/cancelRequest", params={"id": self._id_counter - 1}
+        )
+
+    def did_open(self, text_document: lsp_types.TextDocumentItem) -> None:
+        assert self._state == ClientState.NORMAL
+        self._send_notification(
+            method="textDocument/didOpen",
+            params={"textDocument": Converter.unstructure(text_document)},
+        )
+
+    def did_change(
+        self,
+        text_document: lsp_types.VersionedTextDocumentIdentifier,
+        content_changes: t.List[lsp_types.TextDocumentContentChangeEvent],
+    ) -> None:
+        assert self._state == ClientState.NORMAL
+        content_changes_payload = [Converter.unstructure(evt) for evt in content_changes]
+        self._send_notification(
+            method="textDocument/didChange",
+            params={
+                "textDocument": Converter.unstructure(text_document),
+                "contentChanges": content_changes_payload,
+            },
+        )
+
+    def did_change_configuration(self, settings: t.Any) -> None:
+        assert self._state == ClientState.NORMAL
+        self._send_notification(
+            method="workspace/didChangeConfiguration", params={"settings": settings}
+        )
+
+    def will_save(
+        self, text_document: lsp_types.TextDocumentIdentifier, reason: lsp_types.TextDocumentSaveReason
+    ) -> None:
+        assert self._state == ClientState.NORMAL
+        self._send_notification(
+            method="textDocument/willSave",
+            params={"textDocument": Converter.unstructure(text_document), "reason": reason.value},
+        )
+
+    def will_save_wait_until(
+        self, text_document: lsp_types.TextDocumentIdentifier, reason: lsp_types.TextDocumentSaveReason
+    ) -> None:
+        assert self._state == ClientState.NORMAL
+        self._send_request(
+            method="textDocument/willSaveWaitUntil",
+            params={"textDocument": Converter.unstructure(text_document), "reason": reason.value},
+        )
+
+    def did_save(
+        self, text_document: lsp_types.TextDocumentIdentifier, text: t.Optional[str] = None
+    ) -> None:
+        assert self._state == ClientState.NORMAL
+        params: t.Dict[str, t.Any] = {"textDocument": Converter.unstructure(text_document)}
+        if text is not None:
+            params["text"] = text
+        self._send_notification(method="textDocument/didSave", params=params)
+
+    def did_close(self, text_document: lsp_types.TextDocumentIdentifier) -> None:
+        assert self._state == ClientState.NORMAL
+        self._send_notification(
+            method="textDocument/didClose",
+            params={"textDocument": Converter.unstructure(text_document)},
+        )
+
+    def did_change_workspace_folders(
+        self, added: t.List[lsp_types.WorkspaceFolder], removed: t.List[lsp_types.WorkspaceFolder]
+    ) -> None:
+        assert self._state == ClientState.NORMAL
+        params = {
+            "added": [Converter.unstructure(f) for f in added],
+            "removed": [Converter.unstructure(f) for f in removed],
+        }
+        self._send_notification(
+            method="workspace/didChangeWorkspaceFolders", params=params
+        )
+
+    def completion(
+        self,
+        text_document_position: lsp_types.TextDocumentPositionParams,
+        context: t.Optional[lsp_types.CompletionContext] = None,
+    ) -> Id:
+        assert self._state == ClientState.NORMAL
+        params = {}
+        params.update(Converter.unstructure(text_document_position))
+        if context is not None:
+            params.update({'context': Converter.unstructure(context)})
+        return self._send_request(method="textDocument/completion", params=params)
+
+    def semantic_tokens(self, text_document: lsp_types.TextDocumentIdentifier) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/semanticTokens/full",
+            params={"textDocument": Converter.unstructure(text_document)},
+        )
+
+    def rename(
+        self,
+        text_document_position: lsp_types.TextDocumentPositionParams,
+        new_name: str,
+    ) -> Id:
+        assert self._state == ClientState.NORMAL
+        params = {
+            **Converter.unstructure(text_document_position),
+            "newName": new_name,
+        }
+        return self._send_request(method="textDocument/rename", params=params)
+
+    def hover(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/hover", params=Converter.unstructure(text_document_position)
+        )
+
+    def folding_range(self, text_document: lsp_types.TextDocumentIdentifier) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/foldingRange",
+            params={"textDocument": Converter.unstructure(text_document)},
+        )
+
+    def signatureHelp(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/signatureHelp",
+            params=Converter.unstructure(text_document_position),
+        )
+
+    def definition(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/definition", params=Converter.unstructure(text_document_position)
+        )
+
+    def declaration(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/declaration",
+            params=Converter.unstructure(text_document_position),
+        )
+
+    def inlay_hint(self, text_document: lsp_types.TextDocumentIdentifier, range: lsp_types.Range) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/inlayHint",
+            params={
+                "textDocument": Converter.unstructure(text_document),
+                "range": Converter.unstructure(range),
+            },
+        )
+
+    def typeDefinition(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/typeDefinition",
+            params=Converter.unstructure(text_document_position),
+        )
+
+    def references(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+        assert self._state == ClientState.NORMAL
+        params = {
+            "context": {"includeDeclaration": True},
+            **Converter.unstructure(text_document_position),
+        }
+        return self._send_request(method="textDocument/references", params=params)
+
+    def prepareCallHierarchy(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/prepareCallHierarchy",
+            params=Converter.unstructure(text_document_position),
+        )
+
+    def implementation(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/implementation",
+            params=Converter.unstructure(text_document_position),
+        )
+
+    def workspace_symbol(self, query: str = "") -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(method="workspace/symbol", params={"query": query})
+
+    def documentSymbol(self, text_document: lsp_types.TextDocumentIdentifier) -> Id:
+        assert self._state == ClientState.NORMAL
+        return self._send_request(
+            method="textDocument/documentSymbol",
+            params={"textDocument": Converter.unstructure(text_document)},
+        )
+
+    def formatting(
+        self, text_document: lsp_types.TextDocumentIdentifier, options: lsp_types.FormattingOptions
+    ) -> Id:
+        assert self._state == ClientState.NORMAL
+        params = {
+            "textDocument": Converter.unstructure(text_document),
+            "options": Converter.unstructure(options),
+        }
+        return self._send_request(method="textDocument/formatting", params=params)
+
+    def rangeFormatting(
+        self,
+        text_document: lsp_types.TextDocumentIdentifier,
+        range: lsp_types.Range,
+        options: lsp_types.FormattingOptions,
+    ) -> Id:
+        assert self._state == ClientState.NORMAL
+        params = {
+            "textDocument": Converter.unstructure(text_document),
+            "range": Converter.unstructure(range),
+            "options": Converter.unstructure(options),
+        }
+        return self._send_request(method="textDocument/rangeFormatting", params=params)
+
+    def metadata(self, params: JSONDict) -> Id:
+        """Omnisharp-specific metadata request"""
+        return self._send_request(method="o#/metadata", params=params)
