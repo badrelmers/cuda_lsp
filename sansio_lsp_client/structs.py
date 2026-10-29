@@ -1,3 +1,4 @@
+import enum
 import typing as t
 
 import attrs
@@ -7,8 +8,6 @@ JSONDict = t.Dict[str, t.Any]
 JSONList = t.List[t.Any]
 
 Id = t.Union[int, str]
-
-ProgressToken = t.Union[int, str]
 
 
 Converter = converters.get_converter()
@@ -75,16 +74,21 @@ CompletionOptions = lsp_types.CompletionOptions
 CompletionRegistrationOptions = lsp_types.CompletionRegistrationOptions
 ConfigurationItem = lsp_types.ConfigurationItem
 ProgressToken = lsp_types.ProgressToken
-WorkDoneProgressBegin = lsp_types.WorkDoneProgressBegin
-WorkDoneProgressReport = lsp_types.WorkDoneProgressReport
-WorkDoneProgressEnd = lsp_types.WorkDoneProgressEnd
+WorkDoneProgressBeginValue = lsp_types.WorkDoneProgressBegin
+WorkDoneProgressReportValue = lsp_types.WorkDoneProgressReport
+WorkDoneProgressEndValue = lsp_types.WorkDoneProgressEnd
 
 
 Range = lsp_types.Range
 Position = lsp_types.Position
 TextDocumentPosition = lsp_types.TextDocumentPositionParams
 TextDocumentSaveReason = lsp_types.TextDocumentSaveReason
-WorkDoneProgressKind = lsp_types.WorkDoneProgressKind
+
+
+class WorkDoneProgressKind(str, enum.Enum):
+    BEGIN = "begin"
+    REPORT = "report"
+    END = "end"
 
 
 def _range_from_positions(change_start: Position, change_end: Position) -> Range:
