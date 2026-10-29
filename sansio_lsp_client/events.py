@@ -34,8 +34,10 @@ from .structs import (
     unstructure,
 )
 
-if t.TYPE_CHECKING:  # avoid import cycle at runtime, Only imported during type checking, not at runtime!
+if t.TYPE_CHECKING:  # avoid import cycle at runtime
     from .client import Client
+else:
+    Client = t.Any  # type: ignore, we need it to fix "name 'Client' is not defined" error, pydantic fix this automatically so we did not need this but attrs does not fix it
 
 
 @attrs.define
@@ -60,14 +62,10 @@ class ResponseError(Event):
 
 @attrs.define
 class ServerRequest(Event):
-    # mimic Pydantic's PrivateAttr(). 
-    # Pydantic's PrivateAttr is invisible to validation, Pydantic excludes private attributes from the generated constructor and the validation logic. It only looks for "Public" fields. init=False make attrs behave like Pydantic. an alternative is to use 'from __future__ import annotations'
-    # init=False tells attrs not to expect those fields in the constructor, so Converter.structure(params, WorkDoneProgressCreate) will succeed when params only contains the LSP fields (like token)
-    # we need also to make it optional t.Optional["Client"] to prevent this error: NameError: name 'Client' is not defined. The error is happening because attrs is trying to resolve the forward reference "Client" at runtime (during Converter.structure), but Client isn't available since it's only imported under TYPE_CHECKING.
-    _client: t.Optional["Client"] = attrs.field(init=False)
-    _id: t.Optional[Id] = attrs.field(init=False)
-    
-    
+    _client: Client = attrs.field()
+    _id: Id = attrs.field()
+
+
 @attrs.define
 class ServerNotification(Event):
     pass
