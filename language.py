@@ -8,6 +8,9 @@ import subprocess
 import re
 from threading import Thread
 from collections import namedtuple, defaultdict
+from cattrs.errors import BaseValidationError
+from cattrs.v import transform_error
+import exceptiongroup  # patches TracebackException & sys.excepthook by default
 
 import email.parser
 import email.message
@@ -71,6 +74,7 @@ from .snippet_engine import Snippet, VS_SNIPPET
 import traceback
 import datetime
 
+# stderr errors are always printed to the bottom LSP panel so no need to enable anything here to get them
 LOG = True
 LOG_CACHE = False
 DEBUG_COMPLETION = False
@@ -120,6 +124,203 @@ GOTO_TITLES = {
     events.TypeDefinition:  _('Go to: type definition'),
     events.Declaration:     _('Go to: declaration'),
 }
+
+
+def print_exception_details(ex, *, limit=None, include_chain=True, _seen=None):
+    """
+    pypi exceptiongroup alternative when it fails to work in python <3.11
+    
+    Print full diagnostic details for `ex`, including:
+      - type and summary (safe str())
+      - __notes__ (PEP 678)
+      - full traceback
+      - ex.errors (if present)
+      - ex.args (if present)
+      - ExceptionGroup children via ex.exceptions (recursed)
+      - chained exceptions (__cause__ / __context__), recursed
+      
+    Uses _seen (internal) to avoid infinite recursion on cyclic exception graphs.
+    """
+    import traceback, pprint, sys, logging
+    
+    if _seen is None:
+        _seen = set()
+    ex_id = id(ex)
+    if ex_id in _seen:
+        print(f"(skipping already-seen exception {type(ex).__name__})")
+        return
+    _seen.add(ex_id)
+
+    def safe_str(e):
+        try:
+            return str(e)
+        except Exception:
+            return "<exception __str__() raised>"
+
+    # top-level summary (guard __str__)
+    try:
+        summary = safe_str(ex)
+    except Exception:
+        summary = "<exception __str__() raised>"
+
+    print("ERROR SUMMARY:", type(ex).__name__, summary)
+
+    # Print PEP 678 notes if present
+    try:
+        notes = getattr(ex, "__notes__", None)
+        if notes:
+            print("\nNotes:")
+            for n in notes:
+                try:
+                    print("  -", n)
+                except Exception:
+                    print("  - <failed to print note>")
+    except Exception as e:
+        print("reading __notes__ failed:", e)
+
+    # full traceback for this exception
+    try:
+        traceback.print_exception(type(ex), ex, ex.__traceback__, limit=limit)
+    except Exception as e:
+        print("Failed to print traceback:", e)
+
+    # some libs attach structured errors (e.g. cattrs/pydantic)
+    try:
+        if hasattr(ex, "errors"):
+            print("\nex.errors:")
+            pprint.pprint(getattr(ex, "errors"))
+    except Exception as e:
+        print("reading ex.errors failed:", e)
+
+    # show args if present
+    try:
+        if getattr(ex, "args", None):
+            print("\nex.args:")
+            pprint.pprint(ex.args)
+    except Exception as e:
+        print("reading ex.args failed:", e)
+
+    # If this is an ExceptionGroup-like object, show its children
+    try:
+        subs = getattr(ex, "exceptions", None)
+        if subs:
+            print(f"\nExceptionGroup contains {len(subs)} sub-exception(s):")
+            for i, sub in enumerate(subs):
+                print(f"\n--- sub-exception [{i}] {type(sub).__name__}: ---")
+                # Print a short summary for the sub, then recurse for full details
+                try:
+                    print("SUMMARY:", safe_str(sub))
+                except Exception:
+                    print("SUMMARY: <failed to get summary>")
+                # Print notes for sub if present
+                try:
+                    sub_notes = getattr(sub, "__notes__", None)
+                    if sub_notes:
+                        print("Notes:")
+                        for n in sub_notes:
+                            try:
+                                print("  -", n)
+                            except Exception:
+                                print("  - <failed to print note>")
+                except Exception as e:
+                    print("reading sub __notes__ failed:", e)
+                # Recurse into sub-exception details
+                try:
+                    print_exception_details(sub, limit=limit, include_chain=include_chain, _seen=_seen)
+                except Exception as e:
+                    print("recursing into sub-exception failed:", e)
+    except Exception as e:
+        print("reading ex.exceptions failed:", e)
+
+    # walk exception chain (cause/context)
+    if include_chain:
+        cur = getattr(ex, "__cause__", None) or getattr(ex, "__context__", None)
+        i = 0
+        while cur:
+            # avoid re-printing exceptions we've already handled
+            if id(cur) in _seen:
+                print(f"\n--- inner[{i}] {type(cur).__name__}: (already shown) ---")
+                break
+
+            print(f"\n--- inner[{i}] {type(cur).__name__}: ---")
+            try:
+                traceback.print_exception(type(cur), cur, cur.__traceback__, limit=limit)
+            except Exception as e:
+                print("Failed to print inner traceback:", e)
+
+            # print notes for chained exception if present
+            try:
+                cur_notes = getattr(cur, "__notes__", None)
+                if cur_notes:
+                    print("Notes:")
+                    for n in cur_notes:
+                        try:
+                            print("  -", n)
+                        except Exception:
+                            print("  - <failed to print note>")
+            except Exception as e:
+                print("reading inner __notes__ failed:", e)
+
+            try:
+                if getattr(cur, "args", None):
+                    print("args:", cur.args)
+            except Exception as e:
+                print("reading inner args failed:", e)
+
+            # advance chain
+            _seen.add(id(cur))
+            cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+            i += 1
+
+
+def print_exception_detailsV1(ex, *, limit=None, include_chain=True):
+    # top-level summary (guard __str__)
+    try:
+        summary = str(ex)
+    except Exception as _:
+        summary = "<exception __str__() raised>"
+    print("ERROR SUMMARY:", type(ex).__name__, summary)
+
+    # full traceback for this exception
+    try:
+        traceback.print_exception(type(ex), ex, ex.__traceback__, limit=limit)
+    except Exception as e:
+        print("Failed to print traceback:", e)
+
+    # some libs attach structured errors (e.g. cattrs/pydantic)
+    try:
+        if hasattr(ex, "errors"):
+            print("\nex.errors:")
+            pprint.pprint(getattr(ex, "errors"))
+    except Exception as e:
+        print("reading ex.errors failed:", e)
+
+    # show args if present
+    try:
+        if getattr(ex, "args", None):
+            print("\nex.args:")
+            pprint.pprint(ex.args)
+    except Exception as e:
+        print("reading ex.args failed:", e)
+
+    # walk exception chain (cause/context)
+    if include_chain:
+        cur = getattr(ex, "__cause__", None) or getattr(ex, "__context__", None)
+        i = 0
+        while cur:
+            print(f"\n--- inner[{i}] {type(cur).__name__}: ---")
+            try:
+                traceback.print_exception(type(cur), cur, cur.__traceback__, limit=limit)
+            except Exception as e:
+                print("Failed to print inner traceback:", e)
+            try:
+                if getattr(cur, "args", None):
+                    print("args:", cur.args)
+            except Exception as e:
+                print("reading inner args failed:", e)
+            cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+            i += 1
+
 
 
 class Language:
@@ -322,13 +523,16 @@ class Language:
         self._timer.restart()
 
     def _err_read_loop(self):
+        """captures server stderr"""
         try:
             while self._err:
                 line = self._err.readline()
                 if line == b'':
                     break
                 if self._log_stderr:
-                    #print(f'ServerError: {LOG_NAME}: {self.lang_str} - {line}') # bytes
+                    if DEBUG_DEV:
+                        # stderr errors are already printed to the LSP bottom panel, but i prefer to print them again to the Console to attract my attention because this type or errors are fatal. the LSP bottom panel usually show red color for lsp linting diagnostics which the eye do not pay attention to it and the mind think it is not a fatal error so i may not pay attention to them always
+                        print(f'ERROR: ServerError: {LOG_NAME}: {self.lang_str} - {line}') # bytes
                     try:
                         s = line.decode('utf-8')
                     except:
@@ -453,18 +657,27 @@ class Language:
                     except StopIteration:
                         # Normal end of generator
                         break
-                    except Exception as err:
-                        # Error during message parsing (inside generator)
+                    except NotImplementedError as err:
+                        # Error during received server message parsing (inside generator)
+                        # the message sent by the server is not implemented, this means we have to implement this message
+                        
+                        # print to status bar
                         limit = 100 # limit characters of the error message
                         err_str = str(err)
                         if len(err_str) > limit:
                             err_str = err_str[:limit] + '...'
                         msg_status(f'{LOG_NAME}: {self.lang_str}: unsupported msg: {err_str}')
-                        pass;       LOG and self.plog.log_str(f'unsupported msg: {err}', type_='dbg', severity=SEVERITY_ERR)
+
+                        #print to spy panel which contain valid messages and errored ones
                         if DEBUG_DEV:
                             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-                            self.plog.log_str(f"[{timestamp}] ███ RECV ERROR unsprt: {err}", type_='Spy   ', severity=SEVERITY_ERR, scroll=True)
-                        
+                            self.plog.log_str(f"[{timestamp}] ███ RECV ERROR       : unsupported msg: {err}", type_='Spy   ', severity=SEVERITY_ERR, scroll=True)
+
+                        # print to dbg panel which contain only errors, this is not needed now that we have the spy panel, so maybe it is better to remove it, TODO: remove this once we add the filter box in the spy panel
+                        if LOG:
+                            self.plog.log_str(f'ERROR: unsupported msg: {err}', type_='dbg   ', severity=SEVERITY_ERR)
+                                                    
+                        # print to the gui panel "View servers responses"
                         if DEBUG_MESSAGES:
                             if err and hasattr(err, 'args') and err.args and hasattr(err.args[0], 'dict'):
                                 response_error_dict = err.args[0].dict()
@@ -473,9 +686,45 @@ class Language:
                                     '__str__': lambda _: str(response_error_dict),
                                 })
                                 self._dbg_msgs = (self._dbg_msgs + [UnsupportedMessage()])[-128:]
+                        break
+                    except BaseValidationError as err:
+                        # This captures ClassValidationError, IterableValidationError, etc.
+                        # the message sent by the server is not correctly validated by lsprotocol (attrs/cattrs), this means we have a bug we MUST fix ASAP
+
+                        # transform_error flattens the grouped exception into a summerized list
+                        print("ERROR: start", "="*60)
+                        print(f'ERROR: LSP Message validation error: {LOG_NAME}: {self.lang_str}')
+                        print("ERROR: Main Error summary:")
+                        print(f"ERROR: {type(err)}: {err}")
+                        summary = ''
+                        for i, e in enumerate(transform_error(err), 1):
+                            print(f"ERROR:   {i}: {e}")
+                            summary = summary + f" - ERROR {i}: {e}"
+                            
+                                                        
+                        # grouped exception were added in python 3.11 but cattrs use exceptiongroup from pypi to add it to older python, and now it groups multiple errors into one group, so we need to use exceptiongroup too to print full details stack of those nested errors groups. exceptiongroup pypi package automatically patch TracebackException so calling traceback.print_exc() is sufficient. BUT if ohter thing patch TracebackException then exceptiongroup will not patch it, in this case we can use this function print_exception_details(err) which print those grouped exceptions including __notes__
+                        # print_exception_details(err)
+                        
+                        traceback.print_exc()
+                        print("ERROR: end", "="*60)
+                        
+                        msg_status(f'{LOG_NAME}: {self.lang_str}: cattrs validation failed: {err}')
+
+                        if DEBUG_DEV:
+                            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                            self.plog.log_str(f"[{timestamp}] ███ RECV ERROR       : cattrs validation failed: {err} ===> {summary}", type_='Spy   ', severity=SEVERITY_ERR, scroll=True)
+                        if LOG:
+                            self.plog.log_str(f'ERROR: cattrs validation failed: {err} ===> {summary}', type_='dbg   ', severity=SEVERITY_ERR)
+                        break
+                    except Exception as err:
+                        # we do not know what error is this, so lets print the full stack to fix it
+                        print(f'ERROR: LSP unkown error: {LOG_NAME}: {self.lang_str} - {err}')
+                        traceback.print_exc()
+                        
                         # If an error occurs inside the generator, it terminates. 
                         # Remaining data is left in _recv_buf as per client.py logic.
                         break  # Generator is terminated
+                    
                     
                     # Now handle the message - with separate error handling
                     try:
