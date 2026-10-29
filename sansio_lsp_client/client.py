@@ -70,6 +70,29 @@ from .structs import (
     WorkspaceFolder,
     unstructure,
 )
+from attrs import define
+@define
+class DefinitionEvent:
+    result: Definition
+
+
+def _structure_location_result(result):
+    """Convert raw dict result to Location/LocationLink objects."""
+    from .structs import Location, LocationLink
+    
+    if result is None:
+        return None
+    elif isinstance(result, list):
+        structured = []
+        for item in result:
+            if 'targetUri' in item:  # LocationLink
+                structured.append(Converter.structure(item, LocationLink))
+            else:  # Location
+                structured.append(Converter.structure(item, Location))
+        return structured
+    else:
+        # Single Location
+        return Converter.structure(result, Location)
 
 
 class ClientState(enum.Enum):
@@ -310,37 +333,10 @@ class Client:
 
         elif method == "textDocument/hover":
             if response.result is not None:
-                contents_raw = response.result.get("contents")
-                contents = contents_raw
-                try:
-                    if isinstance(contents_raw, dict):
-                        contents = Converter.structure(contents_raw, MarkupContent)
-                    elif isinstance(contents_raw, list):
-                        structured_list = []
-                        for item in contents_raw:
-                            if isinstance(item, dict):
-                                try:
-                                    structured_list.append(Converter.structure(item, MarkedString))
-                                except Exception:
-                                    structured_list.append(item)
-                            else:
-                                structured_list.append(item)
-                        contents = structured_list
-                except Exception as ex:
-                    print("DEBUG hover contents structuring failed", ex, contents_raw)
-
-                hover_range = response.result.get("range")
-                range_obj = None
-                if hover_range is not None:
-                    try:
-                        range_obj = Converter.structure(hover_range, Range)
-                    except Exception as ex:
-                        print("DEBUG hover range structuring failed", ex, hover_range)
-
-                event = Hover(contents=contents or [], range=range_obj)
+                event = Converter.structure(response.result, Hover)
             else:
                 event = Hover(contents=[])  # null response
-            event.message_id = response.id
+            # event.message_id = response.id
 
         elif method == "textDocument/foldingRange":
             event = MFoldingRanges(
@@ -393,8 +389,219 @@ class Client:
 
         #GOTOs
         elif method == "textDocument/definition":
-            event = Definition(result=response.result)
-            event.message_id = response.id
+            # event = Definition(result=response.result)
+            # event.message_id = response.id
+            print("=================definition response.result",response.result)
+            print("=================definition response",response)
+            
+            from lsprotocol.types import Definition
+            from lsprotocol.converters import get_converter
+            converter = get_converter()
+            #event = Converter.structure(response.result, Definition)
+            #lsp_converter = get_converter()
+            #event = lsp_converter.structure(response.result, Definition)
+
+
+            #event = Converter.structure({"result": response.result}, DefinitionEvent)
+            
+                        
+            import attrs
+            import lsprotocol.types as lsp_types
+            from lsprotocol.types import DefinitionResponse,DefinitionResult
+            
+            
+
+            
+            
+            
+            #error
+            #event = converter.structure(response, DefinitionResponse)
+            
+            
+            #no error but doble json!!
+            #event = DefinitionResponse(response)
+            #print("event",event)
+            
+            
+            #no error but gave a diferent result than what we need because we still pass nested dict 
+            #event = DefinitionResponse(id=response.id, result=response.result, jsonrpc=response.jsonrpc)
+            #print("event",event)
+            
+            #error
+            #event = DefinitionResponse(
+                #id=response.id, 
+                #result=converter.structure(response.result, DefinitionResult)
+            #)
+            
+            
+            #error
+            #event=converter.structure(response.result, DefinitionResult)
+
+
+
+
+            #attr.exceptions.NotAnAttrsClassError: <class 'list'> is not an attrs-decorated class.
+            #vvv = attrs.asdict(response.result)
+            #event=converter.structure(vvv, DefinitionResult)
+            #print("event55555",event)
+
+
+
+
+            #AttributeError: 'list' object has no attribute 'dict'
+            #vvv = response.result.dict()
+            #event=converter.structure(vvv, DefinitionResult)
+            #print("event6666666",event)
+            
+            
+            #_________________________________________________
+            
+            #all this do not work because attrs.resolve_types() is designed to work on classes (decorated with @attrs.define). It fails on things like DefinitionResult because those are Type Aliases (Unions), not classes. we cannot "resolve" a Union directly; you can only resolve the classes that the Union points to.
+            
+            # cattrs.errors.StructureHandlerNotFoundError: Unsupported type: typing.Union[ForwardRef('Location'), typing.Sequence[ForwardRef('Location')], typing.Sequence[ForwardRef('LocationLink')], NoneType]. Register a structure hook for it.
+            import lsprotocol.types as lsp_types
+            import attrs
+            '''
+            # Force lsprotocol to resolve its internal string refs
+            attrs.resolve_types(lsp_types.Location)
+            attrs.resolve_types(lsp_types.LocationLink)
+            # Now try structuring
+            event = converter.structure(response.result, lsp_types.DefinitionResult)
+            print("event888888",event)
+            '''
+                        
+
+
+            #TypeError: typing.Union[ForwardRef('Location'), typing.Sequence[ForwardRef('Location')]] is not a module, class, method, or function.
+            '''
+            attrs.resolve_types(lsp_types.Definition)
+            attrs.resolve_types(lsp_types.DefinitionLink)
+            # Now try structuring
+            event = converter.structure(response.result, lsp_types.DefinitionResult)
+            print("event888888",event)
+            '''
+            
+                        
+            
+            # TypeError: typing.Union[ForwardRef('Location'), typing.Sequence[ForwardRef('Location')], typing.Sequence[ForwardRef('LocationLink')], NoneType] is not a module, class, method, or function.
+            '''
+            attrs.resolve_types(lsp_types.DefinitionResult)
+            # Now try structuring
+            event = converter.structure(response.result, lsp_types.DefinitionResult)
+            print("event888888",event)
+            '''
+            
+            
+            
+            #cattrs.errors.StructureHandlerNotFoundError: Unsupported type: typing.Union[ForwardRef('Location'), typing.Sequence[ForwardRef('Location')], typing.Sequence[ForwardRef('LocationLink')], NoneType]. Register a structure hook for it.  
+            '''      
+            from lsprotocol.types import Location, LocationLink
+            
+            # Manually tell the converter: "When you see the string 'Location', use this class"
+            # This bypasses the need for resolve_types entirely.
+            converter.register_structure_hook("Location", lambda d, _: converter.structure(d, Location))
+            converter.register_structure_hook("LocationLink", lambda d, _: converter.structure(d, LocationLink))
+            
+            # Now this should work
+            event = converter.structure(response.result, lsp_types.DefinitionResult)
+            '''
+            
+            
+            
+            #work but return direcly the link , we will have to change langua&ge.py
+            # it returns [file:///f:/_bin/_binz/_ide/_CudaText/_tools/_LSP/_python/python-lsp-server/PY38embed_x64_NoTclTk/_/lib/site-packages/attrs/__init__.py:14:4-14:9]
+            #event = converter.structure(response.result, t.List[lsp_types.Location])
+            #print("event",event)
+            
+            
+
+            #cattrs.errors.StructureHandlerNotFoundError: Unsupported type: typing.Union[ForwardRef('Location'), typing.Sequence[ForwardRef('Location')], typing.Sequence[ForwardRef('LocationLink')], NoneType]. Register a structure hook for it.
+            '''
+            from typing import  Sequence, Union
+            DefinitionResult = Union[lsp_types.Definition, Sequence[lsp_types.DefinitionLink], None]
+            event = converter.structure(response.result, DefinitionResult)
+            print("event",event)
+            '''
+            
+
+            # cattrs.errors.StructureHandlerNotFoundError: Unsupported type: typing.Union[ForwardRef('Location'), typing.Sequence[ForwardRef('Location')], typing.Sequence[ForwardRef('LocationLink')], NoneType]. Register a structure hook for it.
+            '''
+            from typing import  Sequence, Union
+            attrs.resolve_types(lsp_types.Location)
+            attrs.resolve_types(lsp_types.LocationLink)
+            DefinitionResult = Union[lsp_types.Definition, Sequence[lsp_types.DefinitionLink], None]
+            event = converter.structure(response.result, DefinitionResult)
+            print("event",event)
+            '''
+
+            
+                        
+            # cattrs.errors.StructureHandlerNotFoundError: Unsupported type: typing.Union[ForwardRef('Location'), typing.Sequence[ForwardRef('Location')], typing.Sequence[ForwardRef('LocationLink')], NoneType]. Register a structure hook for it.
+            '''
+            # You have to resolve the CLASS that uses the types, not the Union itself
+            attrs.resolve_types(lsp_types.DefinitionResponse, globalns=lsp_types.__dict__) 
+            # Now the converter might (maybe, on 3.8) see through the Union
+            event = converter.structure(response.result, lsp_types.DefinitionResult)
+            '''
+            
+            
+            
+            #gooooooooooooooooooood
+            '''
+            #attrs.resolve_types(DefinitionResponse, globalns=lsp_types.__dict__)
+            #or simply 
+            attrs.resolve_types(DefinitionResponse)
+
+            raw_data = {
+                "id": response.id,
+                "result": response.result,
+                "jsonrpc": getattr(response, 'jsonrpc', '2.0')
+            }
+            event = converter.structure(raw_data, DefinitionResponse)
+            print("===event",event)
+            '''
+            
+            
+            # TypeError: argument of type 'Response' is not iterable
+            '''
+            attrs.resolve_types(DefinitionResponse)
+            event = converter.structure(response, DefinitionResponse)
+            print("===event",event)
+            '''
+            
+            
+            
+            raw_data = {
+                "id": response.id,
+                "result": response.result,
+                "jsonrpc": getattr(response, 'jsonrpc', '2.0')
+            }
+            print("111111",type(raw_data),raw_data)
+            print("222222",type(response),response)
+          
+            
+            #________________________________________________________
+            
+            #gooooooooooooood
+            '''
+            # 1. Convert your 'Response' object to a plain Python dictionary      
+            raw_data = attrs.asdict(response)
+            # 2. Structure that dictionary into the lsprotocol class
+            event = converter.structure(raw_data, DefinitionResponse) 
+            #print("event77777",event)
+            '''
+
+
+            #error:
+            '''
+            ccc = _structure_location_result(response.result)
+            print("____ccc",ccc)
+
+            event = Definition(result=ccc)
+            print("____event",event)
+            '''
+
+
 
         elif method == "textDocument/references":
             event = References(result=response.result)
@@ -481,19 +688,9 @@ class Client:
             assert isinstance(event, PublishDiagnostics)
             return event
         elif request.method == "window/workDoneProgress/create":
-            params = request.params or {}
-            token = params.get('token')
-            if token is not None:
-                self._progress_tokens_map[token] = WorkDoneProgress
-            try:
-                event = Converter.structure(params, WorkDoneProgressCreate)
-                assert isinstance(event, WorkDoneProgressCreate)
-            except Exception as ex:
-                print("DEBUG workDoneProgress/create structuring failed", ex, params)
-                event = WorkDoneProgressCreate(token=token)
-            event._client = self
-            event._id = request.id
-            return event
+            ev = parse_request(WorkDoneProgressCreate)
+            self._progress_tokens_map[request.params['token']] = WorkDoneProgress
+            return parse_request(WorkDoneProgressCreate)
         elif request.method == "client/registerCapability":
             event = parse_request(RegisterCapabilityRequest)
             assert isinstance(event, RegisterCapabilityRequest)
@@ -529,16 +726,27 @@ class Client:
         else:
             raise NotImplementedError(request)
 
-    def recv(self, data: bytes) -> t.Iterator[Event]:
-        self._recv_buf += data
+    def recv(self, data: bytes) -> t.Iterator[t.Tuple[t.Optional[Id], Event]]:
+        """Parse received data and yield (message_id, event) tuples.
+        
+        Returns:
+            Iterator of (message_id, event) tuples where:
+            - message_id: The ID from our original request (for responses), or None (for server requests/notifications)
+            - event: The parsed Event object
+        """
         # Make sure to use lots of iterators, so that if one message fails to
         # parse, the messages before it are yielded successfully before the
         # error, and the messages after it are left in _recv_buf.
+        self._recv_buf += data
+        print("NOTE: client recv",data)
         for message in _parse_messages(self._recv_buf):
+            print("NOTE: client parsed",message)
             if isinstance(message, Response):
-                yield self._handle_response(message)
+                event = self._handle_response(message)
+                yield (message.id, event)
             else:
-                yield self._handle_request(message)
+                event = self._handle_request(message)
+                yield (None, event)  # Server requests/notifications don't have our message_id
 
     def send(self) -> bytes:
         send_buf = self._send_buf[:]
