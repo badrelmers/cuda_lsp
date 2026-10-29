@@ -1,12 +1,66 @@
+"""Sans-I/O JSON-RPC transport layer for the Language Server Protocol.
+
+Handles the "Content-Length" framing used by LSP, plus creation and parsing
+of raw JSON-RPC messages (requests, notifications, responses).
+
+All LSP payload types come from `lsprotocol`; (de)serialization is done with
+the cattrs converter provided by `lsprotocol.converters`.
+"""
+
 import json
 import re
 import typing as t
 
-from pydantic import TypeAdapter
+import attrs
+from lsprotocol.converters import get_converter as _get_lsp_converter
 
-from .structs import JSONDict, JSONList, Request, Response, Id
+JSONDict = t.Dict[str, t.Any]
+JSONList = t.List[t.Any]
+
+Id = t.Union[int, str]
+ProgressToken = t.Union[int, str]
 
 _CONTENT_TYPE_PARAM_RE = re.compile(r'(\w+)\s*=\s*(?:(?:"([^"]*)")|([^;,\s]*))')
+
+
+# ---------------------------------------------------------------------------
+# LSP converter (cattrs) - single shared instance
+# ---------------------------------------------------------------------------
+
+_lsp_converter = _get_lsp_converter()
+
+
+def structure(data: t.Any, cls: t.Any) -> t.Any:
+    """Deserialize raw JSON data into an lsprotocol/attrs type."""
+    return _lsp_converter.structure(data, cls)
+
+
+def unstructure(obj: t.Any) -> t.Any:
+    """Serialize an lsprotocol/attrs object into JSON-compatible data."""
+    return _lsp_converter.unstructure(obj)
+
+
+# ---------------------------------------------------------------------------
+# JSON-RPC envelope (not part of lsprotocol's type definitions)
+# ---------------------------------------------------------------------------
+
+
+@attrs.define
+class Request:
+    """A JSON-RPC request or notification, from either side of the wire."""
+
+    method: str
+    id: t.Optional[Id] = None
+    params: t.Optional[t.Union[JSONList, JSONDict]] = None
+
+
+@attrs.define
+class Response:
+    """A JSON-RPC response message sent from server to client."""
+
+    id: t.Optional[Id] = None
+    result: t.Optional[t.Union[JSONList, JSONDict]] = None
+    error: t.Optional[JSONDict] = None
 
 
 def _make_headers(content_length: int, encoding: str = "utf-8") -> bytes:
@@ -48,7 +102,7 @@ def _make_request(
 
 
 def _make_response(
-    id: t.Union[int, str],  # TODO: does this make sense?
+    id: t.Union[int, str],
     result: t.Optional[t.Union[JSONDict, JSONList]] = None,
     error: t.Optional[JSONDict] = None,
     *,
@@ -58,13 +112,14 @@ def _make_response(
 
     # Set up the actual JSONRPC content and encode it.
     content: JSONDict = {"jsonrpc": "2.0", "id": id}
-   # content["result"]: The result of a request. This member is REQUIRED on success. This member MUST NOT exist if there was an error invoking the method.
+    # content["result"]: The result of a request. This member is REQUIRED on success.
+    # This member MUST NOT exist if there was an error invoking the method.
     if result is not None:
         content["result"] = result
     if error is not None:
         content["error"] = error
     elif result is None:
-        content["result"] = None # "result": null
+        content["result"] = None  # "result": null
 
     encoded_content = json.dumps(content).encode(encoding)
 
@@ -77,7 +132,8 @@ def _make_response(
     return request
 
 
-# Example: "application/vscode-jsonrpc; charset=utf-8" --> ("application/vscode-jsonrpc", {"charset": "utf-8"})
+# Example: "application/vscode-jsonrpc; charset=utf-8" -->
+# ("application/vscode-jsonrpc", {"charset": "utf-8"})
 def _parse_content_type(header: str) -> t.Tuple[str, t.Dict[str, str]]:
     content_type, _, param_string = header.partition(";")
     content_type = content_type.strip().lower()
@@ -88,6 +144,21 @@ def _parse_content_type(header: str) -> t.Tuple[str, t.Dict[str, str]]:
     }
 
     return content_type, metadata
+
+
+def _message_from_dict(data: JSONDict) -> t.Union[Request, Response]:
+    """Build a Request/Response envelope from a parsed JSON-RPC message."""
+    if "method" in data:
+        return Request(
+            method=data["method"],
+            id=data.get("id"),
+            params=data.get("params"),
+        )
+    return Response(
+        id=data.get("id"),
+        result=data.get("result"),
+        error=data.get("error"),
+    )
 
 
 # _parse_messages is kind of tricky.
@@ -123,7 +194,8 @@ def _parse_one_message(
 
     Returns:
         None if there's not enough data for a complete message,
-        or an iterable of Request or Response objects if a message was parsed successfully.
+        or an iterable of Request or Response objects if a message was parsed
+        successfully.
 
     Note: This function modifies response_buf by removing parsed data."""
     if b"\r\n\r\n" not in response_buf:
@@ -176,19 +248,13 @@ def _parse_one_message(
     else:
         del response_buf[:-unused_bytes_count]
 
-    def parse_request_or_response(
-        data: JSONDict,
-    ) -> t.Union[Request, Response]:
-        del data["jsonrpc"]
-        return TypeAdapter(t.Union[Request, Response]).validate_python(data)
-
     content = json.loads(raw_content.decode(encoding))
 
     if isinstance(content, list):
         # This is in response to a batch operation.
-        return map(parse_request_or_response, content)
+        return map(_message_from_dict, content)
     else:
-        return [parse_request_or_response(content)]
+        return [_message_from_dict(content)]
 
 
 def _parse_messages(response_buf: bytearray) -> t.Iterator[t.Union[Response, Request]]:
@@ -198,8 +264,9 @@ def _parse_messages(response_buf: bytearray) -> t.Iterator[t.Union[Response, Req
         response_buf: A bytearray containing zero or more JSON-RPC messages.
 
     Returns:
-        An iterator yielding Request or Response objects for each complete message.
-        Partial messages at the end of the buffer are left for future parsing.
+        An iterator yielding Request or Response objects for each complete
+        message. Partial messages at the end of the buffer are left for future
+        parsing.
 
     Note: This function modifies response_buf by removing parsed data."""
     while True:

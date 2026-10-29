@@ -1,3 +1,8 @@
+2026.10.27
+* change: replaced 'pydantic' dependency with pure-Python 'attrs'+'cattrs'+'lsprotocol' (LSP types now come from the official lsprotocol package); bundled in subfolder lsp_modules, supports Python 3.8...3.14+, no compiled binaries needed anymore
+- fix: 'workspace/didChangeWorkspaceFolders' notification now uses the spec-required 'event' wrapper
+- fix: diagnostics without 'severity' field no longer break the diagnostics panel
+
 2026.07.08
 - fix: avoid deprecated API: PROP_SCROLL_HORZ (by Alexey T.)
 * change: migrated Pydantic module to version 2 (change by @badrelmers)

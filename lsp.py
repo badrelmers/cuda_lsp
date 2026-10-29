@@ -713,10 +713,11 @@ class Command:
             max_output_width = max(80, ed.get_prop(PROP_SCROLL_HORZ_INFO)['page'])
             file_open('')
             import pprint
+            from .sansio_lsp_client import event_asdict
             try:
-                ed.set_text_all(pprint.pformat(lang._dbg_msgs[ind].dict(), width=max_output_width))
-            except:
-                j = {k:str(v) for k,v in lang._dbg_msgs[ind].dict().items()}
+                ed.set_text_all(pprint.pformat(event_asdict(lang._dbg_msgs[ind]), width=max_output_width))
+            except Exception:
+                j = {k:str(v) for k,v in event_asdict(lang._dbg_msgs[ind]).items()}
                 ed.set_text_all(pprint.pformat(j, width=max_output_width))
             ed.set_prop(PROP_LEXER_FILE, 'Python')
 

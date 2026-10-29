@@ -24,24 +24,25 @@ Dependencies (Python modules)
 
 Dependencies on Windows.
 
-Plugin needs "pydantic" module version 2.
-For Python 3.8, it is preinstalled in the plugin's subfolder "py\cuda_lsp\lsp_modules".
-For other Python versions, download this module from PyPI.org and put it into proper
-subfolder:
-- py\cuda_lsp\lsp_modules\pydantic
-- py\cuda_lsp\lsp_modules\pydantic_core
+Plugin needs pure-Python modules "lsprotocol", "attrs", "cattrs" (plus their
+dependencies "typing_extensions" and "exceptiongroup").
+They are preinstalled in the plugin's subfolder "py\cuda_lsp\lsp_modules" and
+work with any Python from 3.8 to 3.14+, so no additional downloads are needed.
+(Replaces the former "pydantic" dependency, which needed a compiled
+"pydantic_core" binary per Python version.)
 
-Dependancies on Linux and Unix-like OS.
+Dependencies on Linux and Unix-like OS.
 
 Plugin needs additional Python modules installed into OS Python:
-- pydantic (version 2)
+- lsprotocol
+- attrs
+- cattrs
 - wcmatch
 - bracex
 
 Typical installation from terminal is:
-$ pip install pydantic
-$ pip install wcmatch
-$ pip install bracex
+$ pip install lsprotocol attrs cattrs
+$ pip install wcmatch bracex
 
 
 Example for Python

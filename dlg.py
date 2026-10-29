@@ -7,9 +7,10 @@ from cudatext import *
 import cudax_lib as apx
 import cudatext_cmd as cmds
 
+from lsprotocol import types as lsp
+
 # imported on ~access
-#from .sansio_lsp_client.structs import MarkupKind
-#from .sansio_lsp_client.events import ShowMessage, LogMessage
+#from .sansio_lsp_client import LogMessage, ShowMessage
 
 LogMsg = namedtuple('LogMsg', 'msg type severity')
 
@@ -71,7 +72,7 @@ class Hint:
         global MarkupKind
         global FORM_H
 
-        from .sansio_lsp_client.structs import MarkupKind
+        MarkupKind = lsp.MarkupKind
 
         _cell_w, cell_h = ed.get_prop(PROP_CELL_SIZE)
         FORM_H = FORM_GAP*2 + ED_MAX_LINES*cell_h + BUTTON_H
@@ -162,7 +163,7 @@ class Hint:
         ### dialog Editor setup
         cls.ed.set_prop(PROP_RO, False)
         try:
-            if markupkind == MarkupKind.MARKDOWN:
+            if markupkind == lsp.MarkupKind.Markdown:
                 cls.ed.set_prop(PROP_LEXER_FILE, 'Markdown')
                 import html
                 text = html.unescape(text)
@@ -395,7 +396,6 @@ class PanelLog:
     def __init__(self, panel_name, state=None):
         global LogMessage, ShowMessage
         from .sansio_lsp_client import LogMessage, ShowMessage
-
         PanelLog.panels[panel_name] = self
         PanelLog.type_captions = {
             ShowMessage: TYPE_MSG,
@@ -937,9 +937,8 @@ class SignaturesDialog:
         cls.memo.set_prop(PROP_RO, False)
         cls.memo.set_text_all('')
         cls.memo.dim(DIM_DELETE_ALL)
-        
-        from .sansio_lsp_client.structs import SignatureInformation
-        sig: SignatureInformation
+
+        sig: lsp.SignatureInformation
         for i,sig in enumerate(signatures):
             cls.memo.set_text_line(-2, sig.label)
             if i != activeSignature:
@@ -951,7 +950,7 @@ class SignaturesDialog:
             if activeParameter is None or activeParameter >= len(sig.parameters):
                 activeParameter = 0
             
-            activeParameter = sig.activeParameter if sig.activeParameter is not None else activeParameter
+            activeParameter = sig.active_parameter if sig.active_parameter is not None else activeParameter
             
             param = sig.parameters[activeParameter].label
             if isinstance(param, tuple):

@@ -1,0 +1,4 @@
+
+
+remove install requirement of python packages from code and doc , it was added by alexey to fix pydantic, i think we don t need it in linux with this v2 because everything is pure python
+

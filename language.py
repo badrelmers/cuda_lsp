@@ -39,33 +39,29 @@ from .util import (
         ValidationError,
     )
 from .dlg import Hint, SEVERITY_MAP, SignaturesDialog, TYPE_DIAG
-from .dlg import PanelLog, SEVERITY_ERR, SEVERITY_LOG
+from .dlg import PanelLog, SEVERITY_ERR, SEVERITY_LOG, SEVERITY_NA
 from .book import EditorDoc
 #from .tree import TreeMan  # imported on access
 
 import urllib.parse
 
-from .sansio_lsp_client import client as lsp
+import attrs
+
+from lsprotocol import types as lsp
+
+from .sansio_lsp_client import client as lsp_client_mod
 from .sansio_lsp_client import events
-from .sansio_lsp_client.structs import (
-        CompletionRegistrationOptions,
-        TextDocumentSyncKind,
-        Registration,
-        DiagnosticSeverity,
-        Location,
-        LocationLink,
-        DocumentSymbol,
-        CompletionItemKind,
-        MarkupKind,
-        MarkedString,
-        FormattingOptions,
-        WorkspaceFolder,
-        InsertTextFormat,
-        CompletionContext,
-        CompletionTriggerKind,
-    )
-    
+from .sansio_lsp_client.io_handler import unstructure as lsp_unstructure
+
 from .snippet_engine import Snippet, VS_SNIPPET
+
+
+def _dbg_asdict(obj):
+    """ Debug helper: dump an attrs object (events etc) into a plain dict. """
+    try:
+        return attrs.asdict(obj, recurse=True)
+    except Exception:
+        return {k: str(v) for k, v in attrs.asdict(obj, recurse=True).items()}
 
 import traceback
 import datetime
@@ -100,10 +96,10 @@ GOTO_EVENT_TYPES = {
     events.Declaration,
 }
 CALLABLE_COMPLETIONS = {
-    CompletionItemKind.METHOD,
-    CompletionItemKind.FUNCTION,
-    CompletionItemKind.CONSTRUCTOR,
-    #CompletionItemKind.CLASS,
+    lsp.CompletionItemKind.Method,
+    lsp.CompletionItemKind.Function,
+    lsp.CompletionItemKind.Constructor,
+    #lsp.CompletionItemKind.Class,
 }
 
 RequestPos = namedtuple('RequestPos', 'h_ed carets target_pos_caret cursor_ed')
@@ -205,7 +201,7 @@ class Language:
     def client(self):
         if self._client is None:
             root_uri = path_to_uri(self._work_dir) if self._work_dir else None
-            self._client = lsp.Client(
+            self._client = lsp_client_mod.Client(
                 root_uri=root_uri,
                 workspace_folders=self.workspace_folders,
                 process_id=os.getpid(),
@@ -223,7 +219,7 @@ class Language:
         if self._work_dir:
             # for now just a single folder in workspace
             root_uri = path_to_uri(self._work_dir)
-            return [ WorkspaceFolder(uri=root_uri, name='Root'), ]
+            return [ lsp.WorkspaceFolder(uri=root_uri, name='Root'), ]
         else:
             return None
 
@@ -241,7 +237,7 @@ class Language:
         return self._treeman
 
     def is_client_exited(self):
-        return self._client.state == lsp.ClientState.EXITED
+        return self._client.state == lsp_client_mod.ClientState.EXITED
 
     def is_ed_matches(self, ed_self, langid):
         if self.client.is_initialized:
@@ -435,13 +431,15 @@ class Language:
                         pass;       LOG and self.plog.log_str(f'{err}', type_='dbg', severity=SEVERITY_ERR)
                         
                         if DEBUG_MESSAGES:
-                            if err and hasattr(err, 'args') and err.args and hasattr(err.args[0], 'dict'):
-                                response_error_dict = err.args[0].dict()
-                                UnsupportedMessage = type('Unsupported Message!', (object,), {
-                                    'dict': lambda _: response_error_dict,
-                                    '__str__': lambda _: str(response_error_dict),
-                                })
-                                self._dbg_msgs = (self._dbg_msgs + [UnsupportedMessage()])[-128:]
+                            if err and hasattr(err, 'args') and err.args:
+                                _arg0 = err.args[0]
+                                if attrs.has(_arg0.__class__):
+                                    response_error_dict = _dbg_asdict(_arg0)
+                                    UnsupportedMessage = type('Unsupported Message!', (object,), {
+                                        'dict': lambda _: response_error_dict,
+                                        '__str__': lambda _: str(response_error_dict),
+                                    })
+                                    self._dbg_msgs = (self._dbg_msgs + [UnsupportedMessage()])[-128:]
                         # If an error occurs inside the generator, it terminates. 
                         # Remaining data is left in _recv_buf as per client.py logic.
                         break  # Generator is terminated
@@ -524,9 +522,9 @@ class Language:
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     first_item = msg.contents[0] if isinstance(msg.contents, list) and len(msg.contents) > 0 else msg.contents
                     if first_item: # if received anything
-                        if isinstance(first_item, (MarkedString, str)):
+                        if isinstance(first_item, (lsp.MarkedStringWithLanguage, str)):
                             # for deprecated 'MarkedString' or 'str' default to 'markdown'
-                            markupkind = MarkupKind.MARKDOWN
+                            markupkind = lsp.MarkupKind.Markdown
                         else:
                             # can be a list (supposedly)
                             markupkind = getattr(first_item, 'kind', None)
@@ -561,7 +559,7 @@ class Language:
 
         elif msgtype == events.SemanticTokens:
             reqpos = self.request_positions.pop(msg.message_id)
-            self.on_semantic_tokens(reqpos.h_ed, resultId=msg.resultId, data=msg.data)
+            self.on_semantic_tokens(reqpos.h_ed, resultId=msg.result_id, data=msg.data)
 
         #GOTOs
         elif msgtype in GOTO_EVENT_TYPES:
@@ -654,12 +652,12 @@ class Language:
             pass;       LOG and print('NOTE: send_changes return: no opts')
             return
 
-        docsynckind = TextDocumentSyncKind( opts.get('syncKind', TextDocumentSyncKind.NONE) )
-        if docsynckind == TextDocumentSyncKind.NONE:
+        docsynckind = lsp.TextDocumentSyncKind( opts.get('syncKind', lsp.TextDocumentSyncKind.None_) )
+        if docsynckind == lsp.TextDocumentSyncKind.None_:
             pass;       LOG and print('send_changes return: NONE sync')
             return
 
-        _is_whole_doc = docsynckind == TextDocumentSyncKind.FULL
+        _is_whole_doc = docsynckind == lsp.TextDocumentSyncKind.Full
         _changes = eddoc.get_changes(whole_doc=_is_whole_doc)
         if not _changes:
             pass;       LOG and print('send_changes return: no changes')
@@ -744,10 +742,10 @@ class Language:
                 added = []
                 if self._work_dir:
                     old_root_uri = path_to_uri(self._work_dir)
-                    removed.append(WorkspaceFolder(uri=old_root_uri, name='Root'))
+                    removed.append(lsp.WorkspaceFolder(uri=old_root_uri, name='Root'))
                 if newroot:
                     new_root_uri = path_to_uri(newroot) if newroot else None
-                    added.append(WorkspaceFolder(uri=new_root_uri, name='Root'))
+                    added.append(lsp.WorkspaceFolder(uri=new_root_uri, name='Root'))
                 self._work_dir = newroot
 
                 self.client.did_change_workspace_folders(removed=removed, added=added)
@@ -771,10 +769,10 @@ class Language:
             
             if methodAttrName == 'completion':
                 if self._last_complete and self._last_complete.is_incomplete:
-                    triggerKind = CompletionTriggerKind(CompletionTriggerKind.TRIGGER_FOR_INCOMPLETE_COMPLETIONS)
+                    triggerKind = lsp.CompletionTriggerKind.TriggerForIncompleteCompletions
                 else:
-                    triggerKind = CompletionTriggerKind(CompletionTriggerKind.INVOKED)
-                context = CompletionContext(triggerKind=triggerKind)
+                    triggerKind = lsp.CompletionTriggerKind.Invoked
+                context = lsp.CompletionContext(trigger_kind=triggerKind)
                 id = clientMethod(docpos, context=context)
             else:
                 id = clientMethod(docpos)
@@ -870,7 +868,7 @@ class Language:
         opts = None
         for registration in self.scfg.capabs:
             if registration.method == METHOD_SEMANTIC_TOKENS:
-                opts = registration.registerOptions
+                opts = registration.register_options
 
         if not opts:
             return
@@ -903,7 +901,7 @@ class Language:
         opts = None
         for registration in self.scfg.capabs:
             if registration.method == METHOD_SEMANTIC_TOKENS:
-                opts = registration.registerOptions
+                opts = registration.register_options
 
         assert isinstance(opts, dict)
         assert 'legend' in opts
@@ -1020,10 +1018,10 @@ class Language:
         def link_to_target(link): #SKIP
             """ returns: (uri, goto-range)
             """
-            if isinstance(link, Location):
+            if isinstance(link, lsp.Location):
                 return (link.uri, link.range)
-            elif isinstance(link, LocationLink):
-                return (link.targetUri, link.targetSelectionRange)
+            elif isinstance(link, lsp.LocationLink):
+                return (link.target_uri, link.target_selection_range)
             else:
                 raise Exception('Invalid goto-link type: '+str(type(link)))
 
@@ -1333,19 +1331,31 @@ def _connect_tcp(port):
 TOKENS_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')
 DIAG_BM_TAG = app_proc(PROC_GET_UNIQUE_TAG, '') # jic
 _icons_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'icons')
+DiagnosticSeverity = lsp.DiagnosticSeverity
 DIAG_BM_IC_PATHS = {
-    DiagnosticSeverity.ERROR       : os.path.join(_icons_dir, 'error.png'),
-    DiagnosticSeverity.WARNING     : os.path.join(_icons_dir, 'warning.png'),
-    DiagnosticSeverity.INFORMATION : os.path.join(_icons_dir, 'information.png'),
-    DiagnosticSeverity.HINT        : os.path.join(_icons_dir, 'hint.png'),
+    DiagnosticSeverity.Error       : os.path.join(_icons_dir, 'error.png'),
+    DiagnosticSeverity.Warning     : os.path.join(_icons_dir, 'warning.png'),
+    DiagnosticSeverity.Information : os.path.join(_icons_dir, 'information.png'),
+    DiagnosticSeverity.Hint        : os.path.join(_icons_dir, 'hint.png'),
 }
 DIAG_BM_KINDS = {
-    DiagnosticSeverity.ERROR       : 50,
-    DiagnosticSeverity.WARNING     : 51,
-    DiagnosticSeverity.INFORMATION : 52,
-    DiagnosticSeverity.HINT        : 53,
+    DiagnosticSeverity.Error       : 50,
+    DiagnosticSeverity.Warning     : 51,
+    DiagnosticSeverity.Information : 52,
+    DiagnosticSeverity.Hint        : 53,
 }
-DIAG_DEFAULT_SEVERITY = DiagnosticSeverity.INFORMATION # *shrug*
+DIAG_DEFAULT_SEVERITY = DiagnosticSeverity.Information # *shrug*
+
+DIAG_SEVERITY_SHORT_NAMES = {
+    DiagnosticSeverity.Error       : 'Err',
+    DiagnosticSeverity.Warning     : 'Wrn',
+    DiagnosticSeverity.Information : 'Inf',
+    DiagnosticSeverity.Hint        : 'Hint',
+}
+
+def _severity_short_name(severity):
+    """ Short display name of DiagnosticSeverity ('Err', 'Wrn', 'Inf', 'Hint'). """
+    return DIAG_SEVERITY_SHORT_NAMES.get(severity, '')
 
 class DiagnosticsMan:
     """ * Command.on_tab_change() ->
@@ -1439,7 +1449,7 @@ class DiagnosticsMan:
                     pre,post = ('[',']: ') if (d.severity is not None  or  d.code) else  ('','')
                     mid = ':' if (d.severity is not None  and  d.code) else ''
 
-                    severity_short = d.severity.short_name() if d.severity else ''
+                    severity_short = _severity_short_name(d.severity)
                     # "[severity:code] message"
                     code = str(d.code)  if d.code is not None else  ''
                     source = str(d.source)  if d.source is not None else  ''
@@ -1450,12 +1460,12 @@ class DiagnosticsMan:
                         filename_added = True
                         fn = ed.get_filename()
                         self.logger.log_str(f"File: {fn}",
-                            type_=TYPE_DIAG, severity=SEVERITY_MAP[d.severity],
+                            type_=TYPE_DIAG, severity=SEVERITY_MAP.get(d.severity, SEVERITY_NA),
                             update_memo=False # _update_memo() will be called after the loop
                         )
                         self.logger.diag_filename_info[self.logger.name] = fn
                     self.logger.log_str(f"Line {d.range.start.line+1}: {text}",
-                        type_=TYPE_DIAG, severity=SEVERITY_MAP[d.severity],
+                        type_=TYPE_DIAG, severity=SEVERITY_MAP.get(d.severity, SEVERITY_NA),
                         update_memo=False # _update_memo() will be called after the loop
                     )
 
@@ -1627,18 +1637,19 @@ CAPABILITY_FORMAT_SEL       = 'textDocument.rangeFormatting'
 CAPABILITY_WORKSPACE_FOLDERS = 'workspace.workspaceFolders'
 
 METHOD_PROVIDERS = {
-    METHOD_COMPLETION       : 'completionProvider',
-    METHOD_HOVER            : 'hoverProvider',
-    METHOD_SIG_HELP         : 'signatureHelpProvider',
-    METHOD_DEFINITION       : 'definitionProvider',
-    METHOD_REFERENCES       : 'referencesProvider',
-    METHOD_IMPLEMENTATION   : 'implementationProvider',
-    METHOD_DECLARATION      : 'declarationProvider',
-    METHOD_TYPEDEF          : 'typeDefinitionProvider',
-    METHOD_DOC_SYMBOLS      : 'documentSymbolProvider',
-    METHOD_FORMAT_DOC       : 'documentFormattingProvider',
-    METHOD_FORMAT_SEL       : 'documentRangeFormattingProvider',
-    METHOD_SEMANTIC_TOKENS  : 'semanticTokensProvider',
+    # LSP method -> ServerCapabilities attribute (lsprotocol snake_case)
+    METHOD_COMPLETION       : 'completion_provider',
+    METHOD_HOVER            : 'hover_provider',
+    METHOD_SIG_HELP         : 'signature_help_provider',
+    METHOD_DEFINITION       : 'definition_provider',
+    METHOD_REFERENCES       : 'references_provider',
+    METHOD_IMPLEMENTATION   : 'implementation_provider',
+    METHOD_DECLARATION      : 'declaration_provider',
+    METHOD_TYPEDEF          : 'type_definition_provider',
+    METHOD_DOC_SYMBOLS      : 'document_symbol_provider',
+    METHOD_FORMAT_DOC       : 'document_formatting_provider',
+    METHOD_FORMAT_SEL       : 'document_range_formatting_provider',
+    METHOD_SEMANTIC_TOKENS  : 'semantic_tokens_provider',
 
     #METHOD_WS_SYMBOLS       : '',
 }
@@ -1656,88 +1667,97 @@ AUTO_METHODS = {
 
 class ServerConfig:
     def __init__(self, initialized, langids, lang_str):
-        capabilities = initialized.capabilities
-        self.capabs = [] # struct.Registration
+        """ initialized - events.Initialized (capabilities: lsp.ServerCapabilities)
+        """
+        capabilities: lsp.ServerCapabilities = initialized.capabilities
+        self.capabs = [] # lsp.Registration (registerOptions stays a raw dict)
         self.lang_str = lang_str
 
         self._default_selector = [{'language': langid}  for langid in langids]
         self._default_opts = {'documentSelector': self._default_selector}
 
-        docsync = capabilities.get('textDocumentSync', {})
+        def reg(method, opts):
+            self.capabs.append(lsp.Registration(id='0', method=method, register_options=opts))
+
+        # textDocumentSync: TextDocumentSyncKind | TextDocumentSyncOptions | None
+        docsync = capabilities.text_document_sync
 
         ### ~pseudo-registrations
-        is_openclose = True
-        if isinstance(docsync, dict):
-            is_openclose = docsync.get('openClose', False) is not False
+        # (no sync info at all -- behave like the old empty-dict case)
+        is_openclose = docsync is not None
+        if isinstance(docsync, lsp.TextDocumentSyncOptions):
+            is_openclose = bool(docsync.open_close)
 
-            _save = docsync.get('save', False) # save?: boolean | SaveOptions;
+            _save = docsync.save # save?: boolean | SaveOptions;
 
             # SAVE
-            if _save is not False:
+            if _save is not None and _save is not False:
                 _opts = {**self._default_opts}
-                if isinstance(_save, dict):
-                    _opts.update(_save)
-                self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, registerOptions=_opts))
-        
+                if isinstance(_save, lsp.SaveOptions):
+                    _opts.update(lsp_unstructure(_save))
+                reg(METHOD_DID_SAVE, _opts)
+
+        # plain number: TextDocumentSyncKind sent as int (lsprotocol's hook
+        # keeps primitives as-is); int-mixin enum members are ints too
         if isinstance(docsync, int):
-            self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, registerOptions=self._default_opts))
+            reg(METHOD_DID_SAVE, self._default_opts)
 
         #  OPEN, CLOSE
         if is_openclose:
-            open = Registration(id='0', method=METHOD_DID_OPEN, registerOptions=self._default_opts)
-            close = Registration(id='0', method=METHOD_DID_CLOSE, registerOptions=self._default_opts)
-            self.capabs += [open, close]
+            reg(METHOD_DID_OPEN, self._default_opts)
+            reg(METHOD_DID_CLOSE, self._default_opts)
 
         # CHANGE
-        if isinstance(docsync, dict):
-            _default_sync = int(TextDocumentSyncKind.NONE)
-            docsynckind = TextDocumentSyncKind(docsync.get('change', _default_sync))
+        if isinstance(docsync, lsp.TextDocumentSyncOptions):
+            docsynckind = docsync.change if docsync.change is not None else lsp.TextDocumentSyncKind.None_
+        elif isinstance(docsync, int):
+            docsynckind = docsync
         else:
-            docsynckind = TextDocumentSyncKind(docsync)
+            docsynckind = lsp.TextDocumentSyncKind.None_
 
         _opts = {**self._default_opts, 'syncKind': docsynckind}
-        self.capabs.append(Registration(id='0', method=METHOD_DID_CHANGE, registerOptions=_opts))
+        reg(METHOD_DID_CHANGE, _opts)
 
 
         ### WORKSPACE
-        workspace = capabilities.get('workspace')
-        if workspace:
+        workspace = capabilities.workspace
+        if workspace is not None:
             # workspaceFolders
-            wsfolders = workspace.get('workspaceFolders', {})
+            wsfolders = workspace.workspace_folders
             _opts = {
                 #**self._default_opts, # -- no need for workspace methods
-                'supported': wsfolders.get('supported', False),
-                'changeNotifications': wsfolders.get('changeNotifications', False),
+                'supported': (wsfolders.supported if wsfolders is not None else False) or False,
+                'changeNotifications': (wsfolders.change_notifications if wsfolders is not None else False) or False,
             }
-            _reg = Registration(id='0', method=METHOD_WS_FOLDERS, registerOptions=_opts)
-            self.capabs.append(_reg)
+            reg(METHOD_WS_FOLDERS, _opts)
 
 
         ### ~other static capabilites
         for meth,prov in METHOD_PROVIDERS.items():
-            capval = capabilities.get(prov, False)
-            if capval is False:
+            capval = getattr(capabilities, prov, None)
+            if not capval:
                 continue
 
             _opts = {**self._default_opts}
-            if isinstance(capval, dict):
-                # delete 'documentSelector' if it is empty 
+            if not isinstance(capval, bool):
+                capval = lsp_unstructure(capval)
+                # delete 'documentSelector' if it is empty
                 if 'documentSelector' in capval and not capval['documentSelector']:
                      del capval['documentSelector']
                 _opts.update(capval)
-            self.capabs.append(Registration(id='0', method=meth, registerOptions=_opts))
+            reg(meth, _opts)
 
     def on_register(self, dynreg):
         """ process dynamic registration request: RegisterMethodRequest
         """
         # check for 'documentSelector' in registerOptions
         # "If set to null the document selector provided on the client side will be used." (c) LSP spec
-        reg: Registration
+        reg: lsp.Registration
         for reg in dynreg.registrations:
-            if not isinstance(reg.registerOptions, dict):
-                reg.registerOptions = self._default_opts
-            elif 'documentSelector' not in reg.registerOptions:
-                reg.registerOptions['documentSelector'] = self._default_selector
+            if not isinstance(reg.register_options, dict):
+                reg.register_options = self._default_opts
+            elif 'documentSelector' not in reg.register_options:
+                reg.register_options['documentSelector'] = self._default_selector
 
         self.capabs.extend(dynreg.registrations)
 
@@ -1753,7 +1773,7 @@ class ServerConfig:
             for registration in self.capabs:
                 if registration.method == method_name:
                     if ServerConfig.match_capability(registration, ed_self, langid):
-                        return registration.registerOptions
+                        return registration.register_options
 
             if method_name not in AUTO_METHODS:
                 print(f'NOTE: {LOG_NAME}: {self.lang_str} - unsupported method: {method_name}')
@@ -1761,7 +1781,7 @@ class ServerConfig:
         elif method_name.startswith('workspace/'):
             for registration in self.capabs:
                 if registration.method == method_name:
-                    return registration.registerOptions
+                    return registration.register_options
 
         elif LOG:
             print(f'NOTE: {LOG_NAME}: odd method: {method_name}')
@@ -1770,7 +1790,7 @@ class ServerConfig:
     # "selector is one ore more filters"
     def match_capability(registration, ed_self, langid):
 
-        filters = registration.registerOptions.get('documentSelector', [])
+        filters = registration.register_options.get('documentSelector', [])
         # allowing empty selector on workspace methods  (ok?)
         #   example: Registration(id='...', method='workspace/symbol', registerOptions={}),
         if not filters:
@@ -2100,7 +2120,7 @@ class CompletionMan:
                                 insertText = label
                             filtered_items.append({
                                 'label': label,
-                                'kind' : CompletionItemKind.TEXT,
+                                'kind' : lsp.CompletionItemKind.Text,
                                 'insertText': insertText,
                             })
                         else:
@@ -2232,7 +2252,7 @@ class CompletionMan:
         
         words = ['{}\t{}\t{}|{}'.format(
                     add_html_tags(item, word1),
-                    short_version(item['kind'] and CompletionItemKind(item['kind']).name.lower() or ''),
+                    short_version(item['kind'] and lsp.CompletionItemKind(item['kind']).name.lower() or ''),
                     message_id, i)
                     for i,item in enumerate(items)
                 ]
@@ -2271,7 +2291,7 @@ class CompletionMan:
         
         line_txt = ed.get_text_line(y0)
         is_callable = item.get('kind') in CALLABLE_COMPLETIONS
-        is_snippet = item.get('insertTextFormat') == InsertTextFormat.SNIPPET
+        is_snippet = item.get('insertTextFormat') == lsp.InsertTextFormat.Snippet
 
         cached_x = self.carets[0][0]
         cached_x_diff = x0-cached_x

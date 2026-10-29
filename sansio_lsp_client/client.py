@@ -1,8 +1,14 @@
+"""Sans-I/O LSP client state machine.
+
+Sends requests/notifications and turns incoming server messages into
+`events` objects. All LSP payloads are typed with `lsprotocol.types` and
+(de)serialized with the cattrs converter from `lsprotocol.converters`.
+"""
+
 import enum
-#import pprint
 import typing as t
 
-from pydantic import ValidationError, TypeAdapter
+from lsprotocol import types as lsp
 
 from .events import (
     Completion,
@@ -28,7 +34,6 @@ from .events import (
     RegisterCapabilityRequest,
     ResponseError,
     SemanticTokens,
-    ServerNotification,
     ServerRequest,
     ShowMessage,
     ShowMessageRequest,
@@ -45,31 +50,31 @@ from .events import (
     WorkspaceFolders,
     WorkspaceProjectInitializationComplete,
 )
-from .io_handler import _make_request, _make_response, _parse_messages
-from .structs import (
-    CompletionContext,
-    CompletionItem,
-    CompletionItemKind,
-    CompletionList,
-    FormattingOptions,
+from .io_handler import (
     Id,
     JSONDict,
     JSONList,
-    MWorkDoneProgressKind,
-    Range,
+    ProgressToken,
     Request,
     Response,
-    SymbolKind,
-    TextDocumentContentChangeEvent,
-    TextDocumentEdit,
-    TextDocumentIdentifier,
-    TextDocumentItem,
-    TextDocumentPosition,
-    TextDocumentSaveReason,
-    TextEdit,
-    VersionedTextDocumentIdentifier,
-    WorkspaceFolder,
+    _make_request,
+    _make_response,
+    _parse_messages,
+    structure,
+    unstructure,
 )
+
+__all__ = [
+    "Client",
+    "ClientState",
+    "CAPABILITIES",
+    "Id",
+    "JSONDict",
+    "JSONList",
+    "ProgressToken",
+    "Request",
+    "Response",
+]
 
 
 class ClientState(enum.Enum):
@@ -80,7 +85,9 @@ class ClientState(enum.Enum):
     SHUTDOWN = enum.auto()
     EXITED = enum.auto()
 
-#NOTE: Server capabilitie: resolveProvider - info about completion item -- can't use?
+
+#NOTE: Server capabilities: resolveProvider - info about completion item -- can't use?
+# Client capabilities, sent in the "initialize" request (raw JSON literal).
 CAPABILITIES: JSONDict = {
     "textDocument": {
         "synchronization": {
@@ -91,12 +98,12 @@ CAPABILITIES: JSONDict = {
         },
         "publishDiagnostics": {
             "relatedInformation": True,
-            "tagSupport": {"valueSet": [1,2]}
+            "tagSupport": {"valueSet": [1, 2]}
         },
         "completion": {
             "dynamicRegistration": True,
             "completionItem": {"snippetSupport": True},
-            "completionItemKind": {"valueSet": list(CompletionItemKind)},
+            "completionItemKind": {"valueSet": list(lsp.CompletionItemKind)},
             "contextSupport": True,
         },
         "hover": {
@@ -131,7 +138,7 @@ CAPABILITIES: JSONDict = {
         "documentSymbol": {
             "hierarchicalDocumentSymbolSupport": True,
             "dynamicRegistration": True,
-            "symbolKind": {"valueSet": list(SymbolKind)},
+            "symbolKind": {"valueSet": list(lsp.SymbolKind)},
         },
     },
     "window": {
@@ -146,7 +153,7 @@ CAPABILITIES: JSONDict = {
     "workspace": {
         "symbol": {
             "dynamicRegistration": True,
-            "symbolKind": {"valueSet": list(SymbolKind)},
+            "symbolKind": {"valueSet": list(lsp.SymbolKind)},
         },
         "workspaceFolders": True,
         # TODO 'workspaceEdit':..., #'applyEdit':..., 'executeCommand':...,
@@ -168,9 +175,9 @@ class Client:
         self,
         process_id: t.Optional[int] = None,
         root_uri: t.Optional[str] = None,
-        workspace_folders: t.Optional[t.List[WorkspaceFolder]] = None,
+        workspace_folders: t.Optional[t.List[lsp.WorkspaceFolder]] = None,
         trace: str = "off",
-        settings = {},
+        settings: t.Optional[t.Any] = {},
     ) -> None:
         self._state = ClientState.NOT_INITIALIZED
 
@@ -202,7 +209,7 @@ class Client:
                 "workspaceFolders": (
                     None
                     if workspace_folders is None
-                    else [f.model_dump() for f in workspace_folders]
+                    else [unstructure(f) for f in workspace_folders]
                 ),
                 "trace": trace,
                 "capabilities": CAPABILITIES,
@@ -246,6 +253,58 @@ class Client:
     ) -> None:
         self._send_buf += _make_response(id=id, result=result, error=error)
 
+    # helpers for structuring common response payload shapes ---------------
+
+    @staticmethod
+    def _structure_or_none(
+        result: t.Any, cls: t.Any
+    ) -> t.Optional[t.Any]:
+        """Structure `result` with cattrs; None stays None."""
+        if result is None:
+            return None
+        return structure(result, cls)
+
+    @staticmethod
+    def _structure_goto_result(
+        result: t.Any,
+    ) -> t.Optional[t.Union[lsp.Location, t.List[t.Union[lsp.Location, lsp.LocationLink]]]]:
+        """Structure Definition/Declaration/Implementation/TypeDefinition result.
+
+        Per spec it is `Location | Location[] | LocationLink[] | null`;
+        disambiguation is done on the 'targetUri' key of LocationLink.
+        """
+        if result is None:
+            return None
+        if isinstance(result, list):
+            structured = []
+            for item in result:
+                if isinstance(item, dict) and "targetUri" in item:
+                    structured.append(structure(item, lsp.LocationLink))
+                else:
+                    structured.append(structure(item, lsp.Location))
+            return structured
+        if isinstance(result, dict) and "targetUri" in result:
+            return structure(result, lsp.LocationLink)
+        return structure(result, lsp.Location)
+
+    @staticmethod
+    def _structure_symbols(result: t.Any) -> t.Optional[
+        t.Union[t.List[lsp.SymbolInformation], t.List[lsp.DocumentSymbol]]
+    ]:
+        """Structure documentSymbol result: DocumentSymbol[] or SymbolInformation[].
+
+        Disambiguation is done on the 'location' key of SymbolInformation.
+        """
+        if result is None:
+            return None
+        if not isinstance(result, list):
+            raise ValueError(f"bad documentSymbol result: {result!r}")
+        if not result:
+            return []
+        if isinstance(result[0], dict) and "location" in result[0]:
+            return structure(result, t.List[lsp.SymbolInformation])
+        return structure(result, t.List[lsp.DocumentSymbol])
+
     # response from server
     def _handle_response(self, response: Response) -> Event:
         assert response.id is not None
@@ -253,24 +312,29 @@ class Client:
 
         # FIXME: The errors have meanings.
         if response.error is not None:
-            #raise RuntimeError("Response error!\n\n" + pprint.pformat(response.error))
-            err = ResponseError.model_validate(response.error)
-            err.message_id = response.id
+            # raise RuntimeError("Response error!\n\n" + pprint.pformat(response.error))
+            err = ResponseError(
+                message_id=response.id,
+                code=response.error.get("code", 0),
+                message=response.error.get("message", ""),
+                data=response.error.get("data"),
+            )
             return err
 
         event: Event
-        
+
         method = request.method
 
         if method == "initialize":
             assert self._state == ClientState.WAITING_FOR_INITIALIZED
             self._send_notification(
-              "initialized", params={}
+                "initialized", params={}
             )  # params=None doesn't work with gopls
             self._send_notification("workspace/didChangeConfiguration", params={
                 "settings": self.settings
             })
-            event = Initialized.model_validate(response.result)
+            init_result = structure(response.result, lsp.InitializeResult)
+            event = Initialized(capabilities=init_result.capabilities)
             self._state = ClientState.NORMAL
 
         elif method == "shutdown":
@@ -288,72 +352,75 @@ class Client:
                     'isIncomplete': 'false',
                     'items': response.result,
                 }
-            
-            ## ! parse_obj/model_validate is expensive and not really needed.
-            #try:
-            #    completion_list = CompletionList.model_validate(response.result)
-            #except ValidationError:
-            #    try:
-            #        list_adapter = TypeAdapter(t.List[CompletionItem])
-            #        completion_list = CompletionList(
-            #            isIncomplete=False,
-            #            items=list_adapter.validate_python(response.result),
-            #        )
-            #    except ValidationError:
-            #        assert response.result is None
 
+            ## ! structuring the completion list is expensive and not really
+            ## needed: items are kept as raw dicts (perf optimization).
             event = Completion(
                 message_id=response.id, completion_list=completion_list
             )
 
         elif method == "textDocument/willSaveWaitUntil":
             event = WillSaveWaitUntilEdits(
-                edits=TypeAdapter(t.List[TextEdit]).validate_python(response.result)
+                edits=self._structure_or_none(response.result, t.List[lsp.TextEdit])
             )
 
         elif method == "textDocument/hover":
             if response.result is not None:
-                event = Hover.model_validate(response.result)
+                hover = structure(response.result, lsp.Hover)
+                event = Hover(contents=hover.contents, range=hover.range)
             else:
                 event = Hover(contents=[])  # null response
             event.message_id = response.id
 
         elif method == "textDocument/foldingRange":
+            raw = response.result if response.result is not None else []
             event = MFoldingRanges(
                 message_id=response.id,
-                result=response.result if response.result is not None else [],
+                result=structure(raw, t.List[lsp.FoldingRange]),
             )
 
         elif method == "textDocument/signatureHelp":
             if response.result is not None:
-                event = SignatureHelp.model_validate(response.result)
+                sighelp = structure(response.result, lsp.SignatureHelp)
+                event = SignatureHelp(
+                    signatures=list(sighelp.signatures),
+                    active_signature=sighelp.active_signature,
+                    active_parameter=sighelp.active_parameter,
+                )
             else:
                 event = SignatureHelp(signatures=[])  # null response
             event.message_id = response.id
 
         elif method == "textDocument/documentSymbol":
+            raw = response.result if response.result is not None else []
             event = MDocumentSymbols(
                 message_id=response.id,
-                result=response.result if response.result is not None else [],
+                result=self._structure_symbols(raw),
             )
 
         elif method == "textDocument/inlayHint":
-            event = TypeAdapter(MInlayHints).validate_python(response)
-            event.message_id = response.id
+            event = MInlayHints(
+                message_id=response.id,
+                result=self._structure_or_none(response.result, t.List[lsp.InlayHint]),
+            )
 
         elif method == "textDocument/rename":
             if response.result is not None and isinstance(response.result, dict):
                 if "documentChanges" in response.result:
                     document_changes = [
-                        TextDocumentEdit.model_validate(change)
+                        structure(change, lsp.TextDocumentEdit)
                         for change in response.result["documentChanges"]
                     ]
                     event = WorkspaceEdit(
-                        message_id=response.id, documentChanges=document_changes
+                        message_id=response.id, document_changes=document_changes
                     )
                 elif "changes" in response.result:
+                    changes = structure(
+                        response.result["changes"],
+                        t.Dict[str, t.List[lsp.TextEdit]],
+                    )
                     event = WorkspaceEdit(
-                        message_id=response.id, changes=response.result["changes"]
+                        message_id=response.id, changes=changes
                     )
                 else:
                     event = WorkspaceEdit(message_id=response.id)
@@ -364,50 +431,47 @@ class Client:
             if response.result is None:
                 event = SemanticTokens(data=[])
             else:
-                event = SemanticTokens.model_validate(response.result)
+                tokens = structure(response.result, lsp.SemanticTokens)
+                event = SemanticTokens(result_id=tokens.result_id, data=list(tokens.data))
             event.message_id = response.id
 
         #GOTOs
         elif method == "textDocument/definition":
-            event = TypeAdapter(Definition).validate_python(
-                {"result": response.result}
-            )
+            event = Definition(result=self._structure_goto_result(response.result))
             event.message_id = response.id
 
         elif method == "textDocument/references":
-            event = TypeAdapter(References).validate_python(
-                {"result": response.result}
+            event = References(
+                result=self._structure_or_none(response.result, t.List[lsp.Location])
             )
 
         elif method == "textDocument/implementation":
-            event = TypeAdapter(Implementation).validate_python(
-                {"result": response.result}
-            )
+            event = Implementation(result=self._structure_goto_result(response.result))
 
         elif method == "textDocument/declaration":
-            event = TypeAdapter(Declaration).validate_python(
-                {"result": response.result}
-            )
+            event = Declaration(result=self._structure_goto_result(response.result))
 
         elif method == "textDocument/typeDefinition":
-            event = TypeAdapter(TypeDefinition).validate_python(
-                {"result": response.result}
-            )
+            event = TypeDefinition(result=self._structure_goto_result(response.result))
 
         elif method == "textDocument/prepareCallHierarchy":
-            event = TypeAdapter(MCallHierarchItems).validate_python(
-                {"result": response.result}
+            event = MCallHierarchItems(
+                result=self._structure_or_none(
+                    response.result, t.List[lsp.CallHierarchyItem]
+                )
             )
 
         elif method in ("textDocument/formatting", "textDocument/rangeFormatting"):
-            event = TypeAdapter(DocumentFormatting).validate_python(
-                {"result": response.result}
+            event = DocumentFormatting(
+                result=self._structure_or_none(response.result, t.List[lsp.TextEdit])
             )
 
         # WORKSPACE
         elif method == "workspace/symbol":
-            event = TypeAdapter(MWorkspaceSymbols).validate_python(
-                {"result": response.result}
+            event = MWorkspaceSymbols(
+                result=self._structure_or_none(
+                    response.result, t.List[lsp.SymbolInformation]
+                )
             )
 
         elif method == "o#/metadata":
@@ -424,92 +488,84 @@ class Client:
 
     # request from server
     def _handle_request(self, request: Request) -> Event:
-        def parse_request(event_cls: t.Type[Event]) -> Event:
-            if issubclass(event_cls, ServerRequest):
-                event = TypeAdapter(event_cls).validate_python(request.params)
-                assert request.id is not None
-                event._id = request.id
-                event._client = self
-                return event
-            elif issubclass(event_cls, ServerNotification):
-                if isinstance(request.params, dict):
-                    return TypeAdapter(event_cls).validate_python(request.params)
-                else:
-                    return TypeAdapter(event_cls).validate_python({})
-            else:
-                raise TypeError(
-                    "`event_cls` must be a subclass of ServerRequest"
-                    " or ServerNotification"
-                )
+        params = request.params if isinstance(request.params, dict) else {}
 
-        if request.method == "workspace/workspaceFolders":
-            # return parse_request(WorkspaceFolders)
-            # ... We don't need to parse WorkspaceFolders server's request!
-            # because according to LSP specs "params: none"
-            # Just create empty event and return it
-            event = WorkspaceFolders(result=None)
+        def bind_server_request(event: ServerRequest) -> Event:
+            assert request.id is not None
             event._id = request.id
             event._client = self
             return event
+
+        if request.method == "workspace/workspaceFolders":
+            # We don't need to parse WorkspaceFolders server's request!
+            # because according to LSP specs "params: none"
+            # Just create empty event and return it
+            return bind_server_request(WorkspaceFolders(result=None))
+
         elif request.method == "workspace/configuration":
-            event = parse_request(ConfigurationRequest)
-            assert isinstance(event, ConfigurationRequest)
-            return event
+            p = structure(params, lsp.ConfigurationParams)
+            return bind_server_request(ConfigurationRequest(items=list(p.items)))
+
         elif request.method == "workspace/projectInitializationComplete":
-            event = parse_request(WorkspaceProjectInitializationComplete)
-            assert isinstance(event, WorkspaceProjectInitializationComplete)
-            return event
+            return WorkspaceProjectInitializationComplete()
+
         elif request.method == "window/showMessage":
-            event = parse_request(ShowMessage)
-            assert isinstance(event, ShowMessage)
-            return event
+            p = structure(params, lsp.ShowMessageParams)
+            return ShowMessage(type=p.type, message=p.message)
+
         elif request.method == "window/showMessageRequest":
-            event = parse_request(ShowMessageRequest)
-            assert isinstance(event, ShowMessageRequest)
-            return event
+            p = structure(params, lsp.ShowMessageRequestParams)
+            event = ShowMessageRequest(
+                type=p.type,
+                message=p.message,
+                actions=list(p.actions) if p.actions is not None else None,
+            )
+            return bind_server_request(event)
+
         elif request.method == "window/logMessage":
-            event = parse_request(LogMessage)
-            assert isinstance(event, LogMessage)
-            return event
+            p = structure(params, lsp.LogMessageParams)
+            return LogMessage(type=p.type, message=p.message)
+
         elif request.method == "textDocument/publishDiagnostics":
-            event = parse_request(PublishDiagnostics)
-            assert isinstance(event, PublishDiagnostics)
-            return event
+            p = structure(params, lsp.PublishDiagnosticsParams)
+            return PublishDiagnostics(uri=p.uri, diagnostics=list(p.diagnostics))
+
         elif request.method == "window/workDoneProgress/create":
-            ev = parse_request(WorkDoneProgressCreate)
-            self._progress_tokens_map[request.params['token']] = WorkDoneProgress
-            return parse_request(WorkDoneProgressCreate)
+            token = params.get("token")
+            self._progress_tokens_map[token] = WorkDoneProgress
+            return bind_server_request(WorkDoneProgressCreate(token=token))
+
         elif request.method == "client/registerCapability":
-            event = parse_request(RegisterCapabilityRequest)
-            assert isinstance(event, RegisterCapabilityRequest)
-            return event
+            p = structure(params, lsp.RegistrationParams)
+            return bind_server_request(
+                RegisterCapabilityRequest(registrations=list(p.registrations))
+            )
 
         elif request.method == "$/progress":
-            progress_type = self._progress_tokens_map.get(request.params['token'])
-            
+            token = params.get("token")
+            self._progress_tokens_map.setdefault(token, WorkDoneProgress)
+
             # if "window/workDoneProgress/create" request from server was missing -
             # pretend it actually was already recieved. i think there is no harm in that.
             # such server bugs must be silently ignored without crashing our plugin.
-            if progress_type is None:
-                # Gracefully handle servers that forget to send workDoneProgress/create
-                self._progress_tokens_map[request.params['token']] = WorkDoneProgress
-                progress_type = WorkDoneProgress
+            value = params.get("value") or {}
+            kind = value.get("kind")
 
-            if progress_type == WorkDoneProgress:
-                kind = request.params['value']['kind']
-                kind = MWorkDoneProgressKind(kind)
-
-                if kind == MWorkDoneProgressKind.BEGIN:
-                    return parse_request(WorkDoneProgressBegin)
-                elif kind == MWorkDoneProgressKind.REPORT:
-                    return parse_request(WorkDoneProgressReport)
-                elif kind == MWorkDoneProgressKind.END:
-                    del self._progress_tokens_map[request.params["token"]] # prevent the dictionary from growing indefinitely.
-                    return parse_request(WorkDoneProgressEnd)
-                else:
-                    raise ValueError(f"Unknown progress kind: {kind}")
-
-
+            if kind == "begin":
+                return WorkDoneProgressBegin(
+                    token=token, value=structure(value, lsp.WorkDoneProgressBegin)
+                )
+            elif kind == "report":
+                return WorkDoneProgressReport(
+                    token=token, value=structure(value, lsp.WorkDoneProgressReport)
+                )
+            elif kind == "end":
+                self._progress_tokens_map.pop(token, None)  # prevent the dictionary from growing indefinitely.
+                return WorkDoneProgressEnd(
+                    token=token, value=structure(value, lsp.WorkDoneProgressEnd)
+                )
+            else:
+                raise ValueError(f"Unknown progress kind: {kind}")
 
         else:
             raise NotImplementedError(request)
@@ -542,226 +598,264 @@ class Client:
         self._state = ClientState.EXITED
 
     def cancel_last_request(self) -> None:
-        self._send_notification(
-            method="$/cancelRequest", params={"id": self._id_counter - 1}
-        )
+        params = unstructure(lsp.CancelParams(id=self._id_counter - 1))
+        self._send_notification(method="$/cancelRequest", params=params)
 
-    def did_open(self, text_document: TextDocumentItem) -> None:
+    def did_open(self, text_document: lsp.TextDocumentItem) -> None:
         assert self._state == ClientState.NORMAL
+        params = lsp.DidOpenTextDocumentParams(text_document=text_document)
         self._send_notification(
-            method="textDocument/didOpen",
-            params={"textDocument": text_document.model_dump()},
+            method="textDocument/didOpen", params=unstructure(params)
         )
 
     def did_change(
         self,
-        text_document: VersionedTextDocumentIdentifier,
-        content_changes: t.List[TextDocumentContentChangeEvent],
+        text_document: lsp.VersionedTextDocumentIdentifier,
+        content_changes: t.List[lsp.TextDocumentContentChangeEvent],
     ) -> None:
         assert self._state == ClientState.NORMAL
+        params = lsp.DidChangeTextDocumentParams(
+            text_document=text_document,
+            content_changes=content_changes,
+        )
         self._send_notification(
-            method="textDocument/didChange",
-            params={
-                "textDocument": text_document.model_dump(),
-                "contentChanges": [evt.model_dump() for evt in content_changes],
-            },
+            method="textDocument/didChange", params=unstructure(params)
         )
 
     def did_change_configuration(self, settings: t.Any) -> None:
         assert self._state == ClientState.NORMAL
+        params = lsp.DidChangeConfigurationParams(settings=settings)
         self._send_notification(
-            method="workspace/didChangeConfiguration", params={"settings": settings}
+            method="workspace/didChangeConfiguration", params=unstructure(params)
         )
 
     def will_save(
-        self, text_document: TextDocumentIdentifier, reason: TextDocumentSaveReason
+        self, text_document: lsp.TextDocumentIdentifier, reason: lsp.TextDocumentSaveReason
     ) -> None:
         assert self._state == ClientState.NORMAL
+        params = lsp.WillSaveTextDocumentParams(
+            text_document=text_document, reason=reason
+        )
         self._send_notification(
-            method="textDocument/willSave",
-            params={"textDocument": text_document.model_dump(), "reason": reason.value},
+            method="textDocument/willSave", params=unstructure(params)
         )
 
     def will_save_wait_until(
-        self, text_document: TextDocumentIdentifier, reason: TextDocumentSaveReason
+        self, text_document: lsp.TextDocumentIdentifier, reason: lsp.TextDocumentSaveReason
     ) -> None:
         assert self._state == ClientState.NORMAL
+        params = lsp.WillSaveTextDocumentParams(
+            text_document=text_document, reason=reason
+        )
         self._send_request(
-            method="textDocument/willSaveWaitUntil",
-            params={"textDocument": text_document.model_dump(), "reason": reason.value},
+            method="textDocument/willSaveWaitUntil", params=unstructure(params)
         )
 
     def did_save(
-        self, text_document: TextDocumentIdentifier, text: t.Optional[str] = None
+        self, text_document: lsp.TextDocumentIdentifier, text: t.Optional[str] = None
     ) -> None:
         assert self._state == ClientState.NORMAL
-        params: t.Dict[str, t.Any] = {"textDocument": text_document.model_dump()}
-        if text is not None:
-            params["text"] = text
-        self._send_notification(method="textDocument/didSave", params=params)
+        params = lsp.DidSaveTextDocumentParams(
+            text_document=text_document, text=text
+        )
+        self._send_notification(method="textDocument/didSave", params=unstructure(params))
 
-    def did_close(self, text_document: TextDocumentIdentifier) -> None:
+    def did_close(self, text_document: lsp.TextDocumentIdentifier) -> None:
         assert self._state == ClientState.NORMAL
+        params = lsp.DidCloseTextDocumentParams(text_document=text_document)
         self._send_notification(
-            method="textDocument/didClose",
-            params={"textDocument": text_document.model_dump()},
+            method="textDocument/didClose", params=unstructure(params)
         )
 
     def did_change_workspace_folders(
-        self, added: t.List[WorkspaceFolder], removed: t.List[WorkspaceFolder]
+        self, added: t.List[lsp.WorkspaceFolder], removed: t.List[lsp.WorkspaceFolder]
     ) -> None:
         assert self._state == ClientState.NORMAL
-        params = {
-            "added": [f.model_dump() for f in added],
-            "removed": [f.model_dump() for f in removed],
-        }
+        params = lsp.DidChangeWorkspaceFoldersParams(
+            event=lsp.WorkspaceFoldersChangeEvent(added=added, removed=removed)
+        )
         self._send_notification(
-            method="workspace/didChangeWorkspaceFolders", params=params
+            method="workspace/didChangeWorkspaceFolders", params=unstructure(params)
         )
 
     def completion(
         self,
-        text_document_position: TextDocumentPosition,
-        context: t.Optional[CompletionContext] = None,
+        text_document_position: lsp.TextDocumentPositionParams,
+        context: t.Optional[lsp.CompletionContext] = None,
     ) -> Id:
         assert self._state == ClientState.NORMAL
-        params = {}
-        params.update(text_document_position.model_dump())
-        if context is not None:
-            params.update( {
-                'context': context.model_dump(exclude_unset=True)
-            } )
-        return self._send_request(method="textDocument/completion", params=params)
+        params = lsp.CompletionParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+            context=context,
+        )
+        return self._send_request(
+            method="textDocument/completion", params=unstructure(params)
+        )
 
     def semantic_tokens(
         self,
-        text_document: TextDocumentIdentifier,
+        text_document: lsp.TextDocumentIdentifier,
     ) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.SemanticTokensParams(text_document=text_document)
         return self._send_request(
-            method="textDocument/semanticTokens/full",
-            params={"textDocument": text_document.model_dump()},
+            method="textDocument/semanticTokens/full", params=unstructure(params)
         )
 
     def rename(
         self,
-        text_document_position: TextDocumentPosition,
+        text_document_position: lsp.TextDocumentPositionParams,
         new_name: str,
     ) -> Id:
         assert self._state == ClientState.NORMAL
-        params = {}
-        params.update(text_document_position.model_dump())
-        params["newName"] = new_name
-        return self._send_request(method="textDocument/rename", params=params)
+        params = lsp.RenameParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+            new_name=new_name,
+        )
+        return self._send_request(method="textDocument/rename", params=unstructure(params))
 
-    def hover(self, text_document_position: TextDocumentPosition) -> Id:
+    def hover(self, text_document_position: lsp.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.HoverParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+        )
+        return self._send_request(method="textDocument/hover", params=unstructure(params))
+
+    def folding_range(self, text_document: lsp.TextDocumentIdentifier) -> Id:
+        assert self._state == ClientState.NORMAL
+        params = lsp.FoldingRangeParams(text_document=text_document)
         return self._send_request(
-            method="textDocument/hover", params=text_document_position.model_dump()
+            method="textDocument/foldingRange", params=unstructure(params)
         )
 
-    def folding_range(self, text_document: TextDocumentIdentifier) -> Id:
+    def signatureHelp(
+        self, text_document_position: lsp.TextDocumentPositionParams
+    ) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.SignatureHelpParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+        )
         return self._send_request(
-            method="textDocument/foldingRange",
-            params={"textDocument": text_document.model_dump()},
+            method="textDocument/signatureHelp", params=unstructure(params)
         )
 
-    def signatureHelp(self, text_document_position: TextDocumentPosition) -> Id:
+    def definition(self, text_document_position: lsp.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.DefinitionParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+        )
         return self._send_request(
-            method="textDocument/signatureHelp",
-            params=text_document_position.model_dump(),
+            method="textDocument/definition", params=unstructure(params)
         )
 
-    def definition(self, text_document_position: TextDocumentPosition) -> Id:
+    def declaration(self, text_document_position: lsp.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.DeclarationParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+        )
         return self._send_request(
-            method="textDocument/definition", params=text_document_position.model_dump()
+            method="textDocument/declaration", params=unstructure(params)
         )
 
-    def declaration(self, text_document_position: TextDocumentPosition) -> Id:
+    def inlay_hint(
+        self, text_document: lsp.TextDocumentIdentifier, range: lsp.Range
+    ) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.InlayHintParams(text_document=text_document, range=range)
         return self._send_request(
-            method="textDocument/declaration",
-            params=text_document_position.model_dump(),
+            method="textDocument/inlayHint", params=unstructure(params)
         )
 
-    def inlay_hint(self, text_document: TextDocumentIdentifier, range: Range) -> Id:
+    def typeDefinition(
+        self, text_document_position: lsp.TextDocumentPositionParams
+    ) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.TypeDefinitionParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+        )
         return self._send_request(
-            method="textDocument/inlayHint",
-            params={
-                "textDocument": text_document.model_dump(),
-                "range": range.model_dump(),
-            },
+            method="textDocument/typeDefinition", params=unstructure(params)
         )
 
-    def typeDefinition(self, text_document_position: TextDocumentPosition) -> Id:
+    def references(self, text_document_position: lsp.TextDocumentPositionParams) -> Id:
         assert self._state == ClientState.NORMAL
-        return self._send_request(
-            method="textDocument/typeDefinition",
-            params=text_document_position.model_dump(),
+        params = lsp.ReferenceParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+            context=lsp.ReferenceContext(include_declaration=True),
         )
-
-    def references(self, text_document_position: TextDocumentPosition) -> Id:
-        assert self._state == ClientState.NORMAL
-        params = {
-            "context": {"includeDeclaration": True},
-            **text_document_position.model_dump(),
-        }
-        return self._send_request(method="textDocument/references", params=params)
+        return self._send_request(
+            method="textDocument/references", params=unstructure(params)
+        )
 
     # TODO incomplete
-    def prepareCallHierarchy(self, text_document_position: TextDocumentPosition) -> Id:
+    def prepareCallHierarchy(
+        self, text_document_position: lsp.TextDocumentPositionParams
+    ) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.CallHierarchyPrepareParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+        )
         return self._send_request(
-            method="textDocument/prepareCallHierarchy",
-            params=text_document_position.model_dump(),
+            method="textDocument/prepareCallHierarchy", params=unstructure(params)
         )
 
-    def implementation(self, text_document_position: TextDocumentPosition) -> Id:
+    def implementation(
+        self, text_document_position: lsp.TextDocumentPositionParams
+    ) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.ImplementationParams(
+            text_document=text_document_position.text_document,
+            position=text_document_position.position,
+        )
         return self._send_request(
-            method="textDocument/implementation",
-            params=text_document_position.model_dump(),
+            method="textDocument/implementation", params=unstructure(params)
         )
 
     def workspace_symbol(self, query: str = "") -> Id:
         assert self._state == ClientState.NORMAL
-        return self._send_request(method="workspace/symbol", params={"query": query})
+        params = lsp.WorkspaceSymbolParams(query=query)
+        return self._send_request(method="workspace/symbol", params=unstructure(params))
 
-    def documentSymbol(self, text_document: TextDocumentIdentifier) -> Id:
+    def documentSymbol(self, text_document: lsp.TextDocumentIdentifier) -> Id:
         assert self._state == ClientState.NORMAL
+        params = lsp.DocumentSymbolParams(text_document=text_document)
         return self._send_request(
-            method="textDocument/documentSymbol",
-            params={"textDocument": text_document.model_dump()},
+            method="textDocument/documentSymbol", params=unstructure(params)
         )
 
     def formatting(
-        self, text_document: TextDocumentIdentifier, options: FormattingOptions
+        self, text_document: lsp.TextDocumentIdentifier, options: lsp.FormattingOptions
     ) -> Id:
         assert self._state == ClientState.NORMAL
-        params = {
-            "textDocument": text_document.model_dump(),
-            "options": options.model_dump(),
-        }
-        return self._send_request(method="textDocument/formatting", params=params)
+        params = lsp.DocumentFormattingParams(
+            text_document=text_document, options=options
+        )
+        return self._send_request(
+            method="textDocument/formatting", params=unstructure(params)
+        )
 
     def rangeFormatting(
         self,
-        text_document: TextDocumentIdentifier,
-        range: Range,
-        options: FormattingOptions,
+        text_document: lsp.TextDocumentIdentifier,
+        range: lsp.Range,
+        options: lsp.FormattingOptions,
     ) -> Id:
         assert self._state == ClientState.NORMAL
-        params = {
-            "textDocument": text_document.model_dump(),
-            "range": range.model_dump(),
-            "options": options.model_dump(),
-        }
-        return self._send_request(method="textDocument/rangeFormatting", params=params)
+        params = lsp.DocumentRangeFormattingParams(
+            text_document=text_document, range=range, options=options
+        )
+        return self._send_request(
+            method="textDocument/rangeFormatting", params=unstructure(params)
+        )
 
     def metadata(self, params):
         return self._send_request(method="o#/metadata", params=params)
-
