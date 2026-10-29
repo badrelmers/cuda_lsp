@@ -2,7 +2,7 @@ import json
 import re
 import typing as t
 
-from .attr_model import TypeAdapter
+from .attr_model import TypeAdapter, ValidationError
 
 from .structs import JSONDict, JSONList, Request, Response, Id
 
@@ -180,7 +180,13 @@ def _parse_one_message(
         data: JSONDict,
     ) -> t.Union[Request, Response]:
         del data["jsonrpc"]
-        return TypeAdapter(t.Union[Request, Response]).validate_python(data)
+        target = Request if "method" in data else Response
+        try:
+            if target is Request:
+                return Request(**data)
+            return Response(**data)
+        except TypeError as exc:
+            raise ValidationError(f"{exc} | payload={data}") from exc
 
     content = json.loads(raw_content.decode(encoding))
 

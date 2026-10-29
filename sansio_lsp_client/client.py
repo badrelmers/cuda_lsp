@@ -56,6 +56,10 @@ from .structs import (
     JSONDict,
     JSONList,
     MWorkDoneProgressKind,
+    Diagnostic,
+    DiagnosticSeverity,
+    DiagnosticTag,
+    DiagnosticRelatedInformation,
     Range,
     Request,
     Response,
@@ -69,6 +73,9 @@ from .structs import (
     TextEdit,
     VersionedTextDocumentIdentifier,
     WorkspaceFolder,
+    WorkDoneProgressBeginValue,
+    WorkDoneProgressReportValue,
+    WorkDoneProgressEndValue,
 )
 
 
@@ -424,18 +431,106 @@ class Client:
 
     # request from server
     def _handle_request(self, request: Request) -> Event:
+        progress_notifications = (WorkDoneProgressBegin, WorkDoneProgressReport, WorkDoneProgressEnd)
+        progress_value_map = {
+            WorkDoneProgressBegin: WorkDoneProgressBeginValue,
+            WorkDoneProgressReport: WorkDoneProgressReportValue,
+            WorkDoneProgressEnd: WorkDoneProgressEndValue,
+        }
+
         def parse_request(event_cls: t.Type[Event]) -> Event:
             if issubclass(event_cls, ServerRequest):
-                event = TypeAdapter(event_cls).validate_python(request.params)
+                payload = request.params if isinstance(request.params, dict) else {}
+                try:
+                    if event_cls is WorkDoneProgressCreate:
+                        event = event_cls(**payload)
+                    else:
+                        event = TypeAdapter(event_cls).validate_python(payload)
+                except ValidationError as exc:
+                    raise ValidationError(f"{exc} | payload={payload}") from exc
                 assert request.id is not None
                 event._id = request.id
                 event._client = self
                 return event
             elif issubclass(event_cls, ServerNotification):
-                if isinstance(request.params, dict):
-                    return TypeAdapter(event_cls).validate_python(request.params)
-                else:
-                    return TypeAdapter(event_cls).validate_python({})
+                payload = request.params if isinstance(request.params, dict) else {}
+                try:
+                    if issubclass(event_cls, progress_notifications):
+                        structured_payload = dict(payload)
+                        value_payload = structured_payload.get("value")
+                        if value_payload is not None:
+                            value_cls = progress_value_map.get(event_cls)
+                            if value_cls is not None:
+                                structured_payload["value"] = TypeAdapter(value_cls).validate_python(value_payload)
+                        event = event_cls(**structured_payload)
+                        if isinstance(event.value, dict):
+                            value_cls = progress_value_map.get(event_cls)
+                            if value_cls is not None:
+                                event.value = TypeAdapter(value_cls).validate_python(event.value)
+                        return event
+                    if event_cls is PublishDiagnostics:
+                        structured_payload = dict(payload)
+                        diagnostics_payload = structured_payload.get("diagnostics", [])
+                        normalized_diagnostics: t.List[Diagnostic] = []
+                        for item in diagnostics_payload:
+                            diag_payload = dict(item)
+                            severity_val = diag_payload.get("severity")
+                            severity: t.Optional[DiagnosticSeverity]
+                            if isinstance(severity_val, DiagnosticSeverity):
+                                severity = severity_val
+                            elif severity_val is None:
+                                severity = None
+                            else:
+                                try:
+                                    severity = DiagnosticSeverity(severity_val)
+                                except ValueError:
+                                    severity = None
+
+                            tags_list = diag_payload.get("tags")
+                            normalized_tags: t.Optional[t.List[DiagnosticTag]] = None
+                            if isinstance(tags_list, list):
+                                normalized_tags = []
+                                for tag_val in tags_list:
+                                    if isinstance(tag_val, DiagnosticTag):
+                                        normalized_tags.append(tag_val)
+                                    else:
+                                        try:
+                                            normalized_tags.append(DiagnosticTag(tag_val))
+                                        except ValueError:
+                                            continue
+                                if not normalized_tags:
+                                    normalized_tags = None
+
+                            related_payload = diag_payload.get("relatedInformation")
+                            related_info: t.Optional[t.List[DiagnosticRelatedInformation]] = None
+                            if isinstance(related_payload, list):
+                                related_info = [
+                                    TypeAdapter(DiagnosticRelatedInformation).validate_python(related_item)
+                                    for related_item in related_payload
+                                ]
+
+                            range_obj = TypeAdapter(Range).validate_python(diag_payload["range"])
+
+                            normalized_diagnostics.append(
+                                Diagnostic(
+                                    range=range_obj,
+                                    message=diag_payload["message"],
+                                    severity=severity,
+                                    code=diag_payload.get("code"),
+                                    codeDescription=diag_payload.get("codeDescription"),
+                                    source=diag_payload.get("source"),
+                                    relatedInformation=related_info,
+                                    tags=normalized_tags,
+                                    data=diag_payload.get("data"),
+                                )
+                            )
+
+                        structured_payload["diagnostics"] = normalized_diagnostics
+                        return PublishDiagnostics(**structured_payload)
+
+                    return TypeAdapter(event_cls).validate_python(payload)
+                except ValidationError as exc:
+                    raise ValidationError(f"{exc} | payload={payload}") from exc
             else:
                 raise TypeError(
                     "`event_cls` must be a subclass of ServerRequest"

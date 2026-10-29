@@ -25,13 +25,13 @@ ProgressToken = t.Union[int, str]
 class Request(AttrsModel):
     method: str
     id: t.Optional[Id] = None
-    params: t.Optional[t.Union[t.List[t.Any], JSONDict]] = None
+    params: t.Optional[t.Any] = None
 
 
 @attrs.define(slots=True)
 class Response(AttrsModel):
     id: t.Optional[Id] = None
-    result: t.Optional[t.Union[t.List[t.Any], JSONDict]] = None
+    result: t.Optional[t.Any] = None
     error: t.Optional[JSONDict] = None
 
 
@@ -113,8 +113,8 @@ class Range(AttrsModel):
 @attrs.define(slots=True)
 class TextDocumentContentChangeEvent(AttrsModel):
     text: str
-    range: t.Optional[Range] = None
     rangeLength: t.Optional[int] = None  # deprecated, use .range
+    range: t.Optional[Range] = None
 
     def model_dump(self, **kwargs: t.Any) -> t.Dict[str, t.Any]:
         d = super().model_dump(**kwargs)
@@ -246,14 +246,9 @@ class CompletionItemTag(enum.IntEnum):
 @attrs.define(slots=True)
 class CompletionItem(AttrsModel):
     label: str
-    kind: t.Optional[CompletionItemKind] = None
-    tags: t.Optional[t.List[CompletionItemTag]] = None
-    detail: t.Optional[str] = None
     documentation: t.Union[str, MarkupContent, None] = None
-    deprecated: t.Optional[bool] = None
-    preselect: t.Optional[bool] = None
-    sortText: t.Optional[str] = None
-    filterText: t.Optional[str] = None
+    detail: t.Optional[str] = None
+    kind: t.Optional[CompletionItemKind] = None
     insertText: t.Optional[str] = None
     insertTextFormat: t.Optional[InsertTextFormat] = None
     textEdit: t.Optional[TextEdit] = None
@@ -261,6 +256,11 @@ class CompletionItem(AttrsModel):
     commitCharacters: t.Optional[t.List[str]] = None
     command: t.Optional[Command] = None
     data: t.Optional[t.Any] = None
+    deprecated: t.Optional[bool] = None
+    filterText: t.Optional[str] = None
+    preselect: t.Optional[bool] = None
+    sortText: t.Optional[str] = None
+    tags: t.Optional[t.List[CompletionItemTag]] = None
 
 
 @attrs.define(slots=True)
@@ -283,16 +283,10 @@ class Location(AttrsModel):
 
 @attrs.define(slots=True)
 class LocationLink(AttrsModel):
-    originSelectionRange: t.Optional[Range] = None
     targetUri: str
     targetRange: Range
     targetSelectionRange: Range
-
-
-@attrs.define(slots=True)
-class DiagnosticRelatedInformation(AttrsModel):
-    location: Location
-    message: str
+    originSelectionRange: t.Optional[Range] = None
 
 
 class DiagnosticSeverity(enum.IntEnum):
@@ -306,14 +300,28 @@ class DiagnosticSeverity(enum.IntEnum):
                     self.HINT:'Hint'}[self]
 
 
+class DiagnosticTag(enum.IntEnum):
+    UNNECESSARY = 1
+    DEPRECATED = 2
+
+
+@attrs.define(slots=True)
+class DiagnosticRelatedInformation(AttrsModel):
+    location: Location
+    message: str
+
+
 @attrs.define(slots=True)
 class Diagnostic(AttrsModel):
     range: Range
+    message: str
     severity: t.Optional[DiagnosticSeverity] = None
     code: t.Optional[t.Union[int, str]] = None
+    codeDescription: t.Optional[JSONDict] = None
     source: t.Optional[str] = None
-    message: str
     relatedInformation: t.Optional[t.List[DiagnosticRelatedInformation]] = None
+    tags: t.Optional[t.List[DiagnosticTag]] = None
+    data: t.Optional[t.Any] = None
 
 
 """ HOVER #################
@@ -392,12 +400,12 @@ class SymbolTag(enum.IntEnum):
 class CallHierarchyItem(AttrsModel):
     name: str
     kind: SymbolKind
-    tags: t.Optional[SymbolTag] = None
-    detail: t.Optional[str] = None
     uri: str
     range: Range
     selectionRange: Range
     data: t.Optional[t.Any] = None
+    detail: t.Optional[str] = None
+    tags: t.Optional[SymbolTag] = None
 
 
 @attrs.define(slots=True)
@@ -423,9 +431,9 @@ class TextDocumentSyncKind(enum.IntEnum):
 class SymbolInformation(AttrsModel):
     name: str
     kind: SymbolKind
+    location: Location
     tags: t.Optional[t.List[SymbolTag]] = None
     deprecated: t.Optional[bool] = None
-    location: Location
     containerName: t.Optional[str] = None
 
     def mpos(self):
@@ -435,7 +443,7 @@ class SymbolInformation(AttrsModel):
 @attrs.define(slots=True)
 class InlayHintLabelPart(AttrsModel):
     value: str
-    tooltip: t.Optional[t.Union[str, MarkupContent]]
+    tooltip: t.Optional[t.Union[str, MarkupContent]] = None
     location: t.Optional[Location] = None
     command: t.Optional[Command] = None
 
@@ -450,18 +458,18 @@ class InlayHint(AttrsModel):
     position: Position
     label: t.Union[str, t.List[InlayHintLabelPart]]
     kind: t.Optional[InlayHintKind] = None
-    textEdits: t.Optional[t.List[TextEdit]] = None
-    tooltip: t.Optional[t.Union[str, MarkupContent]] = None
+    data: t.Optional[t.Any] = None
     paddingLeft: t.Optional[bool] = None
     paddingRight: t.Optional[bool] = None
-    data: t.Optional[t.Any] = None
+    textEdits: t.Optional[t.List[TextEdit]] = None
+    tooltip: t.Optional[t.Union[str, MarkupContent]] = None
 
 
 @attrs.define(slots=True)
 class FoldingRange(AttrsModel):
     startLine: int
-    startCharacter: t.Optional[int] = None
     endLine: int
+    startCharacter: t.Optional[int] = None
     endCharacter: t.Optional[int] = None
     kind: t.Optional[str] = None
     collapsedText: t.Optional[str] = None
@@ -472,12 +480,12 @@ class FoldingRange(AttrsModel):
 @attrs.define(slots=True)
 class DocumentSymbol(AttrsModel):
     name: str
-    detail: t.Optional[str] = None
     kind: SymbolKind
-    tags: t.Optional[t.List[SymbolTag]] = None
-    deprecated: t.Optional[bool] = None
     range: Range
     selectionRange: Range
+    detail: t.Optional[str] = None
+    tags: t.Optional[t.List[SymbolTag]] = None
+    deprecated: t.Optional[bool] = None
     children: t.Optional[t.List["DocumentSymbol"]] = None
 
     def mpos(self):

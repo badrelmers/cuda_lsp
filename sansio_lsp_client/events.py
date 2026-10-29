@@ -1,11 +1,13 @@
+from __future__ import annotations
 import typing as t
-
 import attrs
 
 from .attr_model import AttrsModel
 
 if t.TYPE_CHECKING:  # avoid import cycle at runtime
     from .client import Client
+else:
+    Client = t.Any
 from .structs import (
     FoldingRange,
     InlayHint,
@@ -49,9 +51,9 @@ class MethodResponse(Event):
 
 @attrs.define(slots=True)
 class ResponseError(Event):
+    code: int
+    message: str
     message_id: t.Optional[Id] = None
-    code: int = attrs.field()
-    message: str = attrs.field()
     data: t.Optional[t.Union[str, int, float, bool, t.List[t.Any], JSONDict, None]] = None
 
 
@@ -174,7 +176,7 @@ class WorkspaceProjectInitializationComplete(ServerNotification):
     * contents: MarkedString | MarkedString[] | MarkupContent;
     * range?: Range;
 """
-@attrs.define(slots=True)
+@attrs.define(slots=True, kw_only=True)
 class Hover(MethodResponse):
     contents: t.Union[
         t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
@@ -185,6 +187,7 @@ class Hover(MethodResponse):
     def m_str(self):
         """Return hover contents as markdown-compatible string."""
         def item_str(item): #SKIP
+            """Return hover contents as markdown-compatible string."""
             if isinstance(item, MarkedString):
                 return f'[{item.language}]\n{item.value}'
             elif isinstance(item, MarkupContent):
@@ -195,7 +198,7 @@ class Hover(MethodResponse):
             return '\n'.join((item_str(item) for item in self.contents))
         return item_str(self.contents)
 
-@attrs.define(slots=True)
+@attrs.define(slots=True, kw_only=True)
 class SignatureHelp(MethodResponse):
     signatures: t.List[SignatureInformation]
     activeSignature: t.Optional[int] = None
@@ -216,9 +219,9 @@ class SignatureHelp(MethodResponse):
 
 @attrs.define(slots=True)
 class SemanticTokens(Event):
+    data: t.List[int]
     message_id: t.Optional[Id] = None
     resultId: t.Optional[str] = None
-    data: t.List[int]
     
 
 @attrs.define(slots=True)
@@ -235,22 +238,22 @@ class WorkspaceEdit(MethodResponse):
 # result is a list, so putting in a custom class
 @attrs.define(slots=True)
 class References(MethodResponse):
-    result: t.Union[t.List[Location], None]
+    result: t.Union[t.List[Location], None] = None
 
 
 @attrs.define(slots=True)
 class MCallHierarchItems(Event):
-    result: t.Union[t.List[CallHierarchyItem], None]
+    result: t.Union[t.List[CallHierarchyItem], None] = None
 
 
 @attrs.define(slots=True)
 class Implementation(MethodResponse):
-    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
 
 
 @attrs.define(slots=True)
 class MWorkspaceSymbols(MethodResponse):
-    result: t.Union[t.List[SymbolInformation], None]
+    result: t.Union[t.List[SymbolInformation], None] = None
 
 
 @attrs.define(slots=True)
@@ -270,12 +273,12 @@ class MDocumentSymbols(MethodResponse):
 
 @attrs.define(slots=True)
 class Declaration(MethodResponse):
-    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
 
 
 @attrs.define(slots=True)
 class TypeDefinition(MethodResponse):
-    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
 
 
 @attrs.define(slots=True)
