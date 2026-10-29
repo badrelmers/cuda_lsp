@@ -42,6 +42,7 @@ from .util import (
 from .dlg import Hint, SEVERITY_MAP, SignaturesDialog, TYPE_DIAG
 from .dlg import PanelLog, SEVERITY_ERR, SEVERITY_LOG, SEVERITY_NA, SEVERITY_WRN
 from .dlg import TYPE_SPY, TYPE_UNHANDLED
+from . import omnisharp
 from .book import EditorDoc
 #from .tree import TreeMan  # imported on access
 
@@ -682,7 +683,15 @@ class Language:
                 self._handle_metadata(result, targetrange, reqpos, dlg_caption)
 
             else:
-                self._on_unhandled_msg(msg)
+                method = msg.get('method')
+                if msg_id is None and method in omnisharp.OMNISHARP_NOTIF:
+                    # OmniSharp 'o#/...' notifications: dedicated handlers
+                    # (project/MSBuild/analysis events) instead of the loud
+                    # 'Unhandled' report
+                    omnisharp.handle_omnisharp_notification(
+                        self, method, msg.get('params'))
+                else:
+                    self._on_unhandled_msg(msg)
 
         else:
             self._on_unhandled_msg(msg)

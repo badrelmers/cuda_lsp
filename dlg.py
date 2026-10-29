@@ -339,6 +339,7 @@ TYPE_LOG = 'type_logs'
 TYPE_DIAG = 'type_diags'
 TYPE_SPY = 'type_spy'      # debug spy of request/response JSON-RPC messages
 TYPE_UNHANDLED = 'type_unhandled'  # server messages no handler exists for
+TYPE_OMNISHARP = 'type_omnisharp'  # OmniSharp-specific 'o#/...' server events
 
 SEVERITY_ERR = 'svr_err'
 SEVERITY_WRN = 'svr_wrn'
@@ -372,6 +373,7 @@ PANEL_CAPTIONS = {
     TYPE_DIAG:      _('Diagnostics'),
     TYPE_SPY:       _('Spy'),
     TYPE_UNHANDLED: _('Unhandled'),
+    TYPE_OMNISHARP: _('OmniSharp'),
 
     SEVERITY_ERR:   _('Error'),
     SEVERITY_WRN:   _('Warning'),
