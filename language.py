@@ -841,30 +841,36 @@ class Language:
                 _reqpos = self.request_positions.pop(message_id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     first_item = msg.contents[0] if isinstance(msg.contents, list) and len(msg.contents) > 0 else msg.contents
-                    if first_item: # if received anything
-                        if isinstance(first_item, (lsp_types.MarkedString, str)):
-                            # for deprecated 'MarkedString' or 'str' default to 'markdown'
+                    if first_item:
+                        if isinstance(first_item, str) or hasattr(first_item, 'language'):
+                            # For MarkedStringWithLanguage or deprecated 'MarkedString' or 'str' default to 'markdown'
                             markupkind = lsp_types.MarkupKind.Markdown
                         else:
-                            # can be a list (supposedly)
+                            # It's MarkupContent or similar
                             markupkind = getattr(first_item, 'kind', None)
 
                         filtered_cmds = self.scfg.filter_commands(self._caret_cmds)
                         
-                        def hover_to_str(hover):
+                        # Helper function to convert hover to string
+                        def hover_to_str(contents):
                             def item_str(item):
-                                if isinstance(item, lsp_types.MarkedString):
+                                # Check actual types
+                                if isinstance(item, str):
+                                    return item
+                                elif hasattr(item, 'language'): # MarkedStringWithLanguage
                                     return f"[{item.language}]\n{item.value}"
-                                if isinstance(item, lsp_types.MarkupContent):
+                                elif hasattr(item, 'kind'): # MarkupContent
                                     return f"[{item.kind}]\n{item.value}"
-                                return str(item)
+                                else:
+                                    return str(item)
                             
-                            if isinstance(hover.contents, list):
-                                return "\n".join(item_str(item) for item in hover.contents)
-                            return item_str(hover.contents)
+                            if isinstance(contents, list):
+                                return "\n".join(item_str(item) for item in contents)
+                            return item_str(contents)
                         
-                        Hint.show(hover_to_str(msg),
-                                caret=_reqpos.target_pos_caret,   cursor_loc_start=_reqpos.cursor_ed,
+                        Hint.show(hover_to_str(msg.contents),
+                                caret=_reqpos.target_pos_caret,
+                                cursor_loc_start=_reqpos.cursor_ed,
                                 markupkind=markupkind,
                                 language=getattr(first_item, 'language', None),
                                 caret_cmds=filtered_cmds,
