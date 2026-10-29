@@ -652,7 +652,6 @@ class Language:
 
                 # recv now returns an iterator, so we must iterate manually to handle errors. consume the recv generator with proper error handling
                 event_iter = self.client.recv(data)
-                print("NOTE: lang recv",event_iter)
                 while True:
                     try:
                         message_id, msg = next(event_iter)
@@ -681,12 +680,18 @@ class Language:
                                                     
                         # print to the gui panel "View servers responses"
                         if DEBUG_MESSAGES:
-                            if err and hasattr(err, 'args') and err.args and hasattr(err.args[0], 'dict'):
-                                response_error_dict = err.args[0].dict()
+                            if err and hasattr(err, 'args') and err.args:
+                                data = err.args[0]
+                                
+                                # Use the data directly if it's a dict, otherwise wrap the string in a dict
+                                response_error_dict = data if isinstance(data, dict) else {"error": str(data)}
+
+                                # Create the debug object to maintain compatibility with the rest of your UI
                                 UnsupportedMessage = type('Unsupported Message!', (object,), {
                                     'dict': lambda _: response_error_dict,
                                     '__str__': lambda _: str(response_error_dict),
                                 })
+                                
                                 self._dbg_msgs = (self._dbg_msgs + [UnsupportedMessage()])[-128:]
                         break
                     except BaseValidationError as err:

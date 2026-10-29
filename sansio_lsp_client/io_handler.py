@@ -113,7 +113,7 @@ def _parse_content_type(header: str) -> t.Tuple[str, t.Dict[str, str]]:
 # iterator when a message was parsed but no things were created.
 def _parse_one_message(
     response_buf: bytearray,
-) -> t.Optional[t.Iterable[t.Union[Request, Response]]]:
+) -> t.Optional[t.Iterable[dict]]:
     """Parse a single JSON-RPC message from a bytearray.
 
     Args:
@@ -121,7 +121,7 @@ def _parse_one_message(
 
     Returns:
         None if there's not enough data for a complete message,
-        or an iterable of Request or Response objects if a message was parsed successfully.
+        or the raw dicts if a message was parsed successfully.
 
     Note: This function modifies response_buf by removing parsed data."""
     if b"\r\n\r\n" not in response_buf:
@@ -174,42 +174,25 @@ def _parse_one_message(
     else:
         del response_buf[:-unused_bytes_count]
 
-    def parse_request_or_response(
-        data: JSONDict,
-    ) -> t.Union[Request, Response]:
-        data = dict(data)
-        data.pop("jsonrpc", None)
-
-        if "method" in data:
-            return Request(
-                method=data["method"],
-                params=data.get("params"),
-                id=data.get("id"),
-            )
-
-        return Response(
-            id=data.get("id"),
-            result=data.get("result"),
-            error=data.get("error"),
-        )
-
     content = json.loads(raw_content.decode(encoding))
 
+    # LSP can send a single dict or a list (batch). 
+    # We ensure we return an iterable of dicts.
     if isinstance(content, list):
         # This is in response to a batch operation.
-        return map(parse_request_or_response, content)
+        return content
     else:
-        return [parse_request_or_response(content)]
+        return [content]
 
 
-def _parse_messages(response_buf: bytearray) -> t.Iterator[t.Union[Response, Request]]:
+def _parse_messages(response_buf: bytearray) -> t.Optional[t.Iterable[dict]]:
     """Parse all complete JSON-RPC messages from a bytearray.
 
     Args:
         response_buf: A bytearray containing zero or more JSON-RPC messages.
 
     Returns:
-        An iterator yielding Request or Response objects for each complete message.
+        An iterator yielding the raw dicts for each complete message.
         Partial messages at the end of the buffer are left for future parsing.
 
     Note: This function modifies response_buf by removing parsed data."""

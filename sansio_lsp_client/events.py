@@ -166,27 +166,6 @@ class PublishDiagnostics(ServerNotification):
 class WorkspaceProjectInitializationComplete(ServerNotification):
     pass
 
-Hover = lsp_types.Hover
-
-# delllllllllllllll
-# @attrs.define(kw_only=True)
-# class Hover(MethodResponse):
-    # contents: t.Union[
-        # t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
-    # ] = attrs.field()
-    # range: t.Optional[Range] = attrs.field(default=None)
-# 
-    # def m_str(self) -> str:
-        # def item_str(item: t.Union[MarkedString, MarkupContent, str]) -> str:
-            # if isinstance(item, MarkedString):
-                # return f"[{item.language}]\n{item.value}"
-            # if isinstance(item, MarkupContent):
-                # return f"[{item.kind}]\n{item.value}"
-            # return item
-# 
-        # if isinstance(self.contents, list):
-            # return "\n".join(item_str(item) for item in self.contents)
-        # return item_str(self.contents)
 
 
 @attrs.define(kw_only=True)
