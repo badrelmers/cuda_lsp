@@ -601,7 +601,7 @@ class Command:
             for cfg in servers_cfgs:
                 if langid in cfg.get('langids', []):
                     from copy import deepcopy
-                    from .language import Language, CompletionMan, DiagnosticsMan
+                    from .language import Language
 
                     cfg = deepcopy(cfg)
 

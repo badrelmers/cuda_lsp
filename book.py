@@ -4,7 +4,6 @@ from cudatext import *
 from .util import get_first, lex2langid, ed_uri, get_word
 import traceback
 import datetime
-from lsprotocol import types as lsp_types
 
 
 class DocBook:
@@ -12,6 +11,11 @@ class DocBook:
         self.docs = {} # uri => Document
 
     def new_doc(self, ed):
+        global structs
+        from .sansio_lsp_client import structs
+        global lsp_types
+        from lsprotocol import types as lsp_types
+
         doc = EditorDoc(ed)
         self.docs[doc.uri] = doc
 
@@ -130,13 +134,13 @@ class EditorDoc:
             # replace: a[i1:i2] should be replaced by b[j1:j2].
             # delete:  a[i1:i2] should be deleted
             if tag == 'replace'  or  tag == 'delete':
-                _start = lsp_types.Position(line=i1, character=0)
+                _start = structs.Position(line=i1, character=0)
                 # end: at start of next line (to include '\n'), unless is last line and has no newline
                 if i2 == len(oldspl)  and  oldspl[i2-1][-1] != '\n'  and  oldspl[i2-1][-1] != '\r':
-                    _end = lsp_types.Position(line=i2-1, character=len(oldspl[i2-1]))
+                    _end = structs.Position(line=i2-1, character=len(oldspl[i2-1]))
                 else:
-                    _end = lsp_types.Position(line=i2, character=0)
-                range_ = lsp_types.Range(start=_start, end=_end)
+                    _end = structs.Position(line=i2, character=0)
+                range_ = structs.Range(start=_start, end=_end)
 
                 if tag == 'replace':
                     change_str = ''.join(newspl[j1:j2])
@@ -148,9 +152,9 @@ class EditorDoc:
                     del oldspl[i1:i2]
 
             elif tag == 'insert':   # b[j1:j2] should be inserted at a[i1:i1]
-                _start = lsp_types.Position(line=i1, character=0)
+                _start = structs.Position(line=i1, character=0)
                 _end = _start
-                range_ = lsp_types.Range(start=_start, end=_end)
+                range_ = structs.Range(start=_start, end=_end)
                 change_str = ''.join(newspl[j1:j2])
 
                 # apply change to splits
@@ -178,7 +182,7 @@ class EditorDoc:
         pass
 
     def get_verdoc(self):
-        return lsp_types.VersionedTextDocumentIdentifier(uri=self.uri, version=self.ver)
+        return structs.VersionedTextDocumentIdentifier(uri=self.uri, version=self.ver)
 
     def get_docpos(self, caret=None):
         if caret is None: # caret pos
@@ -194,12 +198,12 @@ class EditorDoc:
             if self.ed.get_token(TOKEN_GET_KIND, x1, y1) in ('s','c'):      return
 
         _docid = self.get_docid()
-        _pos = lsp_types.Position(line=y1, character=x1)
-        docpos = lsp_types.TextDocumentPositionParams(text_document=_docid, position=_pos)
+        _pos = structs.Position(line=y1, character=x1)
+        docpos = structs.TextDocumentPosition(text_document=_docid, position=_pos)
         return docpos
 
     def get_textdoc(self):
-        doc = lsp_types.TextDocumentItem(
+        doc = structs.TextDocumentItem(
             uri=self.uri,
             language_id=self.langid,
             version=self.ver,
@@ -208,10 +212,10 @@ class EditorDoc:
         return doc
 
     def get_docid(self):
-        return lsp_types.TextDocumentIdentifier(uri=self.uri)
+        return structs.TextDocumentIdentifier(uri=self.uri)
 
     def get_ed_format_opts(self):
-        return lsp_types.FormattingOptions(
+        return structs.FormattingOptions(
             tab_size=self.ed.get_prop(PROP_TAB_SIZE),
             insert_spaces=self.ed.get_prop(PROP_TAB_SPACES),
             trim_trailing_whitespace=self.ed.get_prop(PROP_SAVING_TRIM_SPACES),
@@ -225,18 +229,18 @@ class EditorDoc:
         carets = self.ed.get_carets()
         if len(carets) == 1:
             x0,y0, x1,y1 = carets[0]
-            _start = lsp_types.Position(line=y0, character=x0)
-            _end = lsp_types.Position(line=y1, character=x1)
-            return lsp_types.Range(start=_start, end=_end)
+            _start = structs.Position(line=y0, character=x0)
+            _end = structs.Position(line=y1, character=x1)
+            return structs.Range(start=_start, end=_end)
 
     #def apply_edit(ed: Editor, edit: TextEdit):
     def apply_edit(ed, edit):
         if isinstance(edit, dict):
             range = edit.get('range')
-            newText = edit.get('newText')
+            new_text = edit.get('new_text')
         else:
             range = edit.range
-            newText = edit.newText
+            new_text = edit.new_text
 
         x1,y1,x2,y2 = EditorDoc.range2carets(range)
         
@@ -245,9 +249,9 @@ class EditorDoc:
         
         if x1==x2 and y1==y2:
             #NOTE: need 'insert' because cant `replace()'` beyond text end
-            ed.insert(x1,y1, newText)
+            ed.insert(x1,y1, new_text)
         else:
-            ed.replace(x1,y1,x2,y2, newText)
+            ed.replace(x1,y1,x2,y2, new_text)
 
     def range2carets(range):
         #x1,y1,x2,y2

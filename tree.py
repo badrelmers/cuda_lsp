@@ -3,7 +3,7 @@ from cudatext import *
 
 from .book import EditorDoc
 
-from lsprotocol.types import SymbolKind, DocumentSymbol, SymbolInformation
+from .sansio_lsp_client.structs import SymbolKind, DocumentSymbol, SymbolInformation
 
 
 KEY_TREE_TYPES_SHOW = 'tree_types_show'
@@ -23,35 +23,35 @@ tree_icons = {
     'arrow2':  7,
 }
 KIND_2_TREE_IC = {
-    SymbolKind.FILE:            tree_icons['box'],
-    SymbolKind.MODULE:          tree_icons['box'],
-    SymbolKind.NAMESPACE:       tree_icons['box'],
-    SymbolKind.PACKAGE:         tree_icons['box'],
+    SymbolKind.File:            tree_icons['box'],
+    SymbolKind.Module:          tree_icons['box'],
+    SymbolKind.Namespace:       tree_icons['box'],
+    SymbolKind.Package:         tree_icons['box'],
 
-    SymbolKind.CLASS:           tree_icons['folder'],
-    SymbolKind.ENUM:            tree_icons['folder'],
-    SymbolKind.STRUCT:          tree_icons['folder'],
+    SymbolKind.Class:           tree_icons['folder'],
+    SymbolKind.Enum:            tree_icons['folder'],
+    SymbolKind.Struct:          tree_icons['folder'],
 
-    SymbolKind.METHOD:          tree_icons['func'],
-    SymbolKind.CONSTRUCTOR:     tree_icons['func'],
-    SymbolKind.INTERFACE:       tree_icons['func'],
-    SymbolKind.FUNCTION:        tree_icons['func'],
+    SymbolKind.Method:          tree_icons['func'],
+    SymbolKind.Constructor:     tree_icons['func'],
+    SymbolKind.Interface:        tree_icons['func'],
+    SymbolKind.Function:         tree_icons['func'],
 
-    SymbolKind.PROPERTY:        tree_icons['parts1'],
-    SymbolKind.FIELD:           tree_icons['parts1'],
-    SymbolKind.VARIABLE:        tree_icons['parts1'],
-    SymbolKind.CONSTANT:        tree_icons['parts1'],
-    SymbolKind.STRING:          tree_icons['parts1'],
-    SymbolKind.NUMBER:          tree_icons['parts1'],
-    SymbolKind.BOOLEAN:         tree_icons['parts1'],
-    SymbolKind.ARRAY:           tree_icons['parts1'],
-    SymbolKind.OBJECT:          tree_icons['parts1'],
-    SymbolKind.KEY:             tree_icons['parts1'],
-    SymbolKind.NULL:            tree_icons['parts1'],
-    SymbolKind.ENUMMEMBER:      tree_icons['parts1'],
-    SymbolKind.EVENT:           tree_icons['parts1'],
-    SymbolKind.OPERATOR:        tree_icons['parts1'],
-    SymbolKind.TYPEPARAMETER:   tree_icons['parts1'],
+    SymbolKind.Property:         tree_icons['parts1'],
+    SymbolKind.Field:            tree_icons['parts1'],
+    SymbolKind.Variable:         tree_icons['parts1'],
+    SymbolKind.Constant:         tree_icons['parts1'],
+    SymbolKind.String:           tree_icons['parts1'],
+    SymbolKind.Number:           tree_icons['parts1'],
+    SymbolKind.Boolean:          tree_icons['parts1'],
+    SymbolKind.Array:            tree_icons['parts1'],
+    SymbolKind.Object:           tree_icons['parts1'],
+    SymbolKind.Key:              tree_icons['parts1'],
+    SymbolKind.Null:             tree_icons['parts1'],
+    SymbolKind.Enummember:       tree_icons['parts1'],
+    SymbolKind.Event:            tree_icons['parts1'],
+    SymbolKind.Operator:         tree_icons['parts1'],
+    SymbolKind.Typeparameter:    tree_icons['parts1'],
 }
 
 
