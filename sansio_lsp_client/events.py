@@ -1,151 +1,183 @@
 import typing as t
-import attrs
-from lsprotocol import converters, types as lsp_types
-from .structs import (
-    Id,
-    JSONDict,    
-)
-Converter = converters.get_converter()
 
+from pydantic import BaseModel, PrivateAttr
+from typing import Optional, Dict, Any
 
-if t.TYPE_CHECKING:  # avoid import cycle at runtime, Only imported during type checking, not at runtime!
+if t.TYPE_CHECKING:  # avoid import cycle at runtime
     from .client import Client
+from .structs import (
+    FoldingRange,
+    InlayHint,
+    JSONDict,
+    Diagnostic,
+    MessageType,
+    MessageActionItem,
+    CompletionList,
+    TextEdit,
+    TextDocumentEdit,
+    MarkupContent,
+    Range,
+    Location,
+    MarkedString,
+    SignatureInformation,
+    LocationLink,
+    CallHierarchyItem,
+    SymbolInformation,
+    Registration,
+    DocumentSymbol,
+    WorkspaceFolder,
+    ProgressToken,
+    WorkDoneProgressBeginValue,
+    WorkDoneProgressReportValue,
+    WorkDoneProgressEndValue,
+    ConfigurationItem,
+)
+
+Id = t.Union[int, str]
 
 
-@attrs.define
-class Event:
+class Event(BaseModel):
     pass
 
 
-@attrs.define(kw_only=True)
 class MethodResponse(Event):
     message_id: t.Optional[Id] = None
 
 
-@attrs.define
 class ResponseError(Event):
-    code: int = attrs.field()
-    message: str = attrs.field()
-    data: t.Optional[
-        t.Union[str, int, float, bool, t.List[t.Any], JSONDict, None]
-    ] = attrs.field(default=None)
-    message_id: t.Optional[Id] = attrs.field(default=None)
+    message_id: t.Optional[Id] = None
+    code: int
+    message: str
+    data: t.Optional[t.Union[str, int, float, bool, t.List[t.Any], JSONDict, None]] = None
 
 
-@attrs.define
 class ServerRequest(Event):
-    # mimic Pydantic's PrivateAttr(). 
-    # Pydantic's PrivateAttr is invisible to validation, Pydantic excludes private attributes from the generated constructor and the validation logic. It only looks for "Public" fields. init=False make attrs behave like Pydantic. an alternative is to use 'from __future__ import annotations'
-    # init=False tells attrs not to expect those fields in the constructor, so Converter.structure(params, WorkDoneProgressCreate) will succeed when params only contains the LSP fields (like token)
-    # we need also to make it optional t.Optional["Client"] to prevent this error: NameError: name 'Client' is not defined. The error is happening because attrs is trying to resolve the forward reference "Client" at runtime (during Converter.structure), but Client isn't available since it's only imported under TYPE_CHECKING.
-    _client: t.Optional["Client"] = attrs.field(init=False)
-    _id: t.Optional[Id] = attrs.field(init=False)
-    
-    
-@attrs.define
+    _client: "Client" = PrivateAttr()
+    _id: Id = PrivateAttr()
+
+
 class ServerNotification(Event):
     pass
 
 
-@attrs.define
 class Initialized(Event):
-    capabilities: JSONDict = attrs.field()
+    capabilities: JSONDict
 
 
-@attrs.define
 class Shutdown(Event):
     pass
 
 
-@attrs.define
 class ShowMessage(ServerNotification):
-    type: lsp_types.MessageType = attrs.field()
-    message: str = attrs.field()
+    type: MessageType
+    message: str
 
 
-@attrs.define
 class ShowMessageRequest(ServerRequest):
-    type: lsp_types.MessageType = attrs.field()
-    message: str = attrs.field()
-    actions: t.Optional[t.List[lsp_types.MessageActionItem]] = attrs.field(default=None)
+    type: MessageType
+    message: str
+    actions: t.Optional[t.List[MessageActionItem]] = None
 
-    def reply(self, action: t.Optional[lsp_types.MessageActionItem] = None) -> None:
-        result = None if action is None else Converter.unstructure(action)
-        self._client._send_response(id=self._id, result=result)
+    def reply(self, action: t.Optional[MessageActionItem] = None) -> None:
+        """
+        Reply to the ShowMessageRequest with the user's selection.
+
+        No bytes are actually returned from this method, the reply's bytes
+        are added to the client's internal send buffer.
+        """
+        self._client._send_response(
+            id=self._id, result=action.model_dump() if action is not None else None
+        )
 
 
-@attrs.define
 class LogMessage(ServerNotification):
-    type: lsp_types.MessageType = attrs.field()
-    message: str = attrs.field()
+    type: MessageType
+    message: str
 
 
-@attrs.define
 class WorkDoneProgressCreate(ServerRequest):
-    token: lsp_types.ProgressToken = attrs.field()
+    token: ProgressToken
 
     def reply(self) -> None:
         self._client._send_response(id=self._id, result=None)
 
 
-@attrs.define
 class Progress(ServerNotification):
-    token: lsp_types.ProgressToken = attrs.field()
+    token: ProgressToken
     value: t.Union[
-        lsp_types.WorkDoneProgressBegin,
-        lsp_types.WorkDoneProgressReport,
-        lsp_types.WorkDoneProgressEnd,
-    ] = attrs.field()
+        WorkDoneProgressBeginValue,
+        WorkDoneProgressReportValue,
+        WorkDoneProgressEndValue,
+    ]
 
 
-@attrs.define
 class WorkDoneProgress(Progress):
     pass
 
 
-@attrs.define
 class WorkDoneProgressBegin(WorkDoneProgress):
-    value: lsp_types.WorkDoneProgressBegin = attrs.field()
+    value: WorkDoneProgressBeginValue
 
 
-@attrs.define
 class WorkDoneProgressReport(WorkDoneProgress):
-    value: lsp_types.WorkDoneProgressReport = attrs.field()
+    value: WorkDoneProgressReportValue
 
 
-@attrs.define
 class WorkDoneProgressEnd(WorkDoneProgress):
-    value: lsp_types.WorkDoneProgressEnd = attrs.field()
+    value: WorkDoneProgressEndValue
 
 
-@attrs.define
+# XXX: should these two be just Events or?
 class Completion(Event):
-    message_id: Id = attrs.field()
-    completion_list: t.Optional[t.Dict[str, t.Any]] = attrs.field(default=None)
+    message_id: Id
+    #completion_list: t.Optional[CompletionList]
+    completion_list: t.Optional[t.Dict[str, t.Any]] = None  # make it raw dict (optimization)
 
 
-@attrs.define
+# XXX: not sure how to name this event.
 class WillSaveWaitUntilEdits(Event):
-    edits: t.Optional[t.List[lsp_types.TextEdit]] = attrs.field(default=None)
+    edits: t.Optional[t.List[TextEdit]] = None
 
 
-@attrs.define
 class PublishDiagnostics(ServerNotification):
-    uri: str = attrs.field()
-    diagnostics: t.List[lsp_types.Diagnostic] = attrs.field()
+    uri: str
+    diagnostics: t.List[Diagnostic]
 
 
-@attrs.define
 class WorkspaceProjectInitializationComplete(ServerNotification):
+    """Notification, exclusive to the Roslyn language server to indicate that the solution has been loaded."""
+
     pass
 
 
+""" Hover:
+    * contents: MarkedString | MarkedString[] | MarkupContent;
+    * range?: Range;
+"""
+class Hover(MethodResponse):
+    contents: t.Union[
+        t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
+    ]
+    range: t.Optional[Range] = None
 
-@attrs.define(kw_only=True)
+    # DBG
+    def m_str(self):
+        """Return hover contents as markdown-compatible string."""
+        def item_str(item): #SKIP
+            if isinstance(item, MarkedString):
+                return f'[{item.language}]\n{item.value}'
+            elif isinstance(item, MarkupContent):
+                return f'[{item.kind}]\n{item.value}'
+            return item # str
+
+        if isinstance(self.contents, list):
+            return '\n'.join((item_str(item) for item in self.contents))
+        return item_str(self.contents)
+
 class SignatureHelp(MethodResponse):
-    signatures: t.List[lsp_types.SignatureInformation] = attrs.field()
-    activeSignature: t.Optional[int] = attrs.field(default=None)
-    activeParameter: t.Optional[int] = attrs.field(default=None)
+    signatures: t.List[SignatureInformation]
+    activeSignature: t.Optional[int] = None
+    activeParameter: t.Optional[int] = None
 
     def get_hint_str(self) -> t.Optional[str]:
         if len(self.signatures) == 0:
@@ -153,81 +185,99 @@ class SignatureHelp(MethodResponse):
         active_sig = self.activeSignature or 0
         sig = self.signatures[active_sig]
         return sig.label
-
+        
     def get_signatures(self):
         if len(self.signatures) == 0:
             return None
         return self.signatures, self.activeSignature, self.activeParameter
 
 
-@attrs.define
 class SemanticTokens(Event):
-    data: t.List[int] = attrs.field()
-    message_id: t.Optional[Id] = attrs.field(default=None)
-    resultId: t.Optional[str] = attrs.field(default=None)
-
-
-
-
-
-@attrs.define
-class WorkspaceEdit(MethodResponse):
-    documentChanges: t.Optional[t.List[lsp_types.TextDocumentEdit]] = attrs.field(default=None)
-    changes: t.Optional[t.Dict[str, t.List[lsp_types.TextEdit]]] = attrs.field(default=None)
-
-@attrs.define
-class MCallHierarchItems(Event):
-    result: t.Union[t.List[lsp_types.CallHierarchyItem], None] = attrs.field()
+    message_id: t.Optional[Id] = None
+    resultId: t.Optional[str] = None
+    data: t.List[int]
     
 
-@attrs.define
+class Definition(MethodResponse):
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
+
+
+class WorkspaceEdit(MethodResponse):
+    changes: t.Optional[t.Dict[str, t.List[TextEdit]]] = None
+    documentChanges: t.Optional[t.List[TextDocumentEdit]] = None
+
+
+# result is a list, so putting in a custom class
+class References(MethodResponse):
+    result: t.Union[t.List[Location], None]
+
+
+class MCallHierarchItems(Event):
+    result: t.Union[t.List[CallHierarchyItem], None]
+
+
+class Implementation(MethodResponse):
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
+
+
 class MWorkspaceSymbols(MethodResponse):
-    result: t.Union[t.List[lsp_types.SymbolInformation], None] = attrs.field()
+    result: t.Union[t.List[SymbolInformation], None]
 
 
-@attrs.define
 class MFoldingRanges(MethodResponse):
-    result: t.Optional[t.List[lsp_types.FoldingRange]] = attrs.field(default=None)
+    result: t.Optional[t.List[FoldingRange]] = None
 
 
-@attrs.define
 class MInlayHints(MethodResponse):
-    result: t.Optional[t.List[lsp_types.InlayHint]] = attrs.field(default=None)
+    result: t.Optional[t.List[InlayHint]] = None
 
 
-@attrs.define
 class MDocumentSymbols(MethodResponse):
-    result: t.Union[t.List[lsp_types.SymbolInformation], t.List[lsp_types.DocumentSymbol], None] = attrs.field(
-        default=None
-    )
+    result: t.Union[t.List[SymbolInformation], t.List[DocumentSymbol], None] = None
 
 
-@attrs.define
+class Declaration(MethodResponse):
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
+
+
+class TypeDefinition(MethodResponse):
+    result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None]
+
+
 class RegisterCapabilityRequest(ServerRequest):
-    registrations: t.List[lsp_types.Registration] = attrs.field()
+    registrations: t.List[Registration]
 
     def reply(self) -> None:
         self._client._send_response(id=self._id, result={})
 
 
-@attrs.define
+class DocumentFormatting(MethodResponse):
+    result: t.Union[t.List[TextEdit], None] = None
+
+
 class WorkspaceFolders(ServerRequest):
-    result: t.Optional[t.List[lsp_types.WorkspaceFolder]] = attrs.field(default=None)
+    result: t.Optional[t.List[WorkspaceFolder]] = None
 
-    def reply(self, folders: t.Optional[t.List[lsp_types.WorkspaceFolder]] = None) -> None:
-        result = None if folders is None else [Converter.unstructure(f) for f in folders]
-        self._client._send_response(id=self._id, result=result)
+    def reply(self, folders: t.Optional[t.List[WorkspaceFolder]] = None) -> None:
+        """
+        Reply to the WorkspaceFolder with workspace folders.
+
+        No bytes are actually returned from this method, the reply's bytes
+        are added to the client's internal send buffer.
+        """
+        self._client._send_response(
+            id=self._id,
+            result=[f.model_dump() for f in folders] if folders is not None else None,
+        )
 
 
-@attrs.define
 class ConfigurationRequest(ServerRequest):
-    items: t.List[lsp_types.ConfigurationItem] = attrs.field()
+    items: t.List[ConfigurationItem]
 
     def reply(self, result: t.List[t.Any]) -> None:
         self._client._send_response(id=self._id, result=result)
 
-
-@attrs.define
 class Metadata(Event):
-    message_id: t.Optional[Id] = attrs.field(default=None)
-    result: t.Optional[JSONDict] = attrs.field(default=None)
+    message_id: t.Optional[Id] = None
+    result: t.Optional[JSONDict] = None
+    

@@ -2,16 +2,11 @@ import sys
 import os
 import socket
 import time
-import json
 import queue
 import subprocess
 import re
 from threading import Thread
 from collections import namedtuple, defaultdict
-from cattrs.errors import BaseValidationError
-from cattrs.v import transform_error
-import exceptiongroup  # patches TracebackException & sys.excepthook by default
-from lsprotocol import types as lsp_types
 
 import email.parser
 import email.message
@@ -52,22 +47,37 @@ import urllib.parse
 
 from .sansio_lsp_client import client as lsp
 from .sansio_lsp_client import events
+from .sansio_lsp_client.structs import (
+        CompletionRegistrationOptions,
+        TextDocumentSyncKind,
+        Registration,
+        DiagnosticSeverity,
+        Location,
+        LocationLink,
+        DocumentSymbol,
+        CompletionItemKind,
+        MarkupKind,
+        MarkedString,
+        FormattingOptions,
+        WorkspaceFolder,
+        InsertTextFormat,
+        CompletionContext,
+        CompletionTriggerKind,
+    )
     
 from .snippet_engine import Snippet, VS_SNIPPET
 
 import traceback
 import datetime
 
-# stderr errors are always printed to the bottom LSP panel so no need to enable anything here to get them
-LOG = True
+LOG = False
 LOG_CACHE = False
 DEBUG_COMPLETION = False
-DEBUG_MESSAGES = True
+DEBUG_MESSAGES = False
 DBG = LOG
 LOG_NAME = 'LSP'
 
-DEBUG_DEV = True # enable spying request/response messages panel
-SPY_MSG_LIMIT = 3000
+DEBUG_DEV = True
 
 api_ver = app_api_version()
 
@@ -83,17 +93,17 @@ MIN_TIMER_TIME = 10     # ms
 MAX_TIMER_TIME = 10    # ms
 
 GOTO_EVENT_TYPES = {
-    lsp_types.DefinitionResponse,
-    lsp_types.ReferencesResponse,
-    lsp_types.ImplementationResponse,
-    lsp_types.TypeDefinitionResponse,
-    lsp_types.DeclarationResponse,
+    events.Definition,
+    events.References,
+    events.Implementation,
+    events.TypeDefinition,
+    events.Declaration,
 }
 CALLABLE_COMPLETIONS = {
-    lsp_types.CompletionItemKind.Method,
-    lsp_types.CompletionItemKind.Function,
-    lsp_types.CompletionItemKind.Constructor,
-    #lsp_types.CompletionItemKind.Class,
+    CompletionItemKind.METHOD,
+    CompletionItemKind.FUNCTION,
+    CompletionItemKind.CONSTRUCTOR,
+    #CompletionItemKind.CLASS,
 }
 
 RequestPos = namedtuple('RequestPos', 'h_ed carets target_pos_caret cursor_ed')
@@ -102,209 +112,12 @@ CompletionEdit = namedtuple('CompletionEdit', 'replace_range replace_text x y wo
 Test = namedtuple('Test', 'lexer initial_text replace_range replace_text result_text is_callable is_snippet')
 
 GOTO_TITLES = {
-    lsp_types.DefinitionResponse:      _('Go to: definition'),
-    lsp_types.ReferencesResponse:      _('Go to: references'),
-    lsp_types.ImplementationResponse:  _('Go to: implementation'),
-    lsp_types.TypeDefinitionResponse:  _('Go to: type definition'),
-    lsp_types.DeclarationResponse:     _('Go to: declaration'),
+    events.Definition:      _('Go to: definition'),
+    events.References:      _('Go to: references'),
+    events.Implementation:  _('Go to: implementation'),
+    events.TypeDefinition:  _('Go to: type definition'),
+    events.Declaration:     _('Go to: declaration'),
 }
-
-
-def print_exception_details(ex, *, limit=None, include_chain=True, _seen=None):
-    """
-    pypi exceptiongroup alternative when it fails to work in python <3.11
-    
-    Print full diagnostic details for `ex`, including:
-      - type and summary (safe str())
-      - __notes__ (PEP 678)
-      - full traceback
-      - ex.errors (if present)
-      - ex.args (if present)
-      - ExceptionGroup children via ex.exceptions (recursed)
-      - chained exceptions (__cause__ / __context__), recursed
-      
-    Uses _seen (internal) to avoid infinite recursion on cyclic exception graphs.
-    """
-    import traceback, pprint, sys, logging
-    
-    if _seen is None:
-        _seen = set()
-    ex_id = id(ex)
-    if ex_id in _seen:
-        print(f"(skipping already-seen exception {type(ex).__name__})")
-        return
-    _seen.add(ex_id)
-
-    def safe_str(e):
-        try:
-            return str(e)
-        except Exception:
-            return "<exception __str__() raised>"
-
-    # top-level summary (guard __str__)
-    try:
-        summary = safe_str(ex)
-    except Exception:
-        summary = "<exception __str__() raised>"
-
-    print("ERROR SUMMARY:", type(ex).__name__, summary)
-
-    # Print PEP 678 notes if present
-    try:
-        notes = getattr(ex, "__notes__", None)
-        if notes:
-            print("\nNotes:")
-            for n in notes:
-                try:
-                    print("  -", n)
-                except Exception:
-                    print("  - <failed to print note>")
-    except Exception as e:
-        print("reading __notes__ failed:", e)
-
-    # full traceback for this exception
-    try:
-        traceback.print_exception(type(ex), ex, ex.__traceback__, limit=limit)
-    except Exception as e:
-        print("Failed to print traceback:", e)
-
-    # some libs attach structured errors (e.g. cattrs/pydantic)
-    try:
-        if hasattr(ex, "errors"):
-            print("\nex.errors:")
-            pprint.pprint(getattr(ex, "errors"))
-    except Exception as e:
-        print("reading ex.errors failed:", e)
-
-    # show args if present
-    try:
-        if getattr(ex, "args", None):
-            print("\nex.args:")
-            pprint.pprint(ex.args)
-    except Exception as e:
-        print("reading ex.args failed:", e)
-
-    # If this is an ExceptionGroup-like object, show its children
-    try:
-        subs = getattr(ex, "exceptions", None)
-        if subs:
-            print(f"\nExceptionGroup contains {len(subs)} sub-exception(s):")
-            for i, sub in enumerate(subs):
-                print(f"\n--- sub-exception [{i}] {type(sub).__name__}: ---")
-                # Print a short summary for the sub, then recurse for full details
-                try:
-                    print("SUMMARY:", safe_str(sub))
-                except Exception:
-                    print("SUMMARY: <failed to get summary>")
-                # Print notes for sub if present
-                try:
-                    sub_notes = getattr(sub, "__notes__", None)
-                    if sub_notes:
-                        print("Notes:")
-                        for n in sub_notes:
-                            try:
-                                print("  -", n)
-                            except Exception:
-                                print("  - <failed to print note>")
-                except Exception as e:
-                    print("reading sub __notes__ failed:", e)
-                # Recurse into sub-exception details
-                try:
-                    print_exception_details(sub, limit=limit, include_chain=include_chain, _seen=_seen)
-                except Exception as e:
-                    print("recursing into sub-exception failed:", e)
-    except Exception as e:
-        print("reading ex.exceptions failed:", e)
-
-    # walk exception chain (cause/context)
-    if include_chain:
-        cur = getattr(ex, "__cause__", None) or getattr(ex, "__context__", None)
-        i = 0
-        while cur:
-            # avoid re-printing exceptions we've already handled
-            if id(cur) in _seen:
-                print(f"\n--- inner[{i}] {type(cur).__name__}: (already shown) ---")
-                break
-
-            print(f"\n--- inner[{i}] {type(cur).__name__}: ---")
-            try:
-                traceback.print_exception(type(cur), cur, cur.__traceback__, limit=limit)
-            except Exception as e:
-                print("Failed to print inner traceback:", e)
-
-            # print notes for chained exception if present
-            try:
-                cur_notes = getattr(cur, "__notes__", None)
-                if cur_notes:
-                    print("Notes:")
-                    for n in cur_notes:
-                        try:
-                            print("  -", n)
-                        except Exception:
-                            print("  - <failed to print note>")
-            except Exception as e:
-                print("reading inner __notes__ failed:", e)
-
-            try:
-                if getattr(cur, "args", None):
-                    print("args:", cur.args)
-            except Exception as e:
-                print("reading inner args failed:", e)
-
-            # advance chain
-            _seen.add(id(cur))
-            cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
-            i += 1
-
-
-def print_exception_detailsV1(ex, *, limit=None, include_chain=True):
-    # top-level summary (guard __str__)
-    try:
-        summary = str(ex)
-    except Exception as _:
-        summary = "<exception __str__() raised>"
-    print("ERROR SUMMARY:", type(ex).__name__, summary)
-
-    # full traceback for this exception
-    try:
-        traceback.print_exception(type(ex), ex, ex.__traceback__, limit=limit)
-    except Exception as e:
-        print("Failed to print traceback:", e)
-
-    # some libs attach structured errors (e.g. cattrs/pydantic)
-    try:
-        if hasattr(ex, "errors"):
-            print("\nex.errors:")
-            pprint.pprint(getattr(ex, "errors"))
-    except Exception as e:
-        print("reading ex.errors failed:", e)
-
-    # show args if present
-    try:
-        if getattr(ex, "args", None):
-            print("\nex.args:")
-            pprint.pprint(ex.args)
-    except Exception as e:
-        print("reading ex.args failed:", e)
-
-    # walk exception chain (cause/context)
-    if include_chain:
-        cur = getattr(ex, "__cause__", None) or getattr(ex, "__context__", None)
-        i = 0
-        while cur:
-            print(f"\n--- inner[{i}] {type(cur).__name__}: ---")
-            try:
-                traceback.print_exception(type(cur), cur, cur.__traceback__, limit=limit)
-            except Exception as e:
-                print("Failed to print inner traceback:", e)
-            try:
-                if getattr(cur, "args", None):
-                    print("args:", cur.args)
-            except Exception as e:
-                print("reading inner args failed:", e)
-            cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
-            i += 1
-
 
 
 class Language:
@@ -360,7 +173,7 @@ class Language:
                 delta=10,
             )
 
-        self.request_positions = {} # RequestPos. The message_id we track here is for responses to OUR requests.
+        self.request_positions = {} # RequestPos
         self.diagnostics_man = DiagnosticsMan(lintstr, underline_style, self.plog)
         self.progresses = {} # token -> progress start message
 
@@ -410,7 +223,7 @@ class Language:
         if self._work_dir:
             # for now just a single folder in workspace
             root_uri = path_to_uri(self._work_dir)
-            return [ lsp_types.WorkspaceFolder(uri=root_uri, name='Root'), ]
+            return [ WorkspaceFolder(uri=root_uri, name='Root'), ]
         else:
             return None
 
@@ -507,16 +320,13 @@ class Language:
         self._timer.restart()
 
     def _err_read_loop(self):
-        """captures server stderr"""
         try:
             while self._err:
                 line = self._err.readline()
                 if line == b'':
                     break
                 if self._log_stderr:
-                    if DEBUG_DEV:
-                        # stderr errors are already printed to the LSP bottom panel, but i prefer to print them again to the Console to attract my attention because this type or errors may be fatal. the LSP bottom panel usually show red color for lsp linting diagnostics which the eye do not pay attention to it because the mind think it is not a fatal error so i may not pay attention to them always
-                        print(f'ERROR: ServerError: {LOG_NAME}: {self.lang_str} - {line}') # bytes
+                    #print(f'ServerError: {LOG_NAME}: {self.lang_str} - {line}') # bytes
                     try:
                         s = line.decode('utf-8')
                     except:
@@ -524,7 +334,7 @@ class Language:
                     self._err_q.put(s)
         except Exception as ex:
             print(f'ErrReadException: {LOG_NAME}: {self.lang_str} - {ex}')
-        pass;       LOG and print(f'NOTE: err reader exited. LSP server exited.')
+        pass;       LOG and print(f'NOTE: err reader exited')
 
 
     def _read_loop(self):
@@ -607,118 +417,38 @@ class Language:
             while not self._read_q.empty():
                 data = self._read_q.get()
 
-                # LOG RECEIVED DATA TO SPY PANEL
-                if DEBUG_DEV:
-                    try:
-                        # Try to parse and log the JSON-RPC message
-                        data_str = data.decode('utf-8')
-                        # Skip headers
-                        if '\r\n\r\n' in data_str:
-                            _, json_part = data_str.split('\r\n\r\n', 1)
-                            parsed = json.loads(json_part)
-
-                            # 1. Determine Type and Direction
-                            msg_type = "NOTIFICATION" if "id" not in parsed else ("REQUEST     " if "method" in parsed else "RESPONSE    ")
-                            # direction = {"NOTIFICATION": "<- ", "REQUEST": "<--", "RESPONSE": "<<<"}.get(msg_type, "???")
-                            direction = {"NOTIFICATION": "◄- ", "REQUEST     ": "◄--", "RESPONSE    ": "◄◄◄"}.get(msg_type, "???")
-                            method_or_id = parsed.get("method", parsed.get("id", "unknown"))
-
-                            # 2. Format and Truncate the content: Limit to 1000 characters with metadata if truncated
-                            full_str = str(parsed)
-                            log_content = (full_str[:SPY_MSG_LIMIT] + f" [TRUNCATED... total: {len(full_str)}]") if len(full_str) > SPY_MSG_LIMIT else full_str
-
-                            # 3. Log it
-                            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-                            self.plog.log_str(f"[{timestamp}] {direction} RECV {msg_type}: {method_or_id} _ {log_content}", type_='Spy   ', severity=SEVERITY_LOG)                            
-                    except:
-                        pass
-
                 # recv now returns an iterator, so we must iterate manually to handle errors. consume the recv generator with proper error handling
                 event_iter = self.client.recv(data)
                 while True:
                     try:
-                        message_id, msg = next(event_iter)
+                        msg = next(event_iter)
                     except StopIteration:
                         # Normal end of generator
                         break
-                    except NotImplementedError as err:
-                        # Error during received server message parsing (inside generator)
-                        # the message sent by the server is not implemented, this means we have to implement this message
-                        
-                        # print to status bar
+                    except Exception as err:
+                        # Error during message parsing (inside generator)
                         limit = 100 # limit characters of the error message
                         err_str = str(err)
                         if len(err_str) > limit:
                             err_str = err_str[:limit] + '...'
                         msg_status(f'{LOG_NAME}: {self.lang_str}: unsupported msg: {err_str}')
-
-                        #print to spy panel which contain valid messages and errored ones
-                        if DEBUG_DEV:
-                            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-                            self.plog.log_str(f"[{timestamp}] ███ RECV ERROR       : unsupported msg: {err}", type_='Spy   ', severity=SEVERITY_ERR, scroll=True)
-
-                        # print to dbg panel which contain only errors, this is not needed now that we have the spy panel, so maybe it is better to remove it, TODO: remove this once we add the filter box in the spy panel
-                        if LOG:
-                            self.plog.log_str(f'ERROR: unsupported msg: {err}', type_='dbg   ', severity=SEVERITY_ERR)
-                                                    
-                        # print to the gui panel "View servers responses"
+                        pass;       LOG and self.plog.log_str(f'{err}', type_='dbg', severity=SEVERITY_ERR)
+                        
                         if DEBUG_MESSAGES:
-                            if err and hasattr(err, 'args') and err.args:
-                                data = err.args[0]
-                                
-                                # Use the data directly if it's a dict, otherwise wrap the string in a dict
-                                response_error_dict = data if isinstance(data, dict) else {"error": str(data)}
-
-                                # Create the debug object to maintain compatibility with the rest of your UI
+                            if err and hasattr(err, 'args') and err.args and hasattr(err.args[0], 'dict'):
+                                response_error_dict = err.args[0].dict()
                                 UnsupportedMessage = type('Unsupported Message!', (object,), {
                                     'dict': lambda _: response_error_dict,
                                     '__str__': lambda _: str(response_error_dict),
                                 })
-                                
                                 self._dbg_msgs = (self._dbg_msgs + [UnsupportedMessage()])[-128:]
-                        break
-                    except BaseValidationError as err:
-                        # This captures ClassValidationError, IterableValidationError, etc.
-                        # the message sent by the server is not correctly validated by lsprotocol (attrs/cattrs), this means we have a bug we MUST fix ASAP
-
-                        # transform_error flattens the grouped exception into a summerized list
-                        print("ERROR: start", "="*60)
-                        print(f'ERROR: LSP Message validation error: {LOG_NAME}: {self.lang_str}')
-                        print("ERROR: Main Error summary:")
-                        print(f"ERROR: {type(err)}: {err}")
-                        summary = ''
-                        for i, e in enumerate(transform_error(err), 1):
-                            print(f"ERROR:   {i}: {e}")
-                            summary = summary + f" - ERROR {i}: {e}"
-                            
-                                                        
-                        # grouped exception were added in python 3.11 but cattrs use exceptiongroup from pypi to add it to older python, and now it groups multiple errors into one group, so we need to use exceptiongroup too to print full details stack of those nested errors groups. exceptiongroup pypi package automatically patch TracebackException so calling traceback.print_exc() is sufficient. BUT if ohter thing patch TracebackException then exceptiongroup will not patch it, in this case we can use this function print_exception_details(err) which print those grouped exceptions including __notes__
-                        # print_exception_details(err)
-                        
-                        traceback.print_exc()
-                        print("ERROR: end", "="*60)
-                        
-                        msg_status(f'{LOG_NAME}: {self.lang_str}: cattrs validation failed: {err}')
-
-                        if DEBUG_DEV:
-                            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-                            self.plog.log_str(f"[{timestamp}] ███ RECV ERROR       : cattrs validation failed: {err} ===> {summary}", type_='Spy   ', severity=SEVERITY_ERR, scroll=True)
-                        if LOG:
-                            self.plog.log_str(f'ERROR: cattrs validation failed: {err} ===> {summary}', type_='dbg   ', severity=SEVERITY_ERR)
-                        break
-                    except Exception as err:
-                        # we do not know what error is this, so lets print the full stack to fix it
-                        print(f'ERROR: LSP unkown error: {LOG_NAME}: {self.lang_str} - {err}')
-                        traceback.print_exc()
-                        
                         # If an error occurs inside the generator, it terminates. 
                         # Remaining data is left in _recv_buf as per client.py logic.
                         break  # Generator is terminated
                     
-                    
                     # Now handle the message - with separate error handling
                     try:
-                        self._on_lsp_msg(msg, message_id=message_id)
+                        self._on_lsp_msg(msg)
                     except Exception as err:
                         # Error during message processing
                         print(f'ERROR: LSP Message handler error: {LOG_NAME}: {self.lang_str} - {err}')
@@ -728,43 +458,6 @@ class Language:
             # send Queue
             send_buf = self.client.send()
             if send_buf:
-                # LOG SENT DATA TO SPY PANEL
-                if DEBUG_DEV:
-                    try:
-                        data_str = send_buf.decode('utf-8')
-                        if '\r\n\r\n' in data_str:
-                            _, json_part = data_str.split('\r\n\r\n', 1)
-                            # May contain multiple messages
-                            parts = json_part.split('Content-Length:')
-                            for part in parts:
-                                if not part.strip():
-                                    continue
-                                # Extract JSON after headers
-                                if '\r\n\r\n' in part:
-                                    _, json_msg = part.split('\r\n\r\n', 1)
-                                else:
-                                    json_msg = part
-                                try:
-                                    parsed = json.loads(json_msg)
-                                    
-                                    # 1. Determine Type and Direction
-                                    msg_type = "NOTIFICATION" if "id" not in parsed else ("REQUEST     " if "method" in parsed else "RESPONSE    ")
-                                    # direction = {"NOTIFICATION": " ->", "REQUEST": "-->", "RESPONSE": ">>>"}.get(msg_type, "???")
-                                    direction = {"NOTIFICATION": " -►", "REQUEST     ": "--►", "RESPONSE    ": "►►►"}.get(msg_type, "???")
-                                    method_or_id = parsed.get("method", parsed.get("id", "unknown"))
-
-                                    # 2. Format and Truncate the content: Limit to 1000 characters with metadata if truncated
-                                    full_str = str(parsed)
-                                    log_content = (full_str[:SPY_MSG_LIMIT] + f" [TRUNCATED... total: {len(full_str)}]") if len(full_str) > SPY_MSG_LIMIT else full_str
-
-                                    # 3. Log it
-                                    timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-                                    self.plog.log_str(f"[{timestamp}] {direction} SEND {msg_type}: {method_or_id} _ {log_content}", type_='Spy   ', severity=SEVERITY_LOG)
-                                except:
-                                    pass
-                    except:
-                        pass
-                    
                 self._send_q.put(send_buf)
                 self._timer.restart()
 
@@ -780,7 +473,7 @@ class Language:
             traceback.print_exc()
 
 
-    def _on_lsp_msg(self, msg, message_id=None):
+    def _on_lsp_msg(self, msg):
         if DEBUG_MESSAGES:
             self._dbg_msgs = (self._dbg_msgs + [msg])[-128:]
 
@@ -788,7 +481,6 @@ class Language:
 
         if msgtype == events.Initialized:
             self.scfg = ServerConfig(msg, self.langids, self.lang_str)
-            print("ServerConfig msg",msg)
             app_proc(PROC_EXEC_PLUGIN, 'cuda_lsp,on_lang_inited,'+self.name)
 
         elif msgtype == events.RegisterCapabilityRequest:
@@ -801,11 +493,12 @@ class Language:
             msg.reply(folders=self.workspace_folders)
 
         elif msgtype == events.Completion:
-            reqpos = self.request_positions.pop(message_id, None)
+
+            reqpos = self.request_positions.pop(msg.message_id, None)
 
             if msg.completion_list:
                 items = msg.completion_list['items']
-                pass;       LOG and print(f'got completion({len(items)}): {time.time():.3f} {message_id} in {list(self.request_positions)}')
+                pass;       LOG and print(f'got completion({len(items)}): {time.time():.3f} {msg.message_id} in {list(self.request_positions)}')
             else:
                 items = []
 
@@ -818,73 +511,39 @@ class Language:
                 try:
                     compl = CompletionMan(self, carets=reqpos.carets, h_ed=reqpos.h_ed)
                     pass;       LOG_CACHE and print("using fresh results.","items:",len(items)," incomplete:",msg.completion_list['isIncomplete'])
-                    _last_complete = compl.prepare_complete(message_id, items, msg.completion_list['isIncomplete'] == 'true')
+                    _last_complete = compl.prepare_complete(msg.message_id, items, msg.completion_list['isIncomplete'] == 'true')
                     if _last_complete:
                         self._last_complete = _last_complete
                         compl.show_complete(self._last_complete.message_id, self._last_complete.filtered_items)
                 except AssertionError as e:
                     print("NOTE:",e)
 
-        elif msgtype == lsp_types.Hover:
-            if message_id in self.request_positions:
-                _reqpos = self.request_positions.pop(message_id)
-                
+        elif msgtype == events.Hover:
+            if msg.message_id in self.request_positions:
+                _reqpos = self.request_positions.pop(msg.message_id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
-                    # 1. Normalize contents to a list for consistent processing
-                    contents = msg.contents
-                    if not isinstance(contents, list):
-                        items = [contents] if contents else []
-                    else:
-                        items = contents
-
-                    if items:
-                        # 2. Define a parser for any version of LSP Hover content
-                        def parse_item(item):
-                            """Returns (text_value, markup_kind, language_id)"""
-                            # Case: Simple string (Deprecated but common)
-                            if isinstance(item, str):
-                                return item, lsp_types.MarkupKind.Markdown, None
-                            
-                            # Case: MarkupContent (The modern standard)
-                            if isinstance(item, lsp_types.MarkupContent):
-                                return item.value, item.kind, None
-                            
-                            # Case: MarkedStringWithLanguage (Deprecated code blocks)
-                            # We wrap this in markdown fences so the UI can highlight it. This ensures that even if our Hint renderer only understands Markdown, the code snippet will still be highlighted correctly.
-                            if hasattr(item, 'language') and hasattr(item, 'value'):
-                                lang = item.language
-                                val = f"```{lang}\n{item.value}\n```"
-                                return val, lsp_types.MarkupKind.Markdown, lang
-                            
-                            return str(item), lsp_types.MarkupKind.PlainText, None
-
-                        # 3. Extract data from all items
-                        parsed_items = [parse_item(it) for it in items]
-                        
-                        # Use the first item to determine the Hint's primary metadata
-                        # (The renderer usually uses one highlight mode for the whole hint)
-                        _, main_kind, main_lang = parsed_items[0]
-                        
-                        # 4. Combine all items into one string for display
-                        # When there are multiple items in a hover (common in languages like Rust or C++), it joins them with a thematic break (---), which is the standard way to separate hover sections in VS Code and other editors.
-                        full_text = "\n\n---\n\n".join(it[0] for it in parsed_items)
+                    first_item = msg.contents[0] if isinstance(msg.contents, list) and len(msg.contents) > 0 else msg.contents
+                    if first_item: # if received anything
+                        if isinstance(first_item, (MarkedString, str)):
+                            # for deprecated 'MarkedString' or 'str' default to 'markdown'
+                            markupkind = MarkupKind.MARKDOWN
+                        else:
+                            # can be a list (supposedly)
+                            markupkind = getattr(first_item, 'kind', None)
 
                         filtered_cmds = self.scfg.filter_commands(self._caret_cmds)
-
-                        Hint.show(
-                            full_text,
-                            caret=_reqpos.target_pos_caret,
-                            cursor_loc_start=_reqpos.cursor_ed,
-                            markupkind=main_kind,
-                            language=main_lang,
-                            caret_cmds=filtered_cmds,
+                        Hint.show(msg.m_str(),
+                                caret=_reqpos.target_pos_caret,   cursor_loc_start=_reqpos.cursor_ed,
+                                markupkind=markupkind,
+                                language=getattr(first_item, 'language', None),
+                                caret_cmds=filtered_cmds,
                         )
                     else:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Hover - no info')
-                        
+
         elif msgtype == events.SignatureHelp:
-            if message_id in self.request_positions:
-                _reqpos = self.request_positions.pop(message_id)
+            if msg.message_id in self.request_positions:
+                _reqpos = self.request_positions.pop(msg.message_id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     hint = msg.get_hint_str()
                     if hint:
@@ -901,24 +560,24 @@ class Language:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Signature help - no info')
 
         elif msgtype == events.SemanticTokens:
-            reqpos = self.request_positions.pop(message_id)
+            reqpos = self.request_positions.pop(msg.message_id)
             self.on_semantic_tokens(reqpos.h_ed, resultId=msg.resultId, data=msg.data)
 
         #GOTOs
         elif msgtype in GOTO_EVENT_TYPES:
-            skip_dlg = msgtype == lsp_types.DefinitionResponse
+            skip_dlg = msgtype == events.Definition
             dlg_caption = GOTO_TITLES.get(msgtype, f'Go to {msgtype.__name__}')
-            reqpos = self.request_positions.pop(message_id)
+            reqpos = self.request_positions.pop(msg.message_id)
             self.do_goto(items=msg.result, dlg_caption=dlg_caption, skip_dlg=skip_dlg, reqpos=reqpos)
 
         elif msgtype == events.MDocumentSymbols:
-            _reqpos = self.request_positions.pop(message_id)
+            _reqpos = self.request_positions.pop(msg.message_id)
             if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed  and  self.treeman:
                 self.treeman.fill_tree(msg.result)
 
-        elif msgtype == lsp_types.DocumentFormattingResponse or msgtype == lsp_types.DocumentRangeFormattingResponse:
-            if message_id in self.request_positions:
-                _reqpos = self.request_positions.pop(message_id)
+        elif msgtype == events.DocumentFormatting:
+            if msg.message_id in self.request_positions:
+                _reqpos = self.request_positions.pop(msg.message_id)
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     ed.set_prop(PROP_RO, False)     # doc is set 'RO' during format-on-save
 
@@ -952,18 +611,14 @@ class Language:
         elif msgtype == events.ShowMessage:
             self.plog.log(msg)
 
-        elif msgtype == lsp_types.ResponseErrorMessage:
-            _reqpos = self.request_positions.pop(message_id, None)    # discard
-            data = self.metadata_goto_requests.pop(message_id, None)
-            msg = msg.error
+        elif msgtype == events.ResponseError:
+            _reqpos = self.request_positions.pop(msg.message_id, None)    # discard
+            data = self.metadata_goto_requests.pop(msg.message_id, None)
             if data:
                 # Log error for OmniSharp metadata
                 errstr = f'OmniSharp Metadata ResponseError[{msg.code}]: {msg.message}'
                 self.plog.log_str(errstr, type_=_('Response Error'), severity=SEVERITY_ERR)
             else:
-                from cudax_lib import get_translation, html_color_to_int
-                _ = get_translation(__file__)  # I18N
-
                 errstr = f'ResponseError[{msg.code}]: {msg.message}'
                 self.plog.log_str(errstr, type_=_('Response Error'), severity=SEVERITY_ERR)
 
@@ -978,12 +633,12 @@ class Language:
             #self.exit()
 
         elif msgtype == events.Metadata:
-            data = self.metadata_goto_requests.pop(message_id, None)
+            data = self.metadata_goto_requests.pop(msg.message_id, None)
             if data:
                 reqpos, targetrange, dlg_caption = data
                 self._handle_metadata(msg.result, targetrange, reqpos, dlg_caption)
             else:
-                print(f'{LOG_NAME}: {self.lang_str} - unknown Metadata id: {message_id}')
+                print(f'{LOG_NAME}: {self.lang_str} - unknown Metadata id: {msg.message_id}')
                 
         else:
             print(f'{LOG_NAME}: {self.lang_str} - unknown Message type: {msgtype}')
@@ -999,12 +654,12 @@ class Language:
             pass;       LOG and print('NOTE: send_changes return: no opts')
             return
 
-        docsynckind = lsp_types.TextDocumentSyncKind( opts.get('syncKind', lsp_types.TextDocumentSyncKind.None_) )
-        if docsynckind == lsp_types.TextDocumentSyncKind.None_:
+        docsynckind = TextDocumentSyncKind( opts.get('syncKind', TextDocumentSyncKind.NONE) )
+        if docsynckind == TextDocumentSyncKind.NONE:
             pass;       LOG and print('send_changes return: NONE sync')
             return
 
-        _is_whole_doc = docsynckind == lsp_types.TextDocumentSyncKind.Full
+        _is_whole_doc = docsynckind == TextDocumentSyncKind.FULL
         _changes = eddoc.get_changes(whole_doc=_is_whole_doc)
         if not _changes:
             pass;       LOG and print('send_changes return: no changes')
@@ -1089,10 +744,10 @@ class Language:
                 added = []
                 if self._work_dir:
                     old_root_uri = path_to_uri(self._work_dir)
-                    removed.append(lsp_types.WorkspaceFolder(uri=old_root_uri, name='Root'))
+                    removed.append(WorkspaceFolder(uri=old_root_uri, name='Root'))
                 if newroot:
                     new_root_uri = path_to_uri(newroot) if newroot else None
-                    added.append(lsp_types.WorkspaceFolder(uri=new_root_uri, name='Root'))
+                    added.append(WorkspaceFolder(uri=new_root_uri, name='Root'))
                 self._work_dir = newroot
 
                 self.client.did_change_workspace_folders(removed=removed, added=added)
@@ -1116,10 +771,10 @@ class Language:
             
             if methodAttrName == 'completion':
                 if self._last_complete and self._last_complete.is_incomplete:
-                    triggerKind = lsp_types.CompletionTriggerKind(lsp_types.CompletionTriggerKind.TriggerForIncompleteCompletions)
+                    triggerKind = CompletionTriggerKind(CompletionTriggerKind.TRIGGER_FOR_INCOMPLETE_COMPLETIONS)
                 else:
-                    triggerKind = lsp_types.CompletionTriggerKind(lsp_types.CompletionTriggerKind.Invoked)
-                context = lsp_types.CompletionContext(trigger_kind=triggerKind)
+                    triggerKind = CompletionTriggerKind(CompletionTriggerKind.INVOKED)
+                context = CompletionContext(triggerKind=triggerKind)
                 id = clientMethod(docpos, context=context)
             else:
                 id = clientMethod(docpos)
@@ -1365,10 +1020,10 @@ class Language:
         def link_to_target(link): #SKIP
             """ returns: (uri, goto-range)
             """
-            if isinstance(link, lsp_types.Location):
+            if isinstance(link, Location):
                 return (link.uri, link.range)
-            elif isinstance(link, lsp_types.LocationLink):
-                return (link.target_uri, link.target_selection_range)
+            elif isinstance(link, LocationLink):
+                return (link.targetUri, link.targetSelectionRange)
             else:
                 raise Exception('Invalid goto-link type: '+str(type(link)))
 
@@ -1679,18 +1334,18 @@ TOKENS_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')
 DIAG_BM_TAG = app_proc(PROC_GET_UNIQUE_TAG, '') # jic
 _icons_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'icons')
 DIAG_BM_IC_PATHS = {
-    lsp_types.DiagnosticSeverity.Error       : os.path.join(_icons_dir, 'error.png'),
-    lsp_types.DiagnosticSeverity.Warning     : os.path.join(_icons_dir, 'warning.png'),
-    lsp_types.DiagnosticSeverity.Information : os.path.join(_icons_dir, 'information.png'),
-    lsp_types.DiagnosticSeverity.Hint        : os.path.join(_icons_dir, 'hint.png'),
+    DiagnosticSeverity.ERROR       : os.path.join(_icons_dir, 'error.png'),
+    DiagnosticSeverity.WARNING     : os.path.join(_icons_dir, 'warning.png'),
+    DiagnosticSeverity.INFORMATION : os.path.join(_icons_dir, 'information.png'),
+    DiagnosticSeverity.HINT        : os.path.join(_icons_dir, 'hint.png'),
 }
 DIAG_BM_KINDS = {
-    lsp_types.DiagnosticSeverity.Error       : 50,
-    lsp_types.DiagnosticSeverity.Warning     : 51,
-    lsp_types.DiagnosticSeverity.Information : 52,
-    lsp_types.DiagnosticSeverity.Hint        : 53,
+    DiagnosticSeverity.ERROR       : 50,
+    DiagnosticSeverity.WARNING     : 51,
+    DiagnosticSeverity.INFORMATION : 52,
+    DiagnosticSeverity.HINT        : 53,
 }
-DIAG_DEFAULT_SEVERITY = lsp_types.DiagnosticSeverity.Information # *shrug*
+DIAG_DEFAULT_SEVERITY = DiagnosticSeverity.INFORMATION # *shrug*
 
 class DiagnosticsMan:
     """ * Command.on_tab_change() ->
@@ -1784,7 +1439,7 @@ class DiagnosticsMan:
                     pre,post = ('[',']: ') if (d.severity is not None  or  d.code) else  ('','')
                     mid = ':' if (d.severity is not None  and  d.code) else ''
 
-                    severity_short = d.severity.name if d.severity else ''
+                    severity_short = d.severity.short_name() if d.severity else ''
                     # "[severity:code] message"
                     code = str(d.code)  if d.code is not None else  ''
                     source = str(d.source)  if d.source is not None else  ''
@@ -1870,9 +1525,9 @@ class DiagnosticsMan:
                     text = text.split('\1')[1] if '\1' in text else text
                     text = split_text_by_length(text, 50, prepare_for_corner=True)
 
-                    # font_size_opt = 'font_size'+app_proc(PROC_GET_OS_SUFFIX, '')
-                    # ed_self.set_prop(__PROP_CORNER_FONT_NAME, 'default')
-                    # ed_self.set_prop(__PROP_CORNER_FONT_SIZE, appx.get_opt(font_size_opt, 10)+3)
+                    font_size_opt = 'font_size'+app_proc(PROC_GET_OS_SUFFIX, '')
+                    ed_self.set_prop(__PROP_CORNER_FONT_NAME, 'default')
+                    ed_self.set_prop(__PROP_CORNER_FONT_SIZE, appx.get_opt(font_size_opt, 10)+3)
 
                     ed_self.set_prop(__PROP_CORNER_COLOR_BACK, appx.html_color_to_int('ffffe1'))
                     ed_self.set_prop(__PROP_CORNER_COLOR_BORDER, appx.html_color_to_int('aaa'))
@@ -1957,7 +1612,7 @@ METHOD_WS_FOLDERS = 'workspace/workspaceFolders'
 CAPABILITY_DID_OPEN         = 'textDocument.didOpen'
 CAPABILITY_DID_CLOSE        = 'textDocument.didClose'
 CAPABILITY_DID_SAVE         = 'textDocument.didSave' # options: (supported, includeText)
-CAPABILITY_DID_CHANGE       = 'textDocument.didChange' # option: lsp_types.TextDocumentSyncKind
+CAPABILITY_DID_CHANGE       = 'textDocument.didChange' # option: TextDocumentSyncKind
 CAPABILITY_COMPLETION       = 'textDocument.completion'
 CAPABILITY_HOVER            = 'textDocument.hover'
 CAPABILITY_SIG_HELP         = 'textDocument.signatureHelp'
@@ -2002,13 +1657,7 @@ AUTO_METHODS = {
 class ServerConfig:
     def __init__(self, initialized, langids, lang_str):
         capabilities = initialized.capabilities
-        print("===ServerConfig initialized",initialized)
-        print("===capabilities",capabilities)
-        # CRITICAL FIX: The capabilities might be nested under 'capabilities' key
-        if 'capabilities' in capabilities:
-            capabilities = capabilities['capabilities']
-        
-        self.capabs = [] # lsp_types.Registration
+        self.capabs = [] # struct.Registration
         self.lang_str = lang_str
 
         self._default_selector = [{'language': langid}  for langid in langids]
@@ -2028,26 +1677,26 @@ class ServerConfig:
                 _opts = {**self._default_opts}
                 if isinstance(_save, dict):
                     _opts.update(_save)
-                self.capabs.append(lsp_types.Registration(id='0', method=METHOD_DID_SAVE, register_options=_opts))
+                self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, registerOptions=_opts))
         
         if isinstance(docsync, int):
-            self.capabs.append(lsp_types.Registration(id='0', method=METHOD_DID_SAVE, register_options=self._default_opts))
+            self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, registerOptions=self._default_opts))
 
         #  OPEN, CLOSE
         if is_openclose:
-            open = lsp_types.Registration(id='0', method=METHOD_DID_OPEN, register_options=self._default_opts)
-            close = lsp_types.Registration(id='0', method=METHOD_DID_CLOSE, register_options=self._default_opts)
+            open = Registration(id='0', method=METHOD_DID_OPEN, registerOptions=self._default_opts)
+            close = Registration(id='0', method=METHOD_DID_CLOSE, registerOptions=self._default_opts)
             self.capabs += [open, close]
 
         # CHANGE
         if isinstance(docsync, dict):
-            _default_sync = int(lsp_types.TextDocumentSyncKind.None_)
-            docsynckind = lsp_types.TextDocumentSyncKind(docsync.get('change', _default_sync))
+            _default_sync = int(TextDocumentSyncKind.NONE)
+            docsynckind = TextDocumentSyncKind(docsync.get('change', _default_sync))
         else:
-            docsynckind = lsp_types.TextDocumentSyncKind(docsync)
+            docsynckind = TextDocumentSyncKind(docsync)
 
         _opts = {**self._default_opts, 'syncKind': docsynckind}
-        self.capabs.append(lsp_types.Registration(id='0', method=METHOD_DID_CHANGE, register_options=_opts))
+        self.capabs.append(Registration(id='0', method=METHOD_DID_CHANGE, registerOptions=_opts))
 
 
         ### WORKSPACE
@@ -2060,7 +1709,7 @@ class ServerConfig:
                 'supported': wsfolders.get('supported', False),
                 'changeNotifications': wsfolders.get('changeNotifications', False),
             }
-            _reg = lsp_types.Registration(id='0', method=METHOD_WS_FOLDERS, register_options=_opts)
+            _reg = Registration(id='0', method=METHOD_WS_FOLDERS, registerOptions=_opts)
             self.capabs.append(_reg)
 
 
@@ -2076,19 +1725,19 @@ class ServerConfig:
                 if 'documentSelector' in capval and not capval['documentSelector']:
                      del capval['documentSelector']
                 _opts.update(capval)
-            self.capabs.append(lsp_types.Registration(id='0', method=meth, register_options=_opts))
+            self.capabs.append(Registration(id='0', method=meth, registerOptions=_opts))
 
     def on_register(self, dynreg):
         """ process dynamic registration request: RegisterMethodRequest
         """
         # check for 'documentSelector' in registerOptions
         # "If set to null the document selector provided on the client side will be used." (c) LSP spec
-        reg: lsp_types.Registration
+        reg: Registration
         for reg in dynreg.registrations:
-            if not isinstance(reg.register_options, dict):
-                reg.register_options = self._default_opts
-            elif 'documentSelector' not in reg.register_options:
-                reg.register_options['documentSelector'] = self._default_selector
+            if not isinstance(reg.registerOptions, dict):
+                reg.registerOptions = self._default_opts
+            elif 'documentSelector' not in reg.registerOptions:
+                reg.registerOptions['documentSelector'] = self._default_selector
 
         self.capabs.extend(dynreg.registrations)
 
@@ -2104,7 +1753,7 @@ class ServerConfig:
             for registration in self.capabs:
                 if registration.method == method_name:
                     if ServerConfig.match_capability(registration, ed_self, langid):
-                        return registration.register_options
+                        return registration.registerOptions
 
             if method_name not in AUTO_METHODS:
                 print(f'NOTE: {LOG_NAME}: {self.lang_str} - unsupported method: {method_name}')
@@ -2112,7 +1761,7 @@ class ServerConfig:
         elif method_name.startswith('workspace/'):
             for registration in self.capabs:
                 if registration.method == method_name:
-                    return registration.register_options
+                    return registration.registerOptions
 
         elif LOG:
             print(f'NOTE: {LOG_NAME}: odd method: {method_name}')
@@ -2121,9 +1770,9 @@ class ServerConfig:
     # "selector is one ore more filters"
     def match_capability(registration, ed_self, langid):
 
-        filters = registration.register_options.get('documentSelector', [])
+        filters = registration.registerOptions.get('documentSelector', [])
         # allowing empty selector on workspace methods  (ok?)
-        #   example: lsp_types.Registration(id='...', method='workspace/symbol', registerOptions={}),
+        #   example: Registration(id='...', method='workspace/symbol', registerOptions={}),
         if not filters:
             return (registration.method or '').startswith('workspace/')
 
@@ -2451,7 +2100,7 @@ class CompletionMan:
                                 insertText = label
                             filtered_items.append({
                                 'label': label,
-                                'kind' : lsp_types.CompletionItemKind.Text,
+                                'kind' : CompletionItemKind.TEXT,
                                 'insertText': insertText,
                             })
                         else:
@@ -2583,7 +2232,7 @@ class CompletionMan:
         
         words = ['{}\t{}\t{}|{}'.format(
                     add_html_tags(item, word1),
-                    short_version(item['kind'] and lsp_types.CompletionItemKind(item['kind']).name.lower() or ''),
+                    short_version(item['kind'] and CompletionItemKind(item['kind']).name.lower() or ''),
                     message_id, i)
                     for i,item in enumerate(items)
                 ]
@@ -2622,7 +2271,7 @@ class CompletionMan:
         
         line_txt = ed.get_text_line(y0)
         is_callable = item.get('kind') in CALLABLE_COMPLETIONS
-        is_snippet = item.get('insertTextFormat') == lsp_types.InsertTextFormat.Snippet
+        is_snippet = item.get('insertTextFormat') == InsertTextFormat.SNIPPET
 
         cached_x = self.carets[0][0]
         cached_x_diff = x0-cached_x

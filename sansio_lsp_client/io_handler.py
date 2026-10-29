@@ -2,7 +2,9 @@ import json
 import re
 import typing as t
 
-from .structs import JSONDict, JSONList, Id
+from pydantic import TypeAdapter
+
+from .structs import JSONDict, JSONList, Request, Response, Id
 
 _CONTENT_TYPE_PARAM_RE = re.compile(r'(\w+)\s*=\s*(?:(?:"([^"]*)")|([^;,\s]*))')
 
@@ -113,7 +115,7 @@ def _parse_content_type(header: str) -> t.Tuple[str, t.Dict[str, str]]:
 # iterator when a message was parsed but no things were created.
 def _parse_one_message(
     response_buf: bytearray,
-) -> t.Optional[t.Iterable[dict]]:
+) -> t.Optional[t.Iterable[t.Union[Request, Response]]]:
     """Parse a single JSON-RPC message from a bytearray.
 
     Args:
@@ -121,7 +123,7 @@ def _parse_one_message(
 
     Returns:
         None if there's not enough data for a complete message,
-        or the raw dicts if a message was parsed successfully.
+        or an iterable of Request or Response objects if a message was parsed successfully.
 
     Note: This function modifies response_buf by removing parsed data."""
     if b"\r\n\r\n" not in response_buf:
@@ -174,25 +176,29 @@ def _parse_one_message(
     else:
         del response_buf[:-unused_bytes_count]
 
+    def parse_request_or_response(
+        data: JSONDict,
+    ) -> t.Union[Request, Response]:
+        del data["jsonrpc"]
+        return TypeAdapter(t.Union[Request, Response]).validate_python(data)
+
     content = json.loads(raw_content.decode(encoding))
 
-    # LSP can send a single dict or a list (batch). 
-    # We ensure we return an iterable of dicts.
     if isinstance(content, list):
         # This is in response to a batch operation.
-        return content
+        return map(parse_request_or_response, content)
     else:
-        return [content]
+        return [parse_request_or_response(content)]
 
 
-def _parse_messages(response_buf: bytearray) -> t.Optional[t.Iterable[dict]]:
+def _parse_messages(response_buf: bytearray) -> t.Iterator[t.Union[Response, Request]]:
     """Parse all complete JSON-RPC messages from a bytearray.
 
     Args:
         response_buf: A bytearray containing zero or more JSON-RPC messages.
 
     Returns:
-        An iterator yielding the raw dicts for each complete message.
+        An iterator yielding Request or Response objects for each complete message.
         Partial messages at the end of the buffer are left for future parsing.
 
     Note: This function modifies response_buf by removing parsed data."""

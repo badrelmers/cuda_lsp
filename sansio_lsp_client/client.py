@@ -1,11 +1,18 @@
 import enum
 #import pprint
 import typing as t
-import attrs
+
+from pydantic import ValidationError, TypeAdapter
+
 from .events import (
     Completion,
     ConfigurationRequest,
+    Declaration,
+    Definition,
+    DocumentFormatting,
     Event,
+    Hover,
+    Implementation,
     Initialized,
     LogMessage,
     MCallHierarchItems,
@@ -14,8 +21,10 @@ from .events import (
     MInlayHints,
     Metadata,
     MWorkspaceSymbols,
+    MethodResponse,
     Progress,
     PublishDiagnostics,
+    References,
     RegisterCapabilityRequest,
     ResponseError,
     SemanticTokens,
@@ -25,6 +34,7 @@ from .events import (
     ShowMessageRequest,
     Shutdown,
     SignatureHelp,
+    TypeDefinition,
     WillSaveWaitUntilEdits,
     WorkDoneProgress,
     WorkDoneProgressBegin,
@@ -37,22 +47,31 @@ from .events import (
 )
 from .io_handler import _make_request, _make_response, _parse_messages
 from .structs import (
+    CompletionContext,
+    CompletionItem,
+    CompletionItemKind,
+    CompletionList,
+    FormattingOptions,
     Id,
     JSONDict,
     JSONList,
+    MWorkDoneProgressKind,
+    Range,
     Request,
+    Response,
+    SymbolKind,
+    TextDocumentContentChangeEvent,
+    TextDocumentEdit,
+    TextDocumentIdentifier,
+    TextDocumentItem,
+    TextDocumentPosition,
+    TextDocumentSaveReason,
+    TextEdit,
+    VersionedTextDocumentIdentifier,
+    WorkspaceFolder,
 )
-from lsprotocol import converters, types as lsp_types
-Converter = converters.get_converter()
 
 
-# This manually links all strings to their classes within the library itself
-# so you never have to think about it again. this is not needed anymore because now we use directly response calsses from lsprotocol like DefinitionResponse which automatically resolve the quoted types. it may be needed only by things like DefinitionResult...etc
-# for name, obj in lsp_types.__dict__.items():
-    # if isinstance(obj, type) and attrs.has(obj):
-        # attrs.resolve_types(obj, globalns=lsp_types.__dict__)
-        
-    
 class ClientState(enum.Enum):
     NOT_INITIALIZED = enum.auto()
     WAITING_FOR_INITIALIZED = enum.auto()
@@ -77,7 +96,7 @@ CAPABILITIES: JSONDict = {
         "completion": {
             "dynamicRegistration": True,
             "completionItem": {"snippetSupport": True},
-            "completionItemKind": {"valueSet": list(lsp_types.CompletionItemKind)},
+            "completionItemKind": {"valueSet": list(CompletionItemKind)},
             "contextSupport": True,
         },
         "hover": {
@@ -112,7 +131,7 @@ CAPABILITIES: JSONDict = {
         "documentSymbol": {
             "hierarchicalDocumentSymbolSupport": True,
             "dynamicRegistration": True,
-            "symbolKind": {"valueSet": list(lsp_types.SymbolKind)},
+            "symbolKind": {"valueSet": list(SymbolKind)},
         },
     },
     "window": {
@@ -127,7 +146,7 @@ CAPABILITIES: JSONDict = {
     "workspace": {
         "symbol": {
             "dynamicRegistration": True,
-            "symbolKind": {"valueSet": list(lsp_types.SymbolKind)},
+            "symbolKind": {"valueSet": list(SymbolKind)},
         },
         "workspaceFolders": True,
         # TODO 'workspaceEdit':..., #'applyEdit':..., 'executeCommand':...,
@@ -149,7 +168,7 @@ class Client:
         self,
         process_id: t.Optional[int] = None,
         root_uri: t.Optional[str] = None,
-        workspace_folders: t.Optional[t.List[lsp_types.WorkspaceFolder]] = None,
+        workspace_folders: t.Optional[t.List[WorkspaceFolder]] = None,
         trace: str = "off",
         settings = {},
     ) -> None:
@@ -183,7 +202,7 @@ class Client:
                 "workspaceFolders": (
                     None
                     if workspace_folders is None
-                    else [Converter.unstructure(f) for f in workspace_folders]
+                    else [f.model_dump() for f in workspace_folders]
                 ),
                 "trace": trace,
                 "capabilities": CAPABILITIES,
@@ -217,11 +236,6 @@ class Client:
     def _send_notification(
         self, method: str, params: t.Optional[JSONDict] = None
     ) -> None:
-        print(f"DEBUG _send_notification: method={method}")
-        if method == "initialized":
-            print(f"DEBUG: Sending initialized notification")
-        if method == "textDocument/didOpen":
-            print(f"DEBUG: Sending didOpen for uri: {params.get('textDocument', {}).get('uri') if params else 'unknown'}")
         self._send_buf += _make_request(method=method, params=params)
 
     def _send_response(
@@ -233,45 +247,30 @@ class Client:
         self._send_buf += _make_response(id=id, result=result, error=error)
 
     # response from server
-    def _handle_response(self, response: t.Any) -> Event:
-        # Use .get() to avoid KeyError
-        response_id = response.get('id')
-        assert response_id is not None
-        
-        # Pop the matching request using the ID
-        request = self._unanswered_requests.pop(response_id)
+    def _handle_response(self, response: Response) -> Event:
+        assert response.id is not None
+        request = self._unanswered_requests.pop(response.id)
 
-        print("NOTE: =======response",response)
-        # Safely check for error existence
         # FIXME: The errors have meanings.
-        error_payload = response.get('error')
-        if error_payload is not None:
-            print("NOTE: =======error_payload",error_payload)
-            # err = lsp_types.ResponseErrorMessage(error_payload)
-            err = Converter.structure(response, lsp_types.ResponseErrorMessage)
-            print("NOTE: =======error_payload",err)
-            # err = ResponseError(
-            #     code=error_payload.get("code"),
-            #     message=error_payload.get("message", ""),
-            #     data=error_payload.get("data"),
-            # )
-            # err.message_id = response_id
+        if response.error is not None:
+            #raise RuntimeError("Response error!\n\n" + pprint.pformat(response.error))
+            err = ResponseError.model_validate(response.error)
+            err.message_id = response.id
             return err
 
         event: Event
+        
         method = request.method
-        result = response.get('result') # result can be None, list, or dict
 
         if method == "initialize":
             assert self._state == ClientState.WAITING_FOR_INITIALIZED
             self._send_notification(
               "initialized", params={}
             )  # params=None doesn't work with gopls
-            self._send_notification(
-                "workspace/didChangeConfiguration",
-                params={"settings": self.settings},
-            )
-            event = Initialized(capabilities=result or {})
+            self._send_notification("workspace/didChangeConfiguration", params={
+                "settings": self.settings
+            })
+            event = Initialized.model_validate(response.result)
             self._state = ClientState.NORMAL
 
         elif method == "shutdown":
@@ -281,200 +280,231 @@ class Client:
 
         elif method == "textDocument/completion":
             completion_list = None
-            if isinstance(result, dict):
-                completion_list = result
-            elif isinstance(result, list):
+
+            if isinstance(response.result, dict):
+                completion_list = response.result
+            elif isinstance(response.result, list):
                 completion_list = {
-                    "isIncomplete": False,
-                    "items": result,
+                    'isIncomplete': 'false',
+                    'items': response.result,
                 }
-            event = Completion(message_id=response_id, completion_list=completion_list)
+            
+            ## ! parse_obj/model_validate is expensive and not really needed.
+            #try:
+            #    completion_list = CompletionList.model_validate(response.result)
+            #except ValidationError:
+            #    try:
+            #        list_adapter = TypeAdapter(t.List[CompletionItem])
+            #        completion_list = CompletionList(
+            #            isIncomplete=False,
+            #            items=list_adapter.validate_python(response.result),
+            #        )
+            #    except ValidationError:
+            #        assert response.result is None
+
+            event = Completion(
+                message_id=response.id, completion_list=completion_list
+            )
 
         elif method == "textDocument/willSaveWaitUntil":
-            edits = None
-            if isinstance(result, list):
-                edits = [
-                    Converter.structure(entry, lsp_types.TextEdit) for entry in result
-                ]
-            event = WillSaveWaitUntilEdits(edits=edits)
+            event = WillSaveWaitUntilEdits(
+                edits=TypeAdapter(t.List[TextEdit]).validate_python(response.result)
+            )
 
         elif method == "textDocument/hover":
-            # if result is not None:
-                # event = Converter.structure(result, Hover)
-            # else:
-                # event = Hover(contents=[])  # null response
-            # event.message_id = response_id
-            
-            event = Converter.structure(result, lsp_types.Hover)
+            if response.result is not None:
+                event = Hover.model_validate(response.result)
+            else:
+                event = Hover(contents=[])  # null response
+            event.message_id = response.id
 
         elif method == "textDocument/foldingRange":
             event = MFoldingRanges(
-                message_id=response_id,
-                result=result if result is not None else [],
+                message_id=response.id,
+                result=response.result if response.result is not None else [],
             )
 
         elif method == "textDocument/signatureHelp":
-            if result is not None:
-                event = Converter.structure(result, SignatureHelp)
+            if response.result is not None:
+                event = SignatureHelp.model_validate(response.result)
             else:
                 event = SignatureHelp(signatures=[])  # null response
-            event.message_id = response_id
+            event.message_id = response.id
 
         elif method == "textDocument/documentSymbol":
             event = MDocumentSymbols(
-                message_id=response_id,
-                result=result if result is not None else [],
+                message_id=response.id,
+                result=response.result if response.result is not None else [],
             )
 
         elif method == "textDocument/inlayHint":
-            event = Converter.structure(result or [], MInlayHints)
-            event.message_id = response_id
+            event = TypeAdapter(MInlayHints).validate_python(response)
+            event.message_id = response.id
 
         elif method == "textDocument/rename":
-            if result is not None and isinstance(result, dict):
-                if "documentChanges" in result:
+            if response.result is not None and isinstance(response.result, dict):
+                if "documentChanges" in response.result:
                     document_changes = [
-                        Converter.structure(change, lsp_types.TextDocumentEdit)
-                        for change in result["documentChanges"]
+                        TextDocumentEdit.model_validate(change)
+                        for change in response.result["documentChanges"]
                     ]
                     event = WorkspaceEdit(
-                        message_id=response_id, documentChanges=document_changes
+                        message_id=response.id, documentChanges=document_changes
                     )
-                elif "changes" in result:
+                elif "changes" in response.result:
                     event = WorkspaceEdit(
-                        message_id=response_id, changes=result["changes"]
+                        message_id=response.id, changes=response.result["changes"]
                     )
                 else:
-                    event = WorkspaceEdit(message_id=response_id)
+                    event = WorkspaceEdit(message_id=response.id)
             else:
-                event = WorkspaceEdit(message_id=response_id)
+                event = WorkspaceEdit(message_id=response.id)
 
         elif method == "textDocument/semanticTokens/full":
-            if result is None:
+            if response.result is None:
                 event = SemanticTokens(data=[])
             else:
-                event = Converter.structure(result, SemanticTokens)
-            event.message_id = response_id
+                event = SemanticTokens.model_validate(response.result)
+            event.message_id = response.id
 
+        #GOTOs
         elif method == "textDocument/definition":
-            event = Converter.structure(response, lsp_types.DefinitionResponse)
+            event = TypeAdapter(Definition).validate_python(
+                {"result": response.result}
+            )
+            event.message_id = response.id
 
         elif method == "textDocument/references":
-            event = Converter.structure(response, lsp_types.ReferencesResponse)
+            event = TypeAdapter(References).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/implementation":
-            event = Converter.structure(response, lsp_types.ImplementationResponse)
+            event = TypeAdapter(Implementation).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/declaration":
-            event = Converter.structure(response, lsp_types.DeclarationResponse)
+            event = TypeAdapter(Declaration).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/typeDefinition":
-            event = Converter.structure(response, lsp_types.TypeDefinitionResponse)
+            event = TypeAdapter(TypeDefinition).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "textDocument/prepareCallHierarchy":
-            event = MCallHierarchItems(result=result)
+            event = TypeAdapter(MCallHierarchItems).validate_python(
+                {"result": response.result}
+            )
 
-        elif method == "textDocument/formatting":
-            event = Converter.structure(response, lsp_types.DocumentFormattingResponse)
+        elif method in ("textDocument/formatting", "textDocument/rangeFormatting"):
+            event = TypeAdapter(DocumentFormatting).validate_python(
+                {"result": response.result}
+            )
 
-        elif method == "textDocument/rangeFormatting":
-            event = Converter.structure(response, lsp_types.DocumentRangeFormattingResponse)
-        
-        # TODO: how this is supposed to work? format multiple selections? add it to cuda lsp
-        # elif method == "textDocument/rangesFormatting":
-            # event = Converter.structure(response, lsp_types.DocumentRangesFormattingResponse)
-
-        # TODO: add this to cuda lsp
-        # elif method == "textDocument/onTypeFormatting":
-            # event = Converter.structure(response, lsp_types.DocumentOnTypeFormattingResponse)
-
+        # WORKSPACE
         elif method == "workspace/symbol":
-            event = MWorkspaceSymbols(result=result)
+            event = TypeAdapter(MWorkspaceSymbols).validate_python(
+                {"result": response.result}
+            )
 
         elif method == "o#/metadata":
-            metadata_result = result if isinstance(result, dict) else None
-            event = Metadata(message_id=response_id, result=metadata_result)
+            metadata_result = response.result if isinstance(response.result, dict) else None
+            event = Metadata(message_id=response.id, result=metadata_result)
 
         else:
             raise NotImplementedError((response, request))
 
+        if isinstance(event, MethodResponse):
+            event.message_id = response.id
+
         return event
 
     # request from server
-    def _handle_request(self, request: t.Any) -> Event:
-        # Use .get() for top-level keys
-        method = request.get('method')
-        params = request.get('params') or {}
-        request_id = request.get('id')
-
+    def _handle_request(self, request: Request) -> Event:
         def parse_request(event_cls: t.Type[Event]) -> Event:
             if issubclass(event_cls, ServerRequest):
-                # params is already a dict, so Converter works directly
-                event = Converter.structure(params, event_cls)
-                assert request_id is not None
-                event._id = request_id
+                event = TypeAdapter(event_cls).validate_python(request.params)
+                assert request.id is not None
+                event._id = request.id
                 event._client = self
                 return event
-            if issubclass(event_cls, ServerNotification):
-                return Converter.structure(params, event_cls)
-            raise TypeError(
-                "`event_cls` must be a subclass of ServerRequest or ServerNotification"
-            )
+            elif issubclass(event_cls, ServerNotification):
+                if isinstance(request.params, dict):
+                    return TypeAdapter(event_cls).validate_python(request.params)
+                else:
+                    return TypeAdapter(event_cls).validate_python({})
+            else:
+                raise TypeError(
+                    "`event_cls` must be a subclass of ServerRequest"
+                    " or ServerNotification"
+                )
 
-        if method == "workspace/workspaceFolders":
+        if request.method == "workspace/workspaceFolders":
             # return parse_request(WorkspaceFolders)
             # ... We don't need to parse WorkspaceFolders server's request!
             # because according to LSP specs "params: none"
             # Just create empty event and return it
             event = WorkspaceFolders(result=None)
-            event._id = request_id
+            event._id = request.id
             event._client = self
             return event
-        elif method == "workspace/configuration":
-            return parse_request(ConfigurationRequest)
-        elif method == "workspace/projectInitializationComplete":
-            return parse_request(WorkspaceProjectInitializationComplete)
-        elif method == "window/showMessage":
-            return parse_request(ShowMessage)
-        elif method == "window/showMessageRequest":
-            return parse_request(ShowMessageRequest)
-        elif method == "window/logMessage":
-            return parse_request(LogMessage)
-        elif method == "textDocument/publishDiagnostics":
-            return parse_request(PublishDiagnostics)
-        elif method == "window/workDoneProgress/create":
-            
-            token = params.get('token') # Safely access nested 'token'
-            if token is not None:
-                self._progress_tokens_map[token] = WorkDoneProgress
+        elif request.method == "workspace/configuration":
+            event = parse_request(ConfigurationRequest)
+            assert isinstance(event, ConfigurationRequest)
+            return event
+        elif request.method == "workspace/projectInitializationComplete":
+            event = parse_request(WorkspaceProjectInitializationComplete)
+            assert isinstance(event, WorkspaceProjectInitializationComplete)
+            return event
+        elif request.method == "window/showMessage":
+            event = parse_request(ShowMessage)
+            assert isinstance(event, ShowMessage)
+            return event
+        elif request.method == "window/showMessageRequest":
+            event = parse_request(ShowMessageRequest)
+            assert isinstance(event, ShowMessageRequest)
+            return event
+        elif request.method == "window/logMessage":
+            event = parse_request(LogMessage)
+            assert isinstance(event, LogMessage)
+            return event
+        elif request.method == "textDocument/publishDiagnostics":
+            event = parse_request(PublishDiagnostics)
+            assert isinstance(event, PublishDiagnostics)
+            return event
+        elif request.method == "window/workDoneProgress/create":
+            ev = parse_request(WorkDoneProgressCreate)
+            self._progress_tokens_map[request.params['token']] = WorkDoneProgress
             return parse_request(WorkDoneProgressCreate)
-        elif method == "client/registerCapability":
-            return parse_request(RegisterCapabilityRequest)
+        elif request.method == "client/registerCapability":
+            event = parse_request(RegisterCapabilityRequest)
+            assert isinstance(event, RegisterCapabilityRequest)
+            return event
 
-        elif method == "$/progress":
-            token = params.get('token')
-            progress_type = self._progress_tokens_map.get(token)
+        elif request.method == "$/progress":
+            progress_type = self._progress_tokens_map.get(request.params['token'])
             
             # if "window/workDoneProgress/create" request from server was missing -
             # pretend it actually was already recieved. i think there is no harm in that.
             # such server bugs must be silently ignored without crashing our plugin.
             if progress_type is None:
-                self._progress_tokens_map[token] = WorkDoneProgress
                 # Gracefully handle servers that forget to send workDoneProgress/create
+                self._progress_tokens_map[request.params['token']] = WorkDoneProgress
                 progress_type = WorkDoneProgress
 
             if progress_type == WorkDoneProgress:
-                # Safely drill into nested kind
-                value = params.get('value', {})
-                kind = value.get('kind')
+                kind = request.params['value']['kind']
+                kind = MWorkDoneProgressKind(kind)
 
-                if kind == "begin":
+                if kind == MWorkDoneProgressKind.BEGIN:
                     return parse_request(WorkDoneProgressBegin)
-                elif kind == "report":
+                elif kind == MWorkDoneProgressKind.REPORT:
                     return parse_request(WorkDoneProgressReport)
-                elif kind == "end":
-                    if token in self._progress_tokens_map:
-                        del self._progress_tokens_map[token] # prevent the dictionary from growing indefinitely.
+                elif kind == MWorkDoneProgressKind.END:
+                    del self._progress_tokens_map[request.params["token"]] # prevent the dictionary from growing indefinitely.
                     return parse_request(WorkDoneProgressEnd)
                 else:
                     raise ValueError(f"Unknown progress kind: {kind}")
@@ -484,30 +514,17 @@ class Client:
         else:
             raise NotImplementedError(request)
 
-    def recv(self, data: bytes) -> t.Iterator[t.Tuple[t.Optional[Id], Event]]:
-        """Parse received data and yield (message_id, event) tuples.
-        
-        Returns:
-            Iterator of (message_id, event) tuples where:
-            - message_id: The ID from our original request (for responses), or None (for server requests/notifications)
-            - event: The parsed Event object
-        """
+    def recv(self, data: bytes) -> t.Iterator[Event]:
+        self._recv_buf += data
         # Make sure to use lots of iterators, so that if one message fails to
         # parse, the messages before it are yielded successfully before the
         # error, and the messages after it are left in _recv_buf.
-        self._recv_buf += data
         for message in _parse_messages(self._recv_buf):
-            # Distinguish between Response and Request/Notification
-            # In JSON-RPC, if it has 'method', it's NOT a response.
-            if "method" not in message:
-                # It's a Response.
-                event = self._handle_response(message)
-                yield (message['id'], event)
+            if isinstance(message, Response):
+                yield self._handle_response(message)
             else:
-                # It's a Request or Notification.
-                event = self._handle_request(message)
-                yield (None, event)  # Server requests/notifications don't have our message_id
-            
+                yield self._handle_request(message)
+
     def send(self) -> bytes:
         send_buf = self._send_buf[:]
         self._send_buf.clear()
@@ -529,30 +546,24 @@ class Client:
             method="$/cancelRequest", params={"id": self._id_counter - 1}
         )
 
-    def did_open(self, text_document: lsp_types.TextDocumentItem) -> None:
+    def did_open(self, text_document: TextDocumentItem) -> None:
         assert self._state == ClientState.NORMAL
-        td_dict = Converter.unstructure(text_document)
-        print(f"DEBUG did_open: uri={td_dict.get('uri')}, languageId={td_dict.get('languageId')}")
-        print(f"DEBUG did_open: unstructured type = {type(td_dict)}")
-        print(f"DEBUG did_open: text length = {len(td_dict.get('text', ''))}")
         self._send_notification(
             method="textDocument/didOpen",
-            params={"textDocument": td_dict},
+            params={"textDocument": text_document.model_dump()},
         )
-
 
     def did_change(
         self,
-        text_document: lsp_types.VersionedTextDocumentIdentifier,
-        content_changes: t.List[lsp_types.TextDocumentContentChangeEvent],
+        text_document: VersionedTextDocumentIdentifier,
+        content_changes: t.List[TextDocumentContentChangeEvent],
     ) -> None:
         assert self._state == ClientState.NORMAL
-        content_changes_payload = [Converter.unstructure(evt) for evt in content_changes]
         self._send_notification(
             method="textDocument/didChange",
             params={
-                "textDocument": Converter.unstructure(text_document),
-                "contentChanges": content_changes_payload,
+                "textDocument": text_document.model_dump(),
+                "contentChanges": [evt.model_dump() for evt in content_changes],
             },
         )
 
@@ -563,46 +574,46 @@ class Client:
         )
 
     def will_save(
-        self, text_document: lsp_types.TextDocumentIdentifier, reason: lsp_types.TextDocumentSaveReason
+        self, text_document: TextDocumentIdentifier, reason: TextDocumentSaveReason
     ) -> None:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/willSave",
-            params={"textDocument": Converter.unstructure(text_document), "reason": reason.value},
+            params={"textDocument": text_document.model_dump(), "reason": reason.value},
         )
 
     def will_save_wait_until(
-        self, text_document: lsp_types.TextDocumentIdentifier, reason: lsp_types.TextDocumentSaveReason
+        self, text_document: TextDocumentIdentifier, reason: TextDocumentSaveReason
     ) -> None:
         assert self._state == ClientState.NORMAL
         self._send_request(
             method="textDocument/willSaveWaitUntil",
-            params={"textDocument": Converter.unstructure(text_document), "reason": reason.value},
+            params={"textDocument": text_document.model_dump(), "reason": reason.value},
         )
 
     def did_save(
-        self, text_document: lsp_types.TextDocumentIdentifier, text: t.Optional[str] = None
+        self, text_document: TextDocumentIdentifier, text: t.Optional[str] = None
     ) -> None:
         assert self._state == ClientState.NORMAL
-        params: t.Dict[str, t.Any] = {"textDocument": Converter.unstructure(text_document)}
+        params: t.Dict[str, t.Any] = {"textDocument": text_document.model_dump()}
         if text is not None:
             params["text"] = text
         self._send_notification(method="textDocument/didSave", params=params)
 
-    def did_close(self, text_document: lsp_types.TextDocumentIdentifier) -> None:
+    def did_close(self, text_document: TextDocumentIdentifier) -> None:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/didClose",
-            params={"textDocument": Converter.unstructure(text_document)},
+            params={"textDocument": text_document.model_dump()},
         )
 
     def did_change_workspace_folders(
-        self, added: t.List[lsp_types.WorkspaceFolder], removed: t.List[lsp_types.WorkspaceFolder]
+        self, added: t.List[WorkspaceFolder], removed: t.List[WorkspaceFolder]
     ) -> None:
         assert self._state == ClientState.NORMAL
         params = {
-            "added": [Converter.unstructure(f) for f in added],
-            "removed": [Converter.unstructure(f) for f in removed],
+            "added": [f.model_dump() for f in added],
+            "removed": [f.model_dump() for f in removed],
         }
         self._send_notification(
             method="workspace/didChangeWorkspaceFolders", params=params
@@ -610,145 +621,144 @@ class Client:
 
     def completion(
         self,
-        text_document_position: lsp_types.TextDocumentPositionParams,
-        context: t.Optional[lsp_types.CompletionContext] = None,
+        text_document_position: TextDocumentPosition,
+        context: t.Optional[CompletionContext] = None,
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {}
-        params.update(Converter.unstructure(text_document_position))
+        params.update(text_document_position.model_dump())
         if context is not None:
             params.update( {
-                'context': Converter.unstructure(context)
+                'context': context.model_dump(exclude_unset=True)
             } )
         return self._send_request(method="textDocument/completion", params=params)
 
     def semantic_tokens(
         self,
-        text_document: lsp_types.TextDocumentIdentifier,
+        text_document: TextDocumentIdentifier,
     ) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/semanticTokens/full",
-            params={"textDocument": Converter.unstructure(text_document)},
+            params={"textDocument": text_document.model_dump()},
         )
 
     def rename(
         self,
-        text_document_position: lsp_types.TextDocumentPositionParams,
+        text_document_position: TextDocumentPosition,
         new_name: str,
     ) -> Id:
         assert self._state == ClientState.NORMAL
-        params = {
-            **Converter.unstructure(text_document_position),
-            "newName": new_name,
-        }
+        params = {}
+        params.update(text_document_position.model_dump())
+        params["newName"] = new_name
         return self._send_request(method="textDocument/rename", params=params)
 
-    def hover(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+    def hover(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
-            method="textDocument/hover", params=Converter.unstructure(text_document_position)
+            method="textDocument/hover", params=text_document_position.model_dump()
         )
 
-    def folding_range(self, text_document: lsp_types.TextDocumentIdentifier) -> Id:
+    def folding_range(self, text_document: TextDocumentIdentifier) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/foldingRange",
-            params={"textDocument": Converter.unstructure(text_document)},
+            params={"textDocument": text_document.model_dump()},
         )
 
-    def signatureHelp(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+    def signatureHelp(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/signatureHelp",
-            params=Converter.unstructure(text_document_position),
+            params=text_document_position.model_dump(),
         )
 
-    def definition(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+    def definition(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
-            method="textDocument/definition", params=Converter.unstructure(text_document_position)
+            method="textDocument/definition", params=text_document_position.model_dump()
         )
 
-    def declaration(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+    def declaration(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/declaration",
-            params=Converter.unstructure(text_document_position),
+            params=text_document_position.model_dump(),
         )
 
-    def inlay_hint(self, text_document: lsp_types.TextDocumentIdentifier, range: lsp_types.Range) -> Id:
+    def inlay_hint(self, text_document: TextDocumentIdentifier, range: Range) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/inlayHint",
             params={
-                "textDocument": Converter.unstructure(text_document),
-                "range": Converter.unstructure(range),
+                "textDocument": text_document.model_dump(),
+                "range": range.model_dump(),
             },
         )
 
-    def typeDefinition(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+    def typeDefinition(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/typeDefinition",
-            params=Converter.unstructure(text_document_position),
+            params=text_document_position.model_dump(),
         )
 
-    def references(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+    def references(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
             "context": {"includeDeclaration": True},
-            **Converter.unstructure(text_document_position),
+            **text_document_position.model_dump(),
         }
         return self._send_request(method="textDocument/references", params=params)
 
     # TODO incomplete
-    def prepareCallHierarchy(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+    def prepareCallHierarchy(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/prepareCallHierarchy",
-            params=Converter.unstructure(text_document_position),
+            params=text_document_position.model_dump(),
         )
 
-    def implementation(self, text_document_position: lsp_types.TextDocumentPositionParams) -> Id:
+    def implementation(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/implementation",
-            params=Converter.unstructure(text_document_position),
+            params=text_document_position.model_dump(),
         )
 
     def workspace_symbol(self, query: str = "") -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(method="workspace/symbol", params={"query": query})
 
-    def documentSymbol(self, text_document: lsp_types.TextDocumentIdentifier) -> Id:
+    def documentSymbol(self, text_document: TextDocumentIdentifier) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/documentSymbol",
-            params={"textDocument": Converter.unstructure(text_document)},
+            params={"textDocument": text_document.model_dump()},
         )
 
     def formatting(
-        self, text_document: lsp_types.TextDocumentIdentifier, options: lsp_types.FormattingOptions
+        self, text_document: TextDocumentIdentifier, options: FormattingOptions
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
-            "textDocument": Converter.unstructure(text_document),
-            "options": Converter.unstructure(options),
+            "textDocument": text_document.model_dump(),
+            "options": options.model_dump(),
         }
         return self._send_request(method="textDocument/formatting", params=params)
 
     def rangeFormatting(
         self,
-        text_document: lsp_types.TextDocumentIdentifier,
-        range: lsp_types.Range,
-        options: lsp_types.FormattingOptions,
+        text_document: TextDocumentIdentifier,
+        range: Range,
+        options: FormattingOptions,
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
-            "textDocument": Converter.unstructure(text_document),
-            "range": Converter.unstructure(range),
-            "options": Converter.unstructure(options),
+            "textDocument": text_document.model_dump(),
+            "range": range.model_dump(),
+            "options": options.model_dump(),
         }
         return self._send_request(method="textDocument/rangeFormatting", params=params)
 

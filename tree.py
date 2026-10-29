@@ -3,7 +3,8 @@ from cudatext import *
 
 from .book import EditorDoc
 
-from lsprotocol import types as lsp_types
+from .sansio_lsp_client.structs import SymbolKind, DocumentSymbol, SymbolInformation
+
 
 KEY_TREE_TYPES_SHOW = 'tree_types_show'
 CFG_DEFAULT = 'namespace,class,method,constructor,interface,function,struct'
@@ -22,35 +23,35 @@ tree_icons = {
     'arrow2':  7,
 }
 KIND_2_TREE_IC = {
-    lsp_types.SymbolKind.File:            tree_icons['box'],
-    lsp_types.SymbolKind.Module:          tree_icons['box'],
-    lsp_types.SymbolKind.Namespace:       tree_icons['box'],
-    lsp_types.SymbolKind.Package:         tree_icons['box'],
+    SymbolKind.FILE:            tree_icons['box'],
+    SymbolKind.MODULE:          tree_icons['box'],
+    SymbolKind.NAMESPACE:       tree_icons['box'],
+    SymbolKind.PACKAGE:         tree_icons['box'],
 
-    lsp_types.SymbolKind.Class:           tree_icons['folder'],
-    lsp_types.SymbolKind.Enum:            tree_icons['folder'],
-    lsp_types.SymbolKind.Struct:          tree_icons['folder'],
+    SymbolKind.CLASS:           tree_icons['folder'],
+    SymbolKind.ENUM:            tree_icons['folder'],
+    SymbolKind.STRUCT:          tree_icons['folder'],
 
-    lsp_types.SymbolKind.Method:          tree_icons['func'],
-    lsp_types.SymbolKind.Constructor:     tree_icons['func'],
-    lsp_types.SymbolKind.Interface:        tree_icons['func'],
-    lsp_types.SymbolKind.Function:         tree_icons['func'],
+    SymbolKind.METHOD:          tree_icons['func'],
+    SymbolKind.CONSTRUCTOR:     tree_icons['func'],
+    SymbolKind.INTERFACE:       tree_icons['func'],
+    SymbolKind.FUNCTION:        tree_icons['func'],
 
-    lsp_types.SymbolKind.Property:         tree_icons['parts1'],
-    lsp_types.SymbolKind.Field:            tree_icons['parts1'],
-    lsp_types.SymbolKind.Variable:         tree_icons['parts1'],
-    lsp_types.SymbolKind.Constant:         tree_icons['parts1'],
-    lsp_types.SymbolKind.String:           tree_icons['parts1'],
-    lsp_types.SymbolKind.Number:           tree_icons['parts1'],
-    lsp_types.SymbolKind.Boolean:          tree_icons['parts1'],
-    lsp_types.SymbolKind.Array:            tree_icons['parts1'],
-    lsp_types.SymbolKind.Object:           tree_icons['parts1'],
-    lsp_types.SymbolKind.Key:              tree_icons['parts1'],
-    lsp_types.SymbolKind.Null:             tree_icons['parts1'],
-    lsp_types.SymbolKind.Enummember:       tree_icons['parts1'],
-    lsp_types.SymbolKind.Event:            tree_icons['parts1'],
-    lsp_types.SymbolKind.Operator:         tree_icons['parts1'],
-    lsp_types.SymbolKind.Typeparameter:    tree_icons['parts1'],
+    SymbolKind.PROPERTY:        tree_icons['parts1'],
+    SymbolKind.FIELD:           tree_icons['parts1'],
+    SymbolKind.VARIABLE:        tree_icons['parts1'],
+    SymbolKind.CONSTANT:        tree_icons['parts1'],
+    SymbolKind.STRING:          tree_icons['parts1'],
+    SymbolKind.NUMBER:          tree_icons['parts1'],
+    SymbolKind.BOOLEAN:         tree_icons['parts1'],
+    SymbolKind.ARRAY:           tree_icons['parts1'],
+    SymbolKind.OBJECT:          tree_icons['parts1'],
+    SymbolKind.KEY:             tree_icons['parts1'],
+    SymbolKind.NULL:            tree_icons['parts1'],
+    SymbolKind.ENUMMEMBER:      tree_icons['parts1'],
+    SymbolKind.EVENT:           tree_icons['parts1'],
+    SymbolKind.OPERATOR:        tree_icons['parts1'],
+    SymbolKind.TYPEPARAMETER:   tree_icons['parts1'],
 }
 
 
@@ -76,10 +77,10 @@ class TreeMan:
         if not items:
             return
 
-        elif isinstance(items[0], lsp_types.DocumentSymbol):
+        elif isinstance(items[0], DocumentSymbol):
             self._fill_from_tree(items)
 
-        elif isinstance(items[0], lsp_types.SymbolInformation):
+        elif isinstance(items[0], SymbolInformation):
             self._fill_from_list(items)
 
 
@@ -144,7 +145,7 @@ class TreeMan:
     def _load_cfg(self, cfg):
         cfg = cfg.get(KEY_TREE_TYPES_SHOW)  or  CFG_DEFAULT
 
-        _name_kind_map = {kind.name.lower():kind  for kind in lsp_types.SymbolKind}
+        _name_kind_map = {kind.name.lower():kind  for kind in SymbolKind}
         _types_show = (type_.strip().lower()  for type_ in cfg.lower().split(',')  if type_.strip())
         return set( _name_kind_map.get(type_)  for type_ in _types_show
                                                                 if type_ in _name_kind_map)

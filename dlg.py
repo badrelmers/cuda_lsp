@@ -3,8 +3,13 @@ import re
 from collections import namedtuple, defaultdict
 
 from cudatext import *
+#import cudatext as ct
 import cudax_lib as apx
 import cudatext_cmd as cmds
+
+# imported on ~access
+#from .sansio_lsp_client.structs import MarkupKind
+#from .sansio_lsp_client.events import ShowMessage, LogMessage
 
 LogMsg = namedtuple('LogMsg', 'msg type severity')
 
@@ -63,10 +68,10 @@ class Hint:
 
     @classmethod
     def init_form(cls):
-        global lsp_types
+        global MarkupKind
         global FORM_H
-        
-        from lsprotocol import types as lsp_types
+
+        from .sansio_lsp_client.structs import MarkupKind
 
         _cell_w, cell_h = ed.get_prop(PROP_CELL_SIZE)
         FORM_H = FORM_GAP*2 + ED_MAX_LINES*cell_h + BUTTON_H
@@ -157,7 +162,7 @@ class Hint:
         ### dialog Editor setup
         cls.ed.set_prop(PROP_RO, False)
         try:
-            if markupkind == lsp_types.MarkupKind.Markdown:
+            if markupkind == MarkupKind.MARKDOWN:
                 cls.ed.set_prop(PROP_LEXER_FILE, 'Markdown')
                 import html
                 text = html.unescape(text)
@@ -389,7 +394,7 @@ class PanelLog:
 
     def __init__(self, panel_name, state=None):
         global LogMessage, ShowMessage
-        from .sansio_lsp_client.events import ShowMessage, LogMessage
+        from .sansio_lsp_client import LogMessage, ShowMessage
 
         PanelLog.panels[panel_name] = self
         PanelLog.type_captions = {
@@ -933,8 +938,8 @@ class SignaturesDialog:
         cls.memo.set_text_all('')
         cls.memo.dim(DIM_DELETE_ALL)
         
-        from lsprotocol import types as lsp_types
-        sig: lsp_types.SignatureInformation
+        from .sansio_lsp_client.structs import SignatureInformation
+        sig: SignatureInformation
         for i,sig in enumerate(signatures):
             cls.memo.set_text_line(-2, sig.label)
             if i != activeSignature:
