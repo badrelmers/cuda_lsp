@@ -14,8 +14,22 @@ ProgressToken = t.Union[int, str]
 Converter = converters.get_converter()
 
 
-Request = lsp_types.Request
-Response = lsp_types.Response
+@attrs.define
+class Request:
+    jsonrpc: str = attrs.field(default="2.0", init=False)
+    method: str
+    params: t.Optional[t.Union[JSONDict, JSONList]] = None
+    id: t.Optional[Id] = None
+
+
+@attrs.define
+class Response:
+    jsonrpc: str = attrs.field(default="2.0", init=False)
+    id: t.Optional[Id]
+    result: t.Optional[t.Union[JSONDict, JSONList]] = None
+    error: t.Optional[JSONDict] = None
+
+
 MessageType = lsp_types.MessageType
 MessageActionItem = lsp_types.MessageActionItem
 WorkspaceFolder = lsp_types.WorkspaceFolder
