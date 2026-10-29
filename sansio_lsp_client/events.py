@@ -1,42 +1,44 @@
 import typing as t
 
-from pydantic import BaseModel, PrivateAttr
-from typing import Optional, Dict, Any
+from lsprotocol import types as lsp_types
+
+from .structs import (
+    CallHierarchyItem,
+    CompletionList,
+    ConfigurationItem,
+    Diagnostic,
+    DocumentSymbol,
+    FoldingRange,
+    Id,
+    InlayHint,
+    JSONDict,
+    Location,
+    LocationLink,
+    MarkedString,
+    MarkupContent,
+    MessageActionItem,
+    MessageType,
+    ProgressToken,
+    Range,
+    Registration,
+    SignatureInformation,
+    SymbolInformation,
+    TextDocumentEdit,
+    TextEdit,
+    WorkspaceFolder,
+    WorkDoneProgressBeginValue,
+    WorkDoneProgressEndValue,
+    WorkDoneProgressKind,
+    WorkDoneProgressReportValue,
+    structure,
+    unstructure,
+)
 
 if t.TYPE_CHECKING:  # avoid import cycle at runtime
     from .client import Client
-from .structs import (
-    FoldingRange,
-    InlayHint,
-    JSONDict,
-    Diagnostic,
-    MessageType,
-    MessageActionItem,
-    CompletionList,
-    TextEdit,
-    TextDocumentEdit,
-    MarkupContent,
-    Range,
-    Location,
-    MarkedString,
-    SignatureInformation,
-    LocationLink,
-    CallHierarchyItem,
-    SymbolInformation,
-    Registration,
-    DocumentSymbol,
-    WorkspaceFolder,
-    ProgressToken,
-    WorkDoneProgressBeginValue,
-    WorkDoneProgressReportValue,
-    WorkDoneProgressEndValue,
-    ConfigurationItem,
-)
-
-Id = t.Union[int, str]
 
 
-class Event(BaseModel):
+class Event(lsp_types.LSPTypedDict):
     pass
 
 
@@ -52,8 +54,8 @@ class ResponseError(Event):
 
 
 class ServerRequest(Event):
-    _client: "Client" = PrivateAttr()
-    _id: Id = PrivateAttr()
+    _client: "Client"
+    _id: Id
 
 
 class ServerNotification(Event):
@@ -79,15 +81,8 @@ class ShowMessageRequest(ServerRequest):
     actions: t.Optional[t.List[MessageActionItem]] = None
 
     def reply(self, action: t.Optional[MessageActionItem] = None) -> None:
-        """
-        Reply to the ShowMessageRequest with the user's selection.
-
-        No bytes are actually returned from this method, the reply's bytes
-        are added to the client's internal send buffer.
-        """
-        self._client._send_response(
-            id=self._id, result=action.model_dump() if action is not None else None
-        )
+        result = None if action is None else unstructure(action)
+        self._client._send_response(id=self._id, result=result)
 
 
 class LogMessage(ServerNotification):
@@ -127,14 +122,11 @@ class WorkDoneProgressEnd(WorkDoneProgress):
     value: WorkDoneProgressEndValue
 
 
-# XXX: should these two be just Events or?
 class Completion(Event):
     message_id: Id
-    #completion_list: t.Optional[CompletionList]
-    completion_list: t.Optional[t.Dict[str, t.Any]] = None  # make it raw dict (optimization)
+    completion_list: t.Optional[t.Dict[str, t.Any]] = None
 
 
-# XXX: not sure how to name this event.
 class WillSaveWaitUntilEdits(Event):
     edits: t.Optional[t.List[TextEdit]] = None
 
@@ -145,34 +137,27 @@ class PublishDiagnostics(ServerNotification):
 
 
 class WorkspaceProjectInitializationComplete(ServerNotification):
-    """Notification, exclusive to the Roslyn language server to indicate that the solution has been loaded."""
-
     pass
 
 
-""" Hover:
-    * contents: MarkedString | MarkedString[] | MarkupContent;
-    * range?: Range;
-"""
 class Hover(MethodResponse):
     contents: t.Union[
         t.List[t.Union[MarkedString, str]], MarkedString, MarkupContent, str
     ]
     range: t.Optional[Range] = None
 
-    # DBG
-    def m_str(self):
-        """Return hover contents as markdown-compatible string."""
-        def item_str(item): #SKIP
+    def m_str(self) -> str:
+        def item_str(item: t.Union[MarkedString, MarkupContent, str]) -> str:
             if isinstance(item, MarkedString):
-                return f'[{item.language}]\n{item.value}'
-            elif isinstance(item, MarkupContent):
-                return f'[{item.kind}]\n{item.value}'
-            return item # str
+                return f"[{item.language}]\n{item.value}"
+            if isinstance(item, MarkupContent):
+                return f"[{item.kind}]\n{item.value}"
+            return item
 
         if isinstance(self.contents, list):
-            return '\n'.join((item_str(item) for item in self.contents))
+            return "\n".join(item_str(item) for item in self.contents)
         return item_str(self.contents)
+
 
 class SignatureHelp(MethodResponse):
     signatures: t.List[SignatureInformation]
@@ -185,7 +170,7 @@ class SignatureHelp(MethodResponse):
         active_sig = self.activeSignature or 0
         sig = self.signatures[active_sig]
         return sig.label
-        
+
     def get_signatures(self):
         if len(self.signatures) == 0:
             return None
@@ -196,7 +181,7 @@ class SemanticTokens(Event):
     message_id: t.Optional[Id] = None
     resultId: t.Optional[str] = None
     data: t.List[int]
-    
+
 
 class Definition(MethodResponse):
     result: t.Union[Location, t.List[t.Union[Location, LocationLink]], None] = None
@@ -207,7 +192,6 @@ class WorkspaceEdit(MethodResponse):
     documentChanges: t.Optional[t.List[TextDocumentEdit]] = None
 
 
-# result is a list, so putting in a custom class
 class References(MethodResponse):
     result: t.Union[t.List[Location], None]
 
@@ -259,16 +243,8 @@ class WorkspaceFolders(ServerRequest):
     result: t.Optional[t.List[WorkspaceFolder]] = None
 
     def reply(self, folders: t.Optional[t.List[WorkspaceFolder]] = None) -> None:
-        """
-        Reply to the WorkspaceFolder with workspace folders.
-
-        No bytes are actually returned from this method, the reply's bytes
-        are added to the client's internal send buffer.
-        """
-        self._client._send_response(
-            id=self._id,
-            result=[f.model_dump() for f in folders] if folders is not None else None,
-        )
+        result = None if folders is None else [unstructure(f) for f in folders]
+        self._client._send_response(id=self._id, result=result)
 
 
 class ConfigurationRequest(ServerRequest):
@@ -277,7 +253,7 @@ class ConfigurationRequest(ServerRequest):
     def reply(self, result: t.List[t.Any]) -> None:
         self._client._send_response(id=self._id, result=result)
 
+
 class Metadata(Event):
     message_id: t.Optional[Id] = None
     result: t.Optional[JSONDict] = None
-    

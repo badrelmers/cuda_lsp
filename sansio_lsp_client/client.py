@@ -2,8 +2,6 @@ import enum
 #import pprint
 import typing as t
 
-from pydantic import ValidationError, TypeAdapter
-
 from .events import (
     Completion,
     ConfigurationRequest,
@@ -51,6 +49,7 @@ from .structs import (
     CompletionItem,
     CompletionItemKind,
     CompletionList,
+    Converter,
     FormattingOptions,
     Id,
     JSONDict,
@@ -60,7 +59,6 @@ from .structs import (
     Request,
     Response,
     SymbolKind,
-    TextDocumentContentChangeEvent,
     TextDocumentEdit,
     TextDocumentIdentifier,
     TextDocumentItem,
@@ -69,6 +67,7 @@ from .structs import (
     TextEdit,
     VersionedTextDocumentIdentifier,
     WorkspaceFolder,
+    unstructure,
 )
 
 
@@ -202,7 +201,7 @@ class Client:
                 "workspaceFolders": (
                     None
                     if workspace_folders is None
-                    else [f.model_dump() for f in workspace_folders]
+                    else [unstructure(f) for f in workspace_folders]
                 ),
                 "trace": trace,
                 "capabilities": CAPABILITIES,
@@ -253,7 +252,6 @@ class Client:
 
         # FIXME: The errors have meanings.
         if response.error is not None:
-            #raise RuntimeError("Response error!\n\n" + pprint.pformat(response.error))
             err = ResponseError.model_validate(response.error)
             err.message_id = response.id
             return err
@@ -267,9 +265,10 @@ class Client:
             self._send_notification(
               "initialized", params={}
             )  # params=None doesn't work with gopls
-            self._send_notification("workspace/didChangeConfiguration", params={
-                "settings": self.settings
-            })
+            self._send_notification(
+                "workspace/didChangeConfiguration",
+                params={"settings": self.settings},
+            )
             event = Initialized.model_validate(response.result)
             self._state = ClientState.NORMAL
 
@@ -285,31 +284,19 @@ class Client:
                 completion_list = response.result
             elif isinstance(response.result, list):
                 completion_list = {
-                    'isIncomplete': 'false',
-                    'items': response.result,
+                    "isIncomplete": False,
+                    "items": response.result,
                 }
-            
-            ## ! parse_obj/model_validate is expensive and not really needed.
-            #try:
-            #    completion_list = CompletionList.model_validate(response.result)
-            #except ValidationError:
-            #    try:
-            #        list_adapter = TypeAdapter(t.List[CompletionItem])
-            #        completion_list = CompletionList(
-            #            isIncomplete=False,
-            #            items=list_adapter.validate_python(response.result),
-            #        )
-            #    except ValidationError:
-            #        assert response.result is None
 
-            event = Completion(
-                message_id=response.id, completion_list=completion_list
-            )
+            event = Completion(message_id=response.id, completion_list=completion_list)
 
         elif method == "textDocument/willSaveWaitUntil":
-            event = WillSaveWaitUntilEdits(
-                edits=TypeAdapter(t.List[TextEdit]).validate_python(response.result)
-            )
+            edits = None
+            if isinstance(response.result, list):
+                edits = [
+                    Converter.structure(entry, TextEdit) for entry in response.result
+                ]
+            event = WillSaveWaitUntilEdits(edits=edits)
 
         elif method == "textDocument/hover":
             if response.result is not None:
@@ -338,14 +325,14 @@ class Client:
             )
 
         elif method == "textDocument/inlayHint":
-            event = TypeAdapter(MInlayHints).validate_python(response)
+            event = MInlayHints.model_validate(response.result)
             event.message_id = response.id
 
         elif method == "textDocument/rename":
             if response.result is not None and isinstance(response.result, dict):
                 if "documentChanges" in response.result:
                     document_changes = [
-                        TextDocumentEdit.model_validate(change)
+                        Converter.structure(change, TextDocumentEdit)
                         for change in response.result["documentChanges"]
                     ]
                     event = WorkspaceEdit(
@@ -369,46 +356,30 @@ class Client:
 
         #GOTOs
         elif method == "textDocument/definition":
-            event = TypeAdapter(Definition).validate_python(
-                {"result": response.result}
-            )
+            event = Definition.model_validate({"result": response.result})
             event.message_id = response.id
 
         elif method == "textDocument/references":
-            event = TypeAdapter(References).validate_python(
-                {"result": response.result}
-            )
+            event = References.model_validate({"result": response.result})
 
         elif method == "textDocument/implementation":
-            event = TypeAdapter(Implementation).validate_python(
-                {"result": response.result}
-            )
+            event = Implementation.model_validate({"result": response.result})
 
         elif method == "textDocument/declaration":
-            event = TypeAdapter(Declaration).validate_python(
-                {"result": response.result}
-            )
+            event = Declaration.model_validate({"result": response.result})
 
         elif method == "textDocument/typeDefinition":
-            event = TypeAdapter(TypeDefinition).validate_python(
-                {"result": response.result}
-            )
+            event = TypeDefinition.model_validate({"result": response.result})
 
         elif method == "textDocument/prepareCallHierarchy":
-            event = TypeAdapter(MCallHierarchItems).validate_python(
-                {"result": response.result}
-            )
+            event = MCallHierarchItems.model_validate({"result": response.result})
 
         elif method in ("textDocument/formatting", "textDocument/rangeFormatting"):
-            event = TypeAdapter(DocumentFormatting).validate_python(
-                {"result": response.result}
-            )
+            event = DocumentFormatting.model_validate({"result": response.result})
 
         # WORKSPACE
         elif method == "workspace/symbol":
-            event = TypeAdapter(MWorkspaceSymbols).validate_python(
-                {"result": response.result}
-            )
+            event = MWorkspaceSymbols.model_validate({"result": response.result})
 
         elif method == "o#/metadata":
             metadata_result = response.result if isinstance(response.result, dict) else None
@@ -426,21 +397,18 @@ class Client:
     def _handle_request(self, request: Request) -> Event:
         def parse_request(event_cls: t.Type[Event]) -> Event:
             if issubclass(event_cls, ServerRequest):
-                event = TypeAdapter(event_cls).validate_python(request.params)
+                params = request.params or {}
+                event = event_cls.model_validate(params)
                 assert request.id is not None
                 event._id = request.id
                 event._client = self
                 return event
-            elif issubclass(event_cls, ServerNotification):
-                if isinstance(request.params, dict):
-                    return TypeAdapter(event_cls).validate_python(request.params)
-                else:
-                    return TypeAdapter(event_cls).validate_python({})
-            else:
-                raise TypeError(
-                    "`event_cls` must be a subclass of ServerRequest"
-                    " or ServerNotification"
-                )
+            if issubclass(event_cls, ServerNotification):
+                params = request.params or {}
+                return event_cls.model_validate(params)
+            raise TypeError(
+                "`event_cls` must be a subclass of ServerRequest or ServerNotification"
+            )
 
         if request.method == "workspace/workspaceFolders":
             # return parse_request(WorkspaceFolders)
@@ -550,7 +518,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/didOpen",
-            params={"textDocument": text_document.model_dump()},
+            params={"textDocument": unstructure(text_document)},
         )
 
     def did_change(
@@ -559,11 +527,12 @@ class Client:
         content_changes: t.List[TextDocumentContentChangeEvent],
     ) -> None:
         assert self._state == ClientState.NORMAL
+        content_changes_payload = [unstructure(evt) for evt in content_changes]
         self._send_notification(
             method="textDocument/didChange",
             params={
-                "textDocument": text_document.model_dump(),
-                "contentChanges": [evt.model_dump() for evt in content_changes],
+                "textDocument": unstructure(text_document),
+                "contentChanges": content_changes_payload,
             },
         )
 
@@ -579,7 +548,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/willSave",
-            params={"textDocument": text_document.model_dump(), "reason": reason.value},
+            params={"textDocument": unstructure(text_document), "reason": reason.value},
         )
 
     def will_save_wait_until(
@@ -588,14 +557,14 @@ class Client:
         assert self._state == ClientState.NORMAL
         self._send_request(
             method="textDocument/willSaveWaitUntil",
-            params={"textDocument": text_document.model_dump(), "reason": reason.value},
+            params={"textDocument": unstructure(text_document), "reason": reason.value},
         )
 
     def did_save(
         self, text_document: TextDocumentIdentifier, text: t.Optional[str] = None
     ) -> None:
         assert self._state == ClientState.NORMAL
-        params: t.Dict[str, t.Any] = {"textDocument": text_document.model_dump()}
+        params: t.Dict[str, t.Any] = {"textDocument": unstructure(text_document)}
         if text is not None:
             params["text"] = text
         self._send_notification(method="textDocument/didSave", params=params)
@@ -604,7 +573,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         self._send_notification(
             method="textDocument/didClose",
-            params={"textDocument": text_document.model_dump()},
+            params={"textDocument": unstructure(text_document)},
         )
 
     def did_change_workspace_folders(
@@ -612,8 +581,8 @@ class Client:
     ) -> None:
         assert self._state == ClientState.NORMAL
         params = {
-            "added": [f.model_dump() for f in added],
-            "removed": [f.model_dump() for f in removed],
+            "added": [unstructure(f) for f in added],
+            "removed": [unstructure(f) for f in removed],
         }
         self._send_notification(
             method="workspace/didChangeWorkspaceFolders", params=params
@@ -626,10 +595,10 @@ class Client:
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {}
-        params.update(text_document_position.model_dump())
+        params.update(unstructure(text_document_position))
         if context is not None:
             params.update( {
-                'context': context.model_dump(exclude_unset=True)
+                'context': unstructure(context)
             } )
         return self._send_request(method="textDocument/completion", params=params)
 
@@ -640,7 +609,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/semanticTokens/full",
-            params={"textDocument": text_document.model_dump()},
+            params={"textDocument": unstructure(text_document)},
         )
 
     def rename(
@@ -649,15 +618,16 @@ class Client:
         new_name: str,
     ) -> Id:
         assert self._state == ClientState.NORMAL
-        params = {}
-        params.update(text_document_position.model_dump())
-        params["newName"] = new_name
+        params = {
+            **unstructure(text_document_position),
+            "newName": new_name,
+        }
         return self._send_request(method="textDocument/rename", params=params)
 
     def hover(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
-            method="textDocument/hover", params=text_document_position.model_dump()
+            method="textDocument/hover", params=unstructure(text_document_position)
         )
 
     def folding_range(self, text_document: TextDocumentIdentifier) -> Id:
@@ -671,13 +641,13 @@ class Client:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/signatureHelp",
-            params=text_document_position.model_dump(),
+            params=unstructure(text_document_position),
         )
 
     def definition(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
-            method="textDocument/definition", params=text_document_position.model_dump()
+            method="textDocument/definition", params=unstructure(text_document_position)
         )
 
     def declaration(self, text_document_position: TextDocumentPosition) -> Id:
@@ -692,8 +662,8 @@ class Client:
         return self._send_request(
             method="textDocument/inlayHint",
             params={
-                "textDocument": text_document.model_dump(),
-                "range": range.model_dump(),
+                "textDocument": unstructure(text_document),
+                "range": unstructure(range),
             },
         )
 
@@ -701,14 +671,14 @@ class Client:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/typeDefinition",
-            params=text_document_position.model_dump(),
+            params=unstructure(text_document_position),
         )
 
     def references(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
             "context": {"includeDeclaration": True},
-            **text_document_position.model_dump(),
+            **unstructure(text_document_position),
         }
         return self._send_request(method="textDocument/references", params=params)
 
@@ -717,14 +687,14 @@ class Client:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/prepareCallHierarchy",
-            params=text_document_position.model_dump(),
+            params=unstructure(text_document_position),
         )
 
     def implementation(self, text_document_position: TextDocumentPosition) -> Id:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/implementation",
-            params=text_document_position.model_dump(),
+            params=unstructure(text_document_position),
         )
 
     def workspace_symbol(self, query: str = "") -> Id:
@@ -735,7 +705,7 @@ class Client:
         assert self._state == ClientState.NORMAL
         return self._send_request(
             method="textDocument/documentSymbol",
-            params={"textDocument": text_document.model_dump()},
+            params={"textDocument": unstructure(text_document)},
         )
 
     def formatting(
@@ -743,8 +713,8 @@ class Client:
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
-            "textDocument": text_document.model_dump(),
-            "options": options.model_dump(),
+            "textDocument": unstructure(text_document),
+            "options": unstructure(options),
         }
         return self._send_request(method="textDocument/formatting", params=params)
 
@@ -756,9 +726,9 @@ class Client:
     ) -> Id:
         assert self._state == ClientState.NORMAL
         params = {
-            "textDocument": text_document.model_dump(),
-            "range": range.model_dump(),
-            "options": options.model_dump(),
+            "textDocument": unstructure(text_document),
+            "range": unstructure(range),
+            "options": unstructure(options),
         }
         return self._send_request(method="textDocument/rangeFormatting", params=params)
 
