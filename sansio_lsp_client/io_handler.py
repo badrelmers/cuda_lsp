@@ -2,8 +2,6 @@ import json
 import re
 import typing as t
 
-from pydantic import TypeAdapter
-
 from .structs import JSONDict, JSONList, Request, Response, Id
 
 _CONTENT_TYPE_PARAM_RE = re.compile(r'(\w+)\s*=\s*(?:(?:"([^"]*)")|([^;,\s]*))')
@@ -179,8 +177,21 @@ def _parse_one_message(
     def parse_request_or_response(
         data: JSONDict,
     ) -> t.Union[Request, Response]:
-        del data["jsonrpc"]
-        return TypeAdapter(t.Union[Request, Response]).validate_python(data)
+        data = dict(data)
+        data.pop("jsonrpc", None)
+
+        if "method" in data:
+            return Request(
+                method=data["method"],
+                params=data.get("params"),
+                id=data.get("id"),
+            )
+
+        return Response(
+            id=data.get("id"),
+            result=data.get("result"),
+            error=data.get("error"),
+        )
 
     content = json.loads(raw_content.decode(encoding))
 
