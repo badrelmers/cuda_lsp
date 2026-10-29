@@ -320,7 +320,11 @@ class Client:
 
         elif method == "textDocument/hover":
             if response.result is not None:
-                event = Hover.model_validate(response.result)
+                try:
+                    event = Hover.model_validate(response.result)
+                except ValidationError as exc:
+                    print(f"While structuring Hover: {exc} | payload={response.result}")
+                    raise
             else:
                 event = Hover(contents=[])  # null response
             event.message_id = response.id
@@ -376,9 +380,15 @@ class Client:
 
         #GOTOs
         elif method == "textDocument/definition":
-            event = TypeAdapter(Definition).validate_python(
-                {"result": response.result}
-            )
+            try:
+                event = TypeAdapter(Definition).validate_python(
+                    {"result": response.result}
+                )
+            except ValidationError as exc:
+                print(
+                    f"While structuring Definition: {exc} | payload={response.result}"
+                )
+                raise
             event.message_id = response.id
 
         elif method == "textDocument/references":
@@ -387,9 +397,15 @@ class Client:
             )
 
         elif method == "textDocument/implementation":
-            event = TypeAdapter(Implementation).validate_python(
-                {"result": response.result}
-            )
+            try:
+                event = TypeAdapter(Implementation).validate_python(
+                    {"result": response.result}
+                )
+            except ValidationError as exc:
+                print(
+                    f"While structuring Implementation: {exc} | payload={response.result}"
+                )
+                raise
 
         elif method == "textDocument/declaration":
             event = TypeAdapter(Declaration).validate_python(
@@ -397,9 +413,15 @@ class Client:
             )
 
         elif method == "textDocument/typeDefinition":
-            event = TypeAdapter(TypeDefinition).validate_python(
-                {"result": response.result}
-            )
+            try:
+                event = TypeAdapter(TypeDefinition).validate_python(
+                    {"result": response.result}
+                )
+            except ValidationError as exc:
+                print(
+                    f"While structuring TypeDefinition: {exc} | payload={response.result}"
+                )
+                raise
 
         elif method == "textDocument/prepareCallHierarchy":
             event = TypeAdapter(MCallHierarchItems).validate_python(

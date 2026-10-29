@@ -163,6 +163,7 @@ class WillSaveWaitUntilEdits(Event):
 class PublishDiagnostics(ServerNotification):
     uri: str
     diagnostics: t.List[Diagnostic]
+    version: t.Optional[int] = None
 
 
 @attrs.define(slots=True)
