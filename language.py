@@ -654,12 +654,12 @@ class Language:
             pass;       LOG and print('NOTE: send_changes return: no opts')
             return
 
-        docsynckind = TextDocumentSyncKind( opts.get('syncKind', TextDocumentSyncKind.NONE) )
-        if docsynckind == TextDocumentSyncKind.NONE:
+        docsynckind = TextDocumentSyncKind( opts.get('syncKind', TextDocumentSyncKind.None_) )
+        if docsynckind == TextDocumentSyncKind.None_:
             pass;       LOG and print('send_changes return: NONE sync')
             return
 
-        _is_whole_doc = docsynckind == TextDocumentSyncKind.FULL
+        _is_whole_doc = docsynckind == TextDocumentSyncKind.Full
         _changes = eddoc.get_changes(whole_doc=_is_whole_doc)
         if not _changes:
             pass;       LOG and print('send_changes return: no changes')
@@ -1677,26 +1677,26 @@ class ServerConfig:
                 _opts = {**self._default_opts}
                 if isinstance(_save, dict):
                     _opts.update(_save)
-                self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, registerOptions=_opts))
+                self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, register_options=_opts))
         
         if isinstance(docsync, int):
-            self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, registerOptions=self._default_opts))
+            self.capabs.append(Registration(id='0', method=METHOD_DID_SAVE, register_options=self._default_opts))
 
         #  OPEN, CLOSE
         if is_openclose:
-            open = Registration(id='0', method=METHOD_DID_OPEN, registerOptions=self._default_opts)
-            close = Registration(id='0', method=METHOD_DID_CLOSE, registerOptions=self._default_opts)
+            open = Registration(id='0', method=METHOD_DID_OPEN, register_options=self._default_opts)
+            close = Registration(id='0', method=METHOD_DID_CLOSE, register_options=self._default_opts)
             self.capabs += [open, close]
 
         # CHANGE
         if isinstance(docsync, dict):
-            _default_sync = int(TextDocumentSyncKind.NONE)
+            _default_sync = int(TextDocumentSyncKind.None_)
             docsynckind = TextDocumentSyncKind(docsync.get('change', _default_sync))
         else:
             docsynckind = TextDocumentSyncKind(docsync)
 
         _opts = {**self._default_opts, 'syncKind': docsynckind}
-        self.capabs.append(Registration(id='0', method=METHOD_DID_CHANGE, registerOptions=_opts))
+        self.capabs.append(Registration(id='0', method=METHOD_DID_CHANGE, register_options=_opts))
 
 
         ### WORKSPACE
@@ -1709,7 +1709,7 @@ class ServerConfig:
                 'supported': wsfolders.get('supported', False),
                 'changeNotifications': wsfolders.get('changeNotifications', False),
             }
-            _reg = Registration(id='0', method=METHOD_WS_FOLDERS, registerOptions=_opts)
+            _reg = Registration(id='0', method=METHOD_WS_FOLDERS, register_options=_opts)
             self.capabs.append(_reg)
 
 
@@ -1725,7 +1725,7 @@ class ServerConfig:
                 if 'documentSelector' in capval and not capval['documentSelector']:
                      del capval['documentSelector']
                 _opts.update(capval)
-            self.capabs.append(Registration(id='0', method=meth, registerOptions=_opts))
+            self.capabs.append(Registration(id='0', method=meth, register_options=_opts))
 
     def on_register(self, dynreg):
         """ process dynamic registration request: RegisterMethodRequest
@@ -1734,10 +1734,10 @@ class ServerConfig:
         # "If set to null the document selector provided on the client side will be used." (c) LSP spec
         reg: Registration
         for reg in dynreg.registrations:
-            if not isinstance(reg.registerOptions, dict):
-                reg.registerOptions = self._default_opts
-            elif 'documentSelector' not in reg.registerOptions:
-                reg.registerOptions['documentSelector'] = self._default_selector
+            if not isinstance(reg.register_options, dict):
+                reg.register_options = self._default_opts
+            elif 'documentSelector' not in reg.register_options:
+                reg.register_options['documentSelector'] = self._default_selector
 
         self.capabs.extend(dynreg.registrations)
 
@@ -1753,7 +1753,7 @@ class ServerConfig:
             for registration in self.capabs:
                 if registration.method == method_name:
                     if ServerConfig.match_capability(registration, ed_self, langid):
-                        return registration.registerOptions
+                        return registration.register_options
 
             if method_name not in AUTO_METHODS:
                 print(f'NOTE: {LOG_NAME}: {self.lang_str} - unsupported method: {method_name}')
@@ -1761,7 +1761,7 @@ class ServerConfig:
         elif method_name.startswith('workspace/'):
             for registration in self.capabs:
                 if registration.method == method_name:
-                    return registration.registerOptions
+                    return registration.register_options
 
         elif LOG:
             print(f'NOTE: {LOG_NAME}: odd method: {method_name}')
@@ -1770,7 +1770,7 @@ class ServerConfig:
     # "selector is one ore more filters"
     def match_capability(registration, ed_self, langid):
 
-        filters = registration.registerOptions.get('documentSelector', [])
+        filters = registration.register_options.get('documentSelector', [])
         # allowing empty selector on workspace methods  (ok?)
         #   example: Registration(id='...', method='workspace/symbol', registerOptions={}),
         if not filters:
