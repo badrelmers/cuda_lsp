@@ -50,12 +50,12 @@ class MethodResponse(Event):
 
 @attrs.define
 class ResponseError(Event):
-    message_id: t.Optional[Id] = None
     code: int = attrs.field()
     message: str = attrs.field()
     data: t.Optional[
         t.Union[str, int, float, bool, t.List[t.Any], JSONDict, None]
     ] = attrs.field(default=None)
+    message_id: t.Optional[Id] = attrs.field(default=None)
 
 
 @attrs.define
@@ -203,9 +203,9 @@ class SignatureHelp(MethodResponse):
 
 @attrs.define
 class SemanticTokens(Event):
+    data: t.List[int] = attrs.field()
     message_id: t.Optional[Id] = attrs.field(default=None)
     resultId: t.Optional[str] = attrs.field(default=None)
-    data: t.List[int] = attrs.field()
 
 
 @attrs.define
@@ -217,8 +217,8 @@ class Definition(MethodResponse):
 
 @attrs.define
 class WorkspaceEdit(MethodResponse):
-    changes: t.Optional[t.Dict[str, t.List[TextEdit]]] = attrs.field(default=None)
     documentChanges: t.Optional[t.List[TextDocumentEdit]] = attrs.field(default=None)
+    changes: t.Optional[t.Dict[str, t.List[TextEdit]]] = attrs.field(default=None)
 
 
 @attrs.define
