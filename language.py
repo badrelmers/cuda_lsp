@@ -839,45 +839,60 @@ class Language:
         elif msgtype == lsp_types.Hover:
             if message_id in self.request_positions:
                 _reqpos = self.request_positions.pop(message_id)
+                
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
-                    first_item = msg.contents[0] if isinstance(msg.contents, list) and len(msg.contents) > 0 else msg.contents
-                    if first_item:
-                        if isinstance(first_item, str) or hasattr(first_item, 'language'):
-                            # For MarkedStringWithLanguage or deprecated 'MarkedString' or 'str' default to 'markdown'
-                            markupkind = lsp_types.MarkupKind.Markdown
-                        else:
-                            # It's MarkupContent or similar
-                            markupkind = getattr(first_item, 'kind', None)
+                    # 1. Normalize contents to a list for consistent processing
+                    contents = msg.contents
+                    if not isinstance(contents, list):
+                        items = [contents] if contents else []
+                    else:
+                        items = contents
+
+                    if items:
+                        # 2. Define a parser for any version of LSP Hover content
+                        def parse_item(item):
+                            """Returns (text_value, markup_kind, language_id)"""
+                            # Case: Simple string (Deprecated but common)
+                            if isinstance(item, str):
+                                return item, lsp_types.MarkupKind.Markdown, None
+                            
+                            # Case: MarkupContent (The modern standard)
+                            if isinstance(item, lsp_types.MarkupContent):
+                                return item.value, item.kind, None
+                            
+                            # Case: MarkedStringWithLanguage (Deprecated code blocks)
+                            # We wrap this in markdown fences so the UI can highlight it. This ensures that even if our Hint renderer only understands Markdown, the code snippet will still be highlighted correctly.
+                            if hasattr(item, 'language') and hasattr(item, 'value'):
+                                lang = item.language
+                                val = f"```{lang}\n{item.value}\n```"
+                                return val, lsp_types.MarkupKind.Markdown, lang
+                            
+                            return str(item), lsp_types.MarkupKind.PlainText, None
+
+                        # 3. Extract data from all items
+                        parsed_items = [parse_item(it) for it in items]
+                        
+                        # Use the first item to determine the Hint's primary metadata
+                        # (The renderer usually uses one highlight mode for the whole hint)
+                        _, main_kind, main_lang = parsed_items[0]
+                        
+                        # 4. Combine all items into one string for display
+                        # When there are multiple items in a hover (common in languages like Rust or C++), it joins them with a thematic break (---), which is the standard way to separate hover sections in VS Code and other editors.
+                        full_text = "\n\n---\n\n".join(it[0] for it in parsed_items)
 
                         filtered_cmds = self.scfg.filter_commands(self._caret_cmds)
-                        
-                        # Helper function to convert hover to string
-                        def hover_to_str(contents):
-                            def item_str(item):
-                                # Check actual types
-                                if isinstance(item, str):
-                                    return item
-                                elif hasattr(item, 'language'): # MarkedStringWithLanguage
-                                    return f"[{item.language}]\n{item.value}"
-                                elif hasattr(item, 'kind'): # MarkupContent
-                                    return f"[{item.kind}]\n{item.value}"
-                                else:
-                                    return str(item)
-                            
-                            if isinstance(contents, list):
-                                return "\n".join(item_str(item) for item in contents)
-                            return item_str(contents)
-                        
-                        Hint.show(hover_to_str(msg.contents),
-                                caret=_reqpos.target_pos_caret,
-                                cursor_loc_start=_reqpos.cursor_ed,
-                                markupkind=markupkind,
-                                language=getattr(first_item, 'language', None),
-                                caret_cmds=filtered_cmds,
+
+                        Hint.show(
+                            full_text,
+                            caret=_reqpos.target_pos_caret,
+                            cursor_loc_start=_reqpos.cursor_ed,
+                            markupkind=main_kind,
+                            language=main_lang,
+                            caret_cmds=filtered_cmds,
                         )
                     else:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Hover - no info')
-
+                        
         elif msgtype == events.SignatureHelp:
             if message_id in self.request_positions:
                 _reqpos = self.request_positions.pop(message_id)
