@@ -71,15 +71,13 @@ InlayHintLabelPart = lsp_types.InlayHintLabelPart
 FoldingRange = lsp_types.FoldingRange
 Registration = lsp_types.Registration
 DocumentFilter = lsp_types.DocumentFilter
-DocumentSelector = lsp_types.DocumentSelector
-CompletionOptionsCompletionItem = lsp_types.CompletionOptionsCompletionItem
+CompletionOptions = lsp_types.CompletionOptions
 CompletionRegistrationOptions = lsp_types.CompletionRegistrationOptions
 ConfigurationItem = lsp_types.ConfigurationItem
-ProgressValue = lsp_types.ProgressValue
-WorkDoneProgressValue = lsp_types.WorkDoneProgressValue
-WorkDoneProgressBeginValue = lsp_types.WorkDoneProgressBeginValue
-WorkDoneProgressReportValue = lsp_types.WorkDoneProgressReportValue
-WorkDoneProgressEndValue = lsp_types.WorkDoneProgressEndValue
+ProgressToken = lsp_types.ProgressToken
+WorkDoneProgressBegin = lsp_types.WorkDoneProgressBegin
+WorkDoneProgressReport = lsp_types.WorkDoneProgressReport
+WorkDoneProgressEnd = lsp_types.WorkDoneProgressEnd
 
 
 Range = lsp_types.Range
