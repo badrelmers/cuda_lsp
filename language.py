@@ -100,9 +100,9 @@ GOTO_EVENT_TYPES = {
     events.Declaration,
 }
 CALLABLE_COMPLETIONS = {
-    CompletionItemKind.METHOD,
-    CompletionItemKind.FUNCTION,
-    CompletionItemKind.CONSTRUCTOR,
+    CompletionItemKind.Method,
+    CompletionItemKind.Function,
+    CompletionItemKind.Constructor,
     #CompletionItemKind.CLASS,
 }
 
@@ -1334,18 +1334,18 @@ TOKENS_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')
 DIAG_BM_TAG = app_proc(PROC_GET_UNIQUE_TAG, '') # jic
 _icons_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'icons')
 DIAG_BM_IC_PATHS = {
-    DiagnosticSeverity.ERROR       : os.path.join(_icons_dir, 'error.png'),
-    DiagnosticSeverity.WARNING     : os.path.join(_icons_dir, 'warning.png'),
-    DiagnosticSeverity.INFORMATION : os.path.join(_icons_dir, 'information.png'),
-    DiagnosticSeverity.HINT        : os.path.join(_icons_dir, 'hint.png'),
+    DiagnosticSeverity.Error       : os.path.join(_icons_dir, 'error.png'),
+    DiagnosticSeverity.Warning     : os.path.join(_icons_dir, 'warning.png'),
+    DiagnosticSeverity.Information : os.path.join(_icons_dir, 'information.png'),
+    DiagnosticSeverity.Hint        : os.path.join(_icons_dir, 'hint.png'),
 }
 DIAG_BM_KINDS = {
-    DiagnosticSeverity.ERROR       : 50,
-    DiagnosticSeverity.WARNING     : 51,
-    DiagnosticSeverity.INFORMATION : 52,
-    DiagnosticSeverity.HINT        : 53,
+    DiagnosticSeverity.Error       : 50,
+    DiagnosticSeverity.Warning     : 51,
+    DiagnosticSeverity.Information : 52,
+    DiagnosticSeverity.Hint        : 53,
 }
-DIAG_DEFAULT_SEVERITY = DiagnosticSeverity.INFORMATION # *shrug*
+DIAG_DEFAULT_SEVERITY = DiagnosticSeverity.Information # *shrug*
 
 class DiagnosticsMan:
     """ * Command.on_tab_change() ->
