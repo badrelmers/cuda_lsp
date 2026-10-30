@@ -45,6 +45,7 @@ wraps every call and reports failures as panel errors instead.
 """
 
 import json
+import re
 
 from cudatext import msg_status
 
@@ -263,6 +264,61 @@ def on_unresolved_dependencies(session, params):
          _short(f'unresolved dependencies in {fname}: {listed or "?"}', 300),
          SEVERITY_WRN)
     _status(session, _short(f'unresolved dependencies: {fname}', 100))
+
+
+# --------------------------------------------------------------------------
+# window/logMessage annotations (not o#/... methods, but OmniSharp-specific)
+# --------------------------------------------------------------------------
+
+# OmniSharpWorkspace.cs logs: "Miscellaneous file: {filePath} added to
+# workspace" - arrives wrapped as "OmniSharp.OmniSharpWorkspace: ... | "
+_MISC_RE = re.compile(r'Miscellaneous file:\s*(.*?)\s+added to workspace')
+
+
+def note_misc_file(session, params):
+    """ Detect OmniSharp's 'Miscellaneous file: X added to workspace'
+    logMessage and explain what it means for the user: X lives outside every
+    project the server loaded, so OmniSharp puts it into its hardcoded
+    virtual 'OmniSharpMiscProject' - which gets *syntax-only* diagnostics
+    (CSharpDiagnosticWorkerWithAnalyzers: misc project -> plain
+    syntaxTree.GetDiagnostics()). Semantic/analyzer diagnostics (unused
+    usings, IDE hints, unresolved symbols...) require the file to be inside a
+    real project: set the server config 'work_dir' to the solution/project
+    folder (rootUri is sent from it) or open that project in CudaText.
+
+    Deduped per file path; never raises.
+    """
+    try:
+        if _is_dict(params):
+            message = params.get('message')
+        else:
+            # typed lsp.LogMessageParams from the normal dispatch path
+            message = getattr(params, 'message', None)
+        if not isinstance(message, str):
+            return
+        match = _MISC_RE.search(message)
+        if match is None:
+            return
+
+        path = match.group(1).strip().strip('"')
+        fname = _basename(path) or '?'
+
+        noted = getattr(session, '_omnisharp_misc_noted', None)
+        if noted is None:
+            noted = session._omnisharp_misc_noted = set()
+        if path in noted:
+            return
+        noted.add(path)
+
+        _log(session,
+             f"'{fname}' is not in any loaded OmniSharp project (misc file): "
+             f"only syntax diagnostics are provided; for full diagnostics set "
+             f"'work_dir' to the project/solution folder (or open it as a "
+             f"CudaText project) and restart the server",
+             SEVERITY_WRN)
+        _status(session, f'misc file (no project): {fname} - syntax-only diagnostics')
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------

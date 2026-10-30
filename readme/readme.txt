@@ -93,6 +93,20 @@ formatting.
 Log 'stderr' of server's process to log-panel (off by default):
   "log_stderr": true
 
+Working directory for the server's process; it is also sent to the server as the
+workspace root (rootUri) in 'initialize'. Project-aware servers (OmniSharp,
+clangd...) discover projects from that folder: without it the server picks its
+own location, and files outside every loaded project only get limited
+diagnostics (e.g. OmniSharp gives syntax-only diagnostics for such "misc" files):
+  "work_dir": "C:\\path\\to\\project_or_solution"
+
+Re-send the full document text as a single 'textDocument/didChange' right after
+'textDocument/didOpen' (on by default). Needed for servers which discard the
+didOpen buffer for documents they don't know yet (OmniSharp up to v1.39.x shows
+no diagnostics for such files until the first edit or save); well-behaved
+servers just see one harmless full-text sync with identical content:
+  "resync_after_open": false
+
 How to disable auto-completion in "comments" and "strings". Overrides the same global option.
 If "c" in value - disable in "comments"; if "s" in value - disable in "strings".
 User must remove "s" from value for LSP servers that can auto-complete inside quotes

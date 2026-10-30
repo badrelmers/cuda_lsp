@@ -174,6 +174,18 @@ class EditorDoc:
     def on_save(self):
         pass
 
+    def get_fulltext_change(self):
+        """ Single range-less (whole-document) change event with the entire
+        current text - used by the didOpen resync (Language.resync_after_open)
+        to force servers like OmniSharp (which discards the didOpen buffer
+        for files outside any loaded project) to register the document.
+        Unlike get_changes() it fires even when the text is unchanged since
+        open, and bumps the version the same way.
+        """
+        self._txt = self.get_text_all()
+        self._ver += 1
+        return [lsp.TextDocumentContentChangeWholeDocument(text=self._txt)]
+
     def get_verdoc(self):
         return lsp.VersionedTextDocumentIdentifier(uri=self.uri, version=self.ver)
 

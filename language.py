@@ -41,7 +41,7 @@ from .util import (
     )
 from .dlg import Hint, SEVERITY_MAP, SignaturesDialog, TYPE_DIAG
 from .dlg import PanelLog, SEVERITY_ERR, SEVERITY_LOG, SEVERITY_NA, SEVERITY_WRN
-from .dlg import TYPE_SPY, TYPE_UNHANDLED
+from .dlg import TYPE_SPY, TYPE_UNHANDLED, TYPE_LOG
 from . import omnisharp
 from .book import EditorDoc
 #from .tree import TreeMan  # imported on access
@@ -164,6 +164,10 @@ class Language:
         self._log_stderr = bool(cfg.get('log_stderr'))
         self._format_on_save = bool(cfg.get('format_on_save'))
         self._disabled_contexts_for_server = cfg.get('disabled_contexts')
+        # Re-send the full document text as one didChange right after didOpen
+        # (works around servers which discard the didOpen buffer for unknown
+        # documents - OmniSharp <= 1.39 shows no diagnostics until then)
+        self._resync_after_open = bool(cfg.get('resync_after_open', True))
 
         self._validate_config()
 
@@ -270,6 +274,21 @@ class Language:
 
 
     def _start_server(self):
+
+        if not self._work_dir:
+            # No root will be sent (rootUri/workspaceFolders stay null):
+            # project-aware servers (OmniSharp, clangd with compilation
+            # database...) then fall back to their own startup location for
+            # project discovery - make that visible once, it is the usual
+            # reason for 'missing' project-scoped features/diagnostics.
+            note = (_("{}: {} - no 'work_dir'/CudaText project set: rootUri is "
+                      "not sent and the server picks its own location for "
+                      "project discovery; set 'work_dir' in the server config "
+                      "(or open a CudaText project) for project-aware servers "
+                      "like OmniSharp").format(LOG_NAME, self.lang_str))
+            print(note)
+            self.plog.log_str(note, type_=TYPE_LOG, severity=SEVERITY_WRN,
+                              scroll=True)
 
         def connect_via_tcp():
             print(_('{}: {} - connecting via TCP, port: {}').format(
@@ -641,6 +660,7 @@ class Language:
             # abandoning server - ignore logs
             if self._shutting_down is not None:
                 return
+            omnisharp.note_misc_file(self, msg.params)
             self.plog.log(msg.params)
 
         elif msgtype is lsp.ShowMessageNotification:
@@ -828,7 +848,38 @@ class Language:
                 eddoc.on_open(lang=self)
                 doc = eddoc.get_textdoc()
                 self.client.did_open(doc)
+                self.resync_after_open(eddoc)
                 return True
+
+    def resync_after_open(self, eddoc):
+        """ Re-send the whole document text as a single didChange right after
+        didOpen (opt-out per server: 'resync_after_open': false).
+
+        Why: some servers mishandle didOpen for documents they don't know
+        yet. OmniSharp (<= 1.39.x) runs its 'FileOpen' handler, which only
+        'opens' documents already loaded from a project - the buffer text
+        sent with didOpen is *discarded* for out-of-project files, and such
+        'miscellaneous' files are registered (and get diagnostics) only when
+        a full-text didChange or a didSave-with-text arrives. The visible
+        effect was: no diagnostics at all until the first edit or save.
+        One range-less (full-text) didChange right after didOpen registers
+        the buffer immediately, so diagnostics appear on open. Well-behaved
+        servers just see one harmless full-text sync with identical content.
+        """
+        if not self._resync_after_open:
+            return
+        opts = self.scfg.method_opts(METHOD_DID_CHANGE, eddoc)
+        if opts is None:
+            return
+        docsynckind = lsp.TextDocumentSyncKind(
+            opts.get('syncKind', lsp.TextDocumentSyncKind.None_))
+        if docsynckind == lsp.TextDocumentSyncKind.None_:
+            return
+
+        _changes = eddoc.get_fulltext_change()    # bumps the doc version
+        _verdoc = eddoc.get_verdoc()              # so take the version AFTER it
+        self.client.did_change(text_document=_verdoc, content_changes=_changes)
+        self._timer.restart()
 
 
     def on_close(self, eddoc):
@@ -1558,10 +1609,12 @@ class DiagnosticsMan:
             return
         if len(diag_list) > 0  or  self.uri_diags.get(uri):
             self.uri_diags[uri] = diag_list
+            applied = False
             for ed in get_visible_eds():
                 if uri_to_path(uri) == uri_to_path(ed_uri(ed)):
                     self._apply_diagnostics(ed, diag_list)
-            else: # not visible, update when visible
+                    applied = True
+            if not applied: # not visible, update when visible
                 self.dirtys.add(uri)
 
     def _apply_diagnostics(self, ed: Editor, diag_list):
@@ -1822,13 +1875,22 @@ class ServerConfig:
         """ capabilities - lsp.ServerCapabilities (from lsp.InitializeResponse)
         """
         self.capabs = [] # lsp.Registration (registerOptions stays a raw dict)
+        # Registrations guessed from the STATIC initialize capabilities.
+        # A later dynamic registration of the same method supersedes them:
+        # e.g. OmniSharp announces no textDocumentSync at all, then registers
+        # didOpen/didChange/didSave dynamically with the real options - the
+        # pseudo didChange entry (syncKind None) must not keep winning in
+        # method_opts(), or no didChange would ever be sent to the server.
+        self._pseudo_regs = [] # same objects as in self.capabs, by identity
         self.lang_str = lang_str
 
         self._default_selector = [{'language': langid}  for langid in langids]
         self._default_opts = {'documentSelector': self._default_selector}
 
         def reg(method, opts):
-            self.capabs.append(lsp.Registration(id='0', method=method, register_options=opts))
+            r = lsp.Registration(id='0', method=method, register_options=opts)
+            self.capabs.append(r)
+            self._pseudo_regs.append(r)
 
         # textDocumentSync: TextDocumentSyncKind | TextDocumentSyncOptions | None
         docsync = capabilities.text_document_sync
@@ -1901,6 +1963,17 @@ class ServerConfig:
     def on_register(self, registrations):
         """ process dynamic registration request (lsp.RegistrationParams.registrations)
         """
+        # dynamic registrations supersede the static-capability pseudo
+        # entries of the same method (by identity, attrs __eq__ is by value)
+        new_methods = {reg.method for reg in registrations}
+        if new_methods:
+            dropped = [r for r in self._pseudo_regs if r.method in new_methods]
+            if dropped:
+                for r in dropped:
+                    self._pseudo_regs.remove(r)
+                self.capabs = [c for c in self.capabs
+                               if not any(c is r for r in dropped)]
+
         # check for 'documentSelector' in registerOptions
         # "If set to null the document selector provided on the client side will be used." (c) LSP spec
         reg: lsp.Registration
@@ -2568,13 +2641,16 @@ def expand_dict_dots(a):
 def get_dict_section(j, path):
     """Gets dictionary section by path like "python.analysis"
     Dot is a delimiter.
+    Returns None when any part of the path is missing: per the LSP spec,
+    a 'workspace/configuration' item whose section is not found must be
+    answered with null (returning the whole parent settings dict made
+    OmniSharp bind the entire settings object as its 'csharp' section).
     """
     temp_json = j
     for section in path.split('.'):
-        if section not in temp_json.keys():
-            break
-        else:
-            temp_json = temp_json[section]
+        if not isinstance(temp_json, dict) or section not in temp_json:
+            return None
+        temp_json = temp_json[section]
     return temp_json
 
 def debug_completion():
