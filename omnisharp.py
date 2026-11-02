@@ -39,17 +39,36 @@ Progress-type events (status) only touch the status bar; discrete events
 panel's 'Spy' category regardless. Unknown future ``o#/...`` methods (none of
 the above) still go through the loud 'Unhandled' notification path.
 
+Besides ``o#/...`` events, OmniSharp-specific ``window/logMessage`` texts are
+recognized: 'Miscellaneous file: X added to workspace' (explained to the
+user + recorded for the didClose tracking below) and the harmless
+"Failed to handle request textDocument/didClose ... 'X' is not open" error
+(rendered as one compact line instead of the raw stack trace).
+
+Finally this module works around an OmniSharp (<= 1.39.x) didOpen/didClose
+asymmetry, verified in its source: didOpen only 'opens' documents already
+loaded from a project (for other files it silently does nothing and discards
+the buffer text), while a full-text didChange/didSave registers such a file
+as a 'miscellaneous' document in CLOSED state - so didClose on that
+never-opened document throws "'X' is not open" inside OmniSharp (logged as
+an error, but harmless: didClose is a notification, nothing fails for the
+client). While a file is tracked as misc-registered-without-a-later-didOpen,
+``skip_did_close()`` tells the caller to not send didClose at all (the server
+has nothing open to close); ``on_did_open_sent()`` clears the tracking.
+
 All handlers are defensive: payloads are non-spec and vary between OmniSharp
 versions, so nothing here may raise - ``handle_omnisharp_notification()``
 wraps every call and reports failures as panel errors instead.
 """
 
 import json
+import os
 import re
 
 from cudatext import msg_status
 
 from .dlg import TYPE_OMNISHARP, SEVERITY_ERR, SEVERITY_INFO, SEVERITY_WRN
+from .util import uri_to_path
 
 
 LOG_NAME = 'LSP'
@@ -66,6 +85,22 @@ def _basename(path):
     if not isinstance(path, str) or not path:
         return '?'
     return path.replace('\\', '/').rstrip('/').rsplit('/', 1)[-1]
+
+
+def _norm_path(path):
+    """ Canonical comparison form of a file path: server-provided paths may
+    use either separator style, on Windows paths are case-insensitive. A
+    leading slash in front of a windows drive letter ('/F:/x' == 'F:/x') is
+    tolerated, so paths still match when client and server disagree about
+    the host OS path style (e.g. a windows server under wine).
+    """
+    if not isinstance(path, str) or not path:
+        return ''
+    p = path.replace('\\', '/')
+    if len(p) >= 3 and p[0] == '/' and p[2] == ':' and p[1].isalpha():
+        p = p[1:]
+    p = p.rstrip('/')
+    return p.casefold() if os.name == 'nt' else p
 
 
 def _short(s, limit):
@@ -310,6 +345,14 @@ def note_misc_file(session, params):
             return
         noted.add(path)
 
+        # server-side open-state tracking for didClose (see skip_did_close):
+        # the misc document is added in CLOSED state - only a didOpen that
+        # arrives AFTER this registration opens it
+        closed = getattr(session, '_omnisharp_doc_closed', None)
+        if closed is None:
+            closed = session._omnisharp_doc_closed = set()
+        closed.add(_norm_path(path))
+
         _log(session,
              f"'{fname}' is not in any loaded OmniSharp project (misc file): "
              f"only syntax diagnostics are provided; for full diagnostics set "
@@ -319,6 +362,105 @@ def note_misc_file(session, params):
         _status(session, f'misc file (no project): {fname} - syntax-only diagnostics')
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------
+# didClose for OmniSharp 'misc' files (server-side asymmetry workaround)
+# --------------------------------------------------------------------------
+
+def on_did_open_sent(session, eddoc):
+    """ Call right after textDocument/didOpen was sent for eddoc: from now
+    on the server-side document (if any) is open, so a later didClose is
+    safe again. Never raises.
+    """
+    try:
+        closed = getattr(session, '_omnisharp_doc_closed', None)
+        if closed:
+            closed.discard(_norm_path(uri_to_path(eddoc.uri)))
+    except Exception:
+        pass
+
+
+def skip_did_close(session, eddoc):
+    """ True when textDocument/didClose must NOT be sent for eddoc (see the
+    module docstring for the OmniSharp asymmetry this works around).
+
+    Logs one explanatory panel line per file. Never raises: on any internal
+    error didClose is sent anyway (a server-side log error is better than a
+    lost close).
+    """
+    try:
+        closed = getattr(session, '_omnisharp_doc_closed', None)
+        if not closed:
+            return False
+        raw_path = uri_to_path(eddoc.uri)
+        key = _norm_path(raw_path)
+        if not key or key not in closed:
+            return False
+
+        noted = getattr(session, '_omnisharp_didclose_skip_noted', None)
+        if noted is None:
+            noted = session._omnisharp_didclose_skip_noted = set()
+        if key not in noted:
+            noted.add(key)
+            fname = _basename(raw_path) or '?'
+            _log(session,
+                 f"didClose skipped for '{fname}': OmniSharp-side document "
+                 f"was never opened (out-of-project 'misc' file); OmniSharp's "
+                 f"didClose handler would throw \"'{fname}' is not open\". "
+                 f"Nothing is lost - reopening the file works normally",
+                 SEVERITY_WRN)
+        return True
+    except Exception:
+        return False
+
+
+# Roslyn's exception text inside OmniSharp's didClose failure log
+_DIDCLOSE_ERR_RE = re.compile(r"'([^']*)' is not open")
+
+
+def note_didclose_error(session, params):
+    """ Safety net for the error described above: recognize OmniSharp's
+    'Failed to handle request textDocument/didClose ... \'X\' is not open'
+    logMessage and render ONE compact line instead of the raw
+    multi-kilobyte stack trace (the full JSON stays visible in the 'Spy'
+    category anyway). Covers cases the tracking could not catch, e.g. a
+    server config with "resync_after_open": false, where the misc
+    registration is triggered by the very didChange that on_close sends
+    right before didClose - too late for skip_did_close to see it.
+
+    Returns True when the message was consumed - the caller must then not
+    run the generic LogMessage rendering for it. Never raises.
+    """
+    try:
+        if _is_dict(params):
+            message = params.get('message')
+        else:
+            message = getattr(params, 'message', None)
+        if not isinstance(message, str):
+            return False
+        if 'Failed to handle request textDocument/didClose' not in message:
+            return False
+        match = _DIDCLOSE_ERR_RE.search(message)
+        if match is None or 'System.ArgumentException' not in message:
+            return False
+
+        fname = _basename(match.group(1)) or '?'
+
+        noted = getattr(session, '_omnisharp_didclose_err_noted', None)
+        if noted is None:
+            noted = session._omnisharp_didclose_err_noted = set()
+        if fname in noted:
+            return True
+        noted.add(fname)
+
+        _log(session,
+             f"OmniSharp rejected didClose ('{fname}' is not open): harmless, "
+             f"ignored - the out-of-project file was never opened server-side",
+             SEVERITY_WRN)
+        return True
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------

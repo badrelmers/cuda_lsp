@@ -661,7 +661,10 @@ class Language:
             if self._shutting_down is not None:
                 return
             omnisharp.note_misc_file(self, msg.params)
-            self.plog.log(msg.params)
+            if omnisharp.note_didclose_error(self, msg.params):
+                pass    # consumed: one compact line instead of a stack dump
+            else:
+                self.plog.log(msg.params)
 
         elif msgtype is lsp.ShowMessageNotification:
             self.plog.log(msg.params)
@@ -849,6 +852,9 @@ class Language:
                 doc = eddoc.get_textdoc()
                 self.client.did_open(doc)
                 self.resync_after_open(eddoc)
+                # the server-side doc (if any) is open from now on, so a
+                # later didClose is safe (OmniSharp misc-file tracking)
+                omnisharp.on_did_open_sent(self, eddoc)
                 return True
 
     def resync_after_open(self, eddoc):
@@ -893,6 +899,14 @@ class Language:
                 pass;       LOG and print(' --- closing '+eddoc.uri)
 
                 self.send_changes(eddoc) # for later: server can give edits on save
+
+                if omnisharp.skip_did_close(self, eddoc):
+                    # OmniSharp asymmetry: the server-side document exists
+                    # (registered as a 'misc' file by a full-text
+                    # didChange/didSave) but was never OPENED - didClose would
+                    # make OmniSharp log "'X' is not open" (harmless, noisy)
+                    eddoc.on_close()
+                    return
 
                 docid = eddoc.get_docid()
                 self.client.did_close(docid)
