@@ -1731,14 +1731,21 @@ class DiagnosticsMan:
         self._setup_bookmark_gutter()
 
     def on_doc_shown(self, eddoc):
+        """ The doc's editor became the visible one (tab switched to it).
+        The panel must show THIS doc's diagnostics - it may hold another
+        doc's block: diags are logged to the panel when they arrive (doc
+        visible), and nothing replaced them when focus moved away.
+
+        So ALWAYS re-apply the doc's stored diagnostics (or none - then
+        the panel's diag block is cleared). Idempotent: gutter
+        marks/underlines are cleared then re-set, panel diag messages are
+        cleared (logger.clear_diagnostics) then re-added with the same
+        content. """
         if not self._linttype:
             return
 
-        # if dirty - update
-        if eddoc.uri in self.dirtys:
-            self.dirtys.remove(eddoc.uri)
-
-            self._apply_diagnostics(eddoc.ed, self.uri_diags[eddoc.uri])
+        self.dirtys.discard(eddoc.uri)
+        self._apply_diagnostics(eddoc.ed, self.uri_diags.get(eddoc.uri, []))
 
     def set_diagnostics(self, uri, diag_list):
         if not self._linttype:

@@ -780,25 +780,28 @@ class Command:
         global json
         import json
 
-        # existing instances which match this document
+        proj_root, proj_dirs = get_workspace_roots(ed_self.get_filename())
+
+        # existing instances which match this document BY CAPABILITY. That
+        # is not enough to pick one: a server's documentSelector patterns
+        # match ANY suitable file (OmniSharp registers didOpen for
+        # '**/*.cs'), so matches can contain instances of OTHER folders -
+        # _match_lang picks the right one, or None when it doesn't exist
+        # yet (then it is created below)
         matches = [lang for lang in self._langs.values()
                    if lang.is_ed_matches(ed_self, langid)]
         if matches:
-            lang = self._match_lang(matches, ed_self, langid)
-            pass;   LOG and print(f'* matched existing lang: {ed_self, langid} -- {lang.name}')
-            return lang
+            lang = self._match_lang(matches, ed_self, langid, proj_dirs)
+            if lang is not None:
+                pass;   LOG and print(f'* matched existing lang: {ed_self, langid} -- {lang.name}')
+                return lang
 
-        # no instance matches: create one from the server configs
+        # no suitable instance: create one from the server configs
         for cfg in servers_cfgs:
             if langid not in cfg.get('langids', []):
                 continue
 
             single_root = self._is_single_root_cfg(cfg)
-
-            # project folders (all of them) go as LSP workspaceFolders;
-            # the root (rootUri/cwd) is the folder of the opened file's
-            # project when set, else the server config's 'work_dir'
-            proj_root, proj_dirs = get_workspace_roots(ed_self.get_filename())
 
             if single_root:
                 # one instance per folder: pick/create the instance of the
@@ -811,6 +814,13 @@ class Command:
                 # 'misc' instance below (single instance over all folders,
                 # like the pre-multiroot behaviour - the file gets
                 # syntax-only diagnostics there instead of no server at all)
+
+            # misc/multi-root instance: reuse the existing one - it can be
+            # missing from 'matches' while still initializing (capabilities
+            # not yet arrived) and must not be duplicated
+            existing = self._langs.get(cfg['name'])
+            if existing is not None:
+                return existing
 
             # multi-root server - or the 'misc' instance of a single-root
             # server: single instance, all folders
@@ -837,15 +847,45 @@ class Command:
         # its capabilities arrive; on_lang_inited re-opens the docs then)
         return self._langs.get(langid)
 
-    def _lookup_lang(self, ed_self, langid):
-        """ Final lookup after creations: the instance which matches the
-        document, preferring the file's folder among single-root instances.
+    def _match_lang(self, matches, ed_self, langid, proj_dirs=None):
+        """ Pick the instance which should serve the document from
+        'matches' (instances whose capability patterns match the file), or
+        None when the right instance doesn't exist yet - the caller must
+        then create it. Capability patterns alone can't decide: OmniSharp
+        registers didOpen for '**/*.cs', so an instance of ANOTHER folder
+        matches too. Priority:
+        1. a multi-root (non-single-root) instance - it serves everything;
+        2. the folder-bound instance whose folder contains the file;
+        3. None - the file is inside a project folder, but that folder's
+           instance doesn't exist yet: a misc instance (or another
+           folder's) would only give the file syntax-only support;
+        4. the misc instance of a single-root server (file under no
+           project folder);
+        5. None - the caller creates the misc instance.
         """
-        matches = [lang for lang in self._langs.values()
-                   if lang.is_ed_matches(ed_self, langid)]
-        if not matches:
-            return self._langs.get(langid)
-        return self._match_lang(matches, ed_self, langid)
+        fn = ed_self.get_filename()
+        norm = os.path.normcase(os.path.normpath(fn)) if fn else None
+
+        misc = None
+        for lang in matches:
+            folder = getattr(lang, '_root_folder', None)
+            if folder is None:
+                if not getattr(lang, 'single_root', False):
+                    return lang        # multi-root instance serves all
+                misc = misc or lang    # single-root misc fallback
+            elif norm and norm.startswith(
+                    os.path.normcase(os.path.normpath(folder)) + os.sep):
+                return lang            # this folder's own instance
+
+        # file inside a project folder: its per-folder instance must exist
+        # (be created), a fallback instance is wrong for it
+        if norm and proj_dirs:
+            for d in proj_dirs:
+                if norm.startswith(
+                        os.path.normcase(os.path.normpath(d)) + os.sep):
+                    return None
+
+        return misc    # None -> caller creates the misc instance
 
     def _make_lang(self, cfg):
         """ Create + register one Language from a config (deep-copied by the
@@ -876,27 +916,6 @@ class Command:
         # name key (instance key when folder-bound)
         self._langs[key] = lang
         return lang
-
-    def _match_lang(self, matches, ed_self, langid):
-        """ Pick the best instance among matches for a document: the one
-        bound to the folder containing the file; when the file is under no
-        known folder, prefer a non-folder-bound ('misc'/multi-root)
-        instance, else any (first). """
-        fn = ed_self.get_filename()
-        if not fn:
-            return matches[0]
-        norm = os.path.normcase(os.path.normpath(fn))
-        best = None
-        misc = None
-        for lang in matches:
-            folder = getattr(lang, '_root_folder', None)
-            if folder is None:
-                misc = misc or lang
-                continue
-            if norm.startswith(os.path.normcase(os.path.normpath(folder)) + os.sep):
-                best = lang  # keep the LAST/deepest? all are siblings - first wins
-                break
-        return best or misc or matches[0]
 
     def _is_single_root_cfg(self, cfg):
         """ Server config explicitly or heuristically single-root (per-folder
@@ -1022,9 +1041,13 @@ class Command:
     def dbg_show_msg(self, show_bytes=False):
         lex = ed.get_prop(PROP_LEXER_FILE)
         langid = lex2langid(lex)
-        lang = self._match_lang(
-            [l for l in self._langs.values() if l.is_ed_matches(ed, langid)],
-            ed, langid) if langid else None
+        lang = None
+        if langid:
+            matches = [l for l in self._langs.values()
+                       if l.is_ed_matches(ed, langid)]
+            lang = self._match_lang(matches, ed, langid) if matches else None
+            if lang is None and matches:
+                lang = matches[0]   # dbg aid: any instance of this server
         if lang is None:
             msg_status(_('No messages for server of current document'))
             return
