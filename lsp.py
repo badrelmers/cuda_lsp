@@ -39,6 +39,15 @@ LOG_NAME = 'LSP'
 IS_WIN = os.name=='nt'
 SERVER_RESPONSE_DIALOG_LEN = 80
 
+# Project Manager's tree-node events (APPSTATE 48/49, 'proj_mgr' core
+# patch): fired via app_proc(APP_PROC_PROJECT_NODE_ADD/_DEL) after its
+# global_project_info was refreshed. Official CudaText builds don't
+# export them yet - fall back to the raw numbers, so on_state simply
+# never sees these states there (the on_tab_change re-check covers it)
+import cudatext as _ct
+APPSTATE_PROJECT_NODE_ADD = getattr(_ct, 'APPSTATE_PROJECT_NODE_ADD', 48)
+APPSTATE_PROJECT_NODE_DEL = getattr(_ct, 'APPSTATE_PROJECT_NODE_DEL', 49)
+
 # considering all 'lsp_*.json' - server configs
 dir_settings    = app_path(APP_DIR_SETTINGS)
 fn_config       = os.path.join(dir_settings, 'cuda_lsp.json')
@@ -527,10 +536,12 @@ class Command:
         if SignaturesDialog.is_visible():
             SignaturesDialog.hide()
 
-        # Project Manager fires no app event when folders are added to or
-        # removed from the project tree (only project open/close has
-        # APPSTATE_PROJECT) - re-check the folder list here; cheap: one
-        # dict read + compare, and a no-op without an opened project
+        # FOLDER-CHANGE FALLBACK for CudaText builds without the
+        # APPSTATE_PROJECT_NODE_ADD/_DEL events (official releases):
+        # re-check the folder list here. On patched builds this is a
+        # no-op (the event already applied the change; the diff below
+        # finds nothing new). Cheap: one dict read + compare, and a
+        # no-op without an opened project
         self._on_project_dirs_change()
 
         doc = self.book.get_doc(ed_self)
@@ -569,6 +580,15 @@ class Command:
             for name,lang in list(self._langs.items()):
                 lang.plog.clear()
 
+            self._on_project_dirs_change()
+
+        elif state in (APPSTATE_PROJECT_NODE_ADD, APPSTATE_PROJECT_NODE_DEL):
+            # folder/file node(s) added to or removed from the open
+            # project's tree (Project Manager fires this AFTER refreshing
+            # its global_project_info, so the re-read below is final;
+            # a node moved on disk = DEL then ADD with the list already
+            # updated - the first event applies the change, the second
+            # diffs to a no-op)
             self._on_project_dirs_change()
 
         elif state == APPSTATE_THEME_UI:
