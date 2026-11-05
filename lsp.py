@@ -58,6 +58,8 @@ LINT_STYLE_MAP = {0:1, 1:4, 2: 2, 3:6}
 
 STATE = {} # like log-panel's filter state
 
+opt_spy_file = ''
+
 opt_enable_mouse_hover = True
 opt_root_dir_source = [0]
 opt_send_change_on_request = False
@@ -612,12 +614,47 @@ class Command:
         their rootUri was fixed at 'initialize' (e.g. OmniSharp reads
         nothing else), and the restart re-picks the root for the file being
         opened.
+
+        Single-root servers (OmniSharp, 'single_root': true or detected
+        from serverInfo) are reconciled instead: one instance per project
+        folder - VS Code's method for multi-root workspaces. Instances for
+        REMOVED folders are shut down, instances for ADDED folders are
+        created lazily on the next file open in that folder (starting a
+        process per folder nobody works in would be waste); the 'misc'
+        fallback instance (files under no project folder) is also
+        reconciled when it exists.
         """
         if not self._langs:
             return
 
         root, folders = get_workspace_roots()
+
+        # single-root instances: shut down the ones bound to folders which
+        # left the project; the ones for added folders are created lazily
+        # on the next _get_lang in that folder (no eager process spawn)
+        norm_folders = {os.path.normcase(os.path.normpath(d)) for d in folders}
         for name, lang in list(self._langs.items()):
+            if not isinstance(name, str) or '//' not in name:
+                continue
+            if not getattr(lang, 'single_root', False):
+                continue    # e.g. an OmniSharp instance before detection
+            folder = getattr(lang, '_root_folder', None)
+            if folder is None:
+                continue
+            if os.path.normcase(os.path.normpath(folder)) not in norm_folders:
+                print(f'{LOG_NAME}: workspace folder removed ({lang.lang_str}): '
+                      f'{collapse_path(folder)}; shutting down its server instance')
+                self._shutdown_server_instance(name)
+
+        # folder sets of the remaining (multi-root) instances
+        for name, lang in list(self._langs.items()):
+            if getattr(lang, 'single_root', False):
+                # a single-root instance which is NOT folder-bound (the
+                # 'misc' fallback, work_dir-only configs, no project):
+                # treat it like any other - restart unless the folder set
+                # is unchanged
+                if getattr(lang, '_root_folder', None) is not None:
+                    continue    # folder-bound: handled above
             if folders:
                 new_dirs = folders
             else:
@@ -637,6 +674,29 @@ class Command:
             if not handled:
                 self.shutdown_server(name=name)
 
+    def _shutdown_server_instance(self, name):
+        """ Shut down one _langs entry (name key, e.g. 'omnisharp//F:\\src')
+        without the interactive dialog of shutdown_server(): same cleanup
+        (docs detached, sibling langid keys pointing at the same instance
+        removed). Used by the single-root reconcile when a folder leaves
+        the project. """
+        lang = self._langs.pop(name, None)
+        if lang is None:
+            return
+
+        # remove referencees to Language object
+        for doc in self.book.get_docs():
+            if doc.lang == lang:
+                doc.update(lang=None)
+
+        # server can have multiple langids - remove all
+        lang_ids = [langid for langid, lang_ in self._langs.items()
+                    if lang_ == lang]
+        for langid in lang_ids:
+            del self._langs[langid]
+
+        lang.shutdown()
+
     def on_key(self, ed_self, key, state):
         # VK_ESCAPE==27
         if key==27 and 'c' not in state and 's' not in state and 'a' not in state:
@@ -653,7 +713,13 @@ class Command:
     def on_exit(self, *args, **vargs):
         #### save state before exiting
         state_changed = False
-        for langid,lang in self._langs.items():
+        # _langs holds several keys per instance (langids + name/instance
+        # key) - save every Language exactly once
+        seen = set()
+        for lang in self._langs.values():
+            if id(lang) in seen:
+                continue
+            seen.add(id(lang))
             key,state = lang.get_state_pair()
             if state:
                 STATE[key] = state
@@ -670,8 +736,12 @@ class Command:
                 pass
 
 
-        # start servers shutdown
-        for langid,lang in self._langs.items():
+        # start servers shutdown (several _langs keys can share one instance)
+        seen = set()
+        for lang in self._langs.values():
+            if id(lang) in seen:
+                continue
+            seen.add(id(lang))
             lang.shutdown()
 
         _start = time.time()
@@ -693,56 +763,195 @@ class Command:
 
 
     def _get_lang(self, ed_self, langid):
+        """ Find or create the Language (server instance) for an editor.
+
+        _langs maps server name -> Language; a server registered for
+        several langids appears under each of them (all values pointing to
+        one instance). A 'single_root' server (OmniSharp: reads rootUri
+        only, no multi-root - it even advertises workspaceFolders support
+        without implementing the change notification) gets ONE INSTANCE
+        PER workspace folder, name keys 'name' and 'name//folder'
+        (VS Code's method for multi-root workspaces); the file's folder
+        picks the instance, files under no known folder go to the
+        instance of the file's folder when one exists (multi-instance
+        fallback), else a fresh instance is created with the best root.
+        """
         # to not import json from on_exit
         global json
         import json
 
-        # look in existing langs with proper registration match
-        for lang in self._langs.values():
-            if lang.is_ed_matches(ed_self, langid):
-                pass;       LOG and print(f'* matched existing lang: {ed_self, langid} -- {lang.name}')
+        # existing instances which match this document
+        matches = [lang for lang in self._langs.values()
+                   if lang.is_ed_matches(ed_self, langid)]
+        if matches:
+            lang = self._match_lang(matches, ed_self, langid)
+            pass;   LOG and print(f'* matched existing lang: {ed_self, langid} -- {lang.name}')
+            return lang
+
+        # no instance matches: create one from the server configs
+        for cfg in servers_cfgs:
+            if langid not in cfg.get('langids', []):
+                continue
+
+            single_root = self._is_single_root_cfg(cfg)
+
+            # project folders (all of them) go as LSP workspaceFolders;
+            # the root (rootUri/cwd) is the folder of the opened file's
+            # project when set, else the server config's 'work_dir'
+            proj_root, proj_dirs = get_workspace_roots(ed_self.get_filename())
+
+            if single_root:
+                # one instance per folder: pick/create the instance of the
+                # file's folder
+                lang = self._get_single_root_lang(cfg, langid, ed_self,
+                                                  proj_root, proj_dirs)
+                if lang is not None:
+                    return lang
+                # file under NO project folder: fall through and create the
+                # 'misc' instance below (single instance over all folders,
+                # like the pre-multiroot behaviour - the file gets
+                # syntax-only diagnostics there instead of no server at all)
+
+            # multi-root server - or the 'misc' instance of a single-root
+            # server: single instance, all folders
+            from copy import deepcopy
+            cfg = deepcopy(cfg)
+            # update server 'settings' with project's lsp server settings
+            proj_lsp_cfg = get_project_lsp_cfg()
+            cfg.setdefault('settings', {}).update(proj_lsp_cfg or {})
+            if single_root:
+                # keep the flag: the misc instance must also be restarted
+                # (not notified) when the folder set changes - a single_root
+                # server's capability advertisement cannot be trusted
+                cfg['single_root'] = True
+            if proj_dirs:
+                cfg['work_dir'] = proj_root or proj_dirs[0]
+                cfg['workspace_dirs'] = proj_dirs
+            lang = self._make_lang(cfg)
+            if lang is not None:
                 return lang
+            continue    # config invalid - try next config
 
-        # create new lang
-        if langid not in self._langs:
-            # no server exists for this langid, try to create
-            for cfg in servers_cfgs:
-                if langid in cfg.get('langids', []):
-                    from copy import deepcopy
-                    from .language import Language
+        # nothing created/matched: langid-keyed entry (a server created
+        # moments ago, still initializing - is_ed_matches is False until
+        # its capabilities arrive; on_lang_inited re-opens the docs then)
+        return self._langs.get(langid)
 
-                    cfg = deepcopy(cfg)
+    def _lookup_lang(self, ed_self, langid):
+        """ Final lookup after creations: the instance which matches the
+        document, preferring the file's folder among single-root instances.
+        """
+        matches = [lang for lang in self._langs.values()
+                   if lang.is_ed_matches(ed_self, langid)]
+        if not matches:
+            return self._langs.get(langid)
+        return self._match_lang(matches, ed_self, langid)
 
-                    # update server 'settings' with project's lsp server settings
-                    proj_lsp_cfg = get_project_lsp_cfg()
-                    cfg.setdefault('settings', {}).update(proj_lsp_cfg or {})
+    def _make_lang(self, cfg):
+        """ Create + register one Language from a config (deep-copied by the
+        caller). Registers under 'name' or, for folder-bound instances,
+        'name//folder'. Returns the Language, or None on ValidationError
+        (the config is then dropped from servers_cfgs to not nag on every
+        on_open).
+        """
+        from .language import Language
 
-                    # project folders (all of them) go as LSP workspaceFolders;
-                    # the root (rootUri/cwd) is the folder of the opened file's
-                    # project when set, else the server config's 'work_dir'
-                    proj_root, proj_dirs = get_workspace_roots(ed_self.get_filename())
-                    if proj_dirs:
-                        cfg['work_dir'] = proj_root or proj_dirs[0]
-                        cfg['workspace_dirs'] = proj_dirs
+        root_folder = cfg.get('_root_folder')
+        key = cfg['name'] + ('//' + root_folder if root_folder else '')
+        try:
+            lang = Language(cfg,
+                    cmds=self._hint_cmds,
+                    lintstr=opt_lint_type,
+                    underline_style=LINT_STYLE_MAP[opt_lint_underline_style],
+                    state=STATE.get(key) or STATE.get(cfg.get('name'))
+            )
+        except ValidationError:
+            if cfg in servers_cfgs:
+                servers_cfgs.remove(cfg) # dont nag on every on_open
+            return None
 
-                    try:
-                        lang = Language(cfg,
-                                cmds=self._hint_cmds,
-                                lintstr=opt_lint_type,
-                                underline_style=LINT_STYLE_MAP[opt_lint_underline_style],
-                                state=STATE.get(cfg.get('name'))
-                        )
-                    except ValidationError:
-                        if cfg in servers_cfgs:
-                            servers_cfgs.remove(cfg) # dont nag on every on_open
-                        raise
-                    pass;       LOG and print(f'*** Created lang({lang.name}) for {ed_self, langid}')
-                    # register server to all its supported langids
-                    for server_langid in lang.langids:
-                        self._langs[server_langid] = lang
+        # register server to all its supported langids
+        for server_langid in lang.langids:
+            self._langs.setdefault(server_langid, lang)
+        # name key (instance key when folder-bound)
+        self._langs[key] = lang
+        return lang
+
+    def _match_lang(self, matches, ed_self, langid):
+        """ Pick the best instance among matches for a document: the one
+        bound to the folder containing the file; when the file is under no
+        known folder, prefer a non-folder-bound ('misc'/multi-root)
+        instance, else any (first). """
+        fn = ed_self.get_filename()
+        if not fn:
+            return matches[0]
+        norm = os.path.normcase(os.path.normpath(fn))
+        best = None
+        misc = None
+        for lang in matches:
+            folder = getattr(lang, '_root_folder', None)
+            if folder is None:
+                misc = misc or lang
+                continue
+            if norm.startswith(os.path.normcase(os.path.normpath(folder)) + os.sep):
+                best = lang  # keep the LAST/deepest? all are siblings - first wins
+                break
+        return best or misc or matches[0]
+
+    def _is_single_root_cfg(self, cfg):
+        """ Server config explicitly or heuristically single-root (per-folder
+        instances). Explicit: 'single_root': true. Heuristic (OmniSharp -
+        the KNOWN case): any server command token mentioning 'omnisharp'.
+        The final authority is the server's own serverInfo after
+        'initialize' (language._detect_single_root). """
+        if cfg.get('single_root'):
+            return True
+        from .language import CMD_OS_KEY
+        cmd = cfg.get(CMD_OS_KEY) or []
+        if isinstance(cmd, str):
+            cmd = [cmd]
+        return any('omnisharp' in str(tok).lower() for tok in cmd)
+
+    def _get_single_root_lang(self, cfg, langid, ed_self, proj_root, proj_dirs):
+        """ Instance of a single-root server for the file's folder: reuse
+        the existing one, or create it (name key 'name//folder'). Returns
+        None when the file is under NO project folder - the caller then
+        falls back to the 'misc' instance (single instance over all
+        folders: the file gets syntax-only diagnostics there, like in the
+        pre-multiroot plugin, instead of no server at all). """
+        fn = ed_self.get_filename()
+        folder = None
+        if fn:
+            norm = os.path.normcase(os.path.normpath(fn))
+            for d in proj_dirs:
+                if norm.startswith(os.path.normcase(os.path.normpath(d)) + os.sep):
+                    folder = d
                     break
 
-        return self._langs.get(langid)
+        if folder is None:
+            # under no project folder: no per-folder instance applies
+            return None
+
+        key = cfg['name'] + '//' + folder
+        lang = self._langs.get(key)
+        if lang is not None:
+            # exists for this folder: reuse it even while it is still
+            # initializing (is_ed_matches is False until its capabilities
+            # arrive - a second instance for the same folder would be wrong)
+            return lang
+
+        from copy import deepcopy
+        new_cfg = deepcopy(cfg)
+        proj_lsp_cfg = get_project_lsp_cfg()
+        new_cfg.setdefault('settings', {}).update(proj_lsp_cfg or {})
+        new_cfg['single_root'] = True
+        new_cfg['work_dir'] = folder
+        new_cfg['workspace_dirs'] = [folder]
+        new_cfg['_root_folder'] = folder
+        # drop langids so only this file's langid registers (avoids
+        # cross-instance didOpen of docs of other langids? no - keep them:
+        # simpler, the doc matching is per-document anyway)
+        return self._make_lang(new_cfg)
 
     @command
     def call_hover(self, ed_self=None, caret=None):
@@ -813,7 +1022,9 @@ class Command:
     def dbg_show_msg(self, show_bytes=False):
         lex = ed.get_prop(PROP_LEXER_FILE)
         langid = lex2langid(lex)
-        lang = self._langs.get(langid)
+        lang = self._match_lang(
+            [l for l in self._langs.values() if l.is_ed_matches(ed, langid)],
+            ed, langid) if langid else None
         if lang is None:
             msg_status(_('No messages for server of current document'))
             return
@@ -841,15 +1052,30 @@ class Command:
     @command
     # for project folder change
     def shutdown_server(self, name=None):
-        # choice dlg
+        # choice dlg: instance keys ('name' / 'name//folder'), langid keys
+        # shown as the instance they point to
         if name is None:
-            names = list(self._langs)
+            names = []
+            for key, lang in self._langs.items():
+                shown = key if '//' in key or key == lang.name else f'{key} ({lang.name})'
+                if shown not in names:
+                    names.append(shown)
             names.sort()
             ind = dlg_menu(DMENU_LIST, names, caption=_('Shutdown server'))
             if ind is not None:
                 name = names[ind]
 
         # shutting down and clearing remains
+        if name is not None:
+            # menu may show 'langid (name)' - resolve to the instance key
+            target = None
+            for key, lang in self._langs.items():
+                shown = key if '//' in key or key == lang.name else f'{key} ({lang.name})'
+                if shown == name:
+                    target = key
+                    break
+            name = target if target is not None else name
+
         if name is not None  and  name in self._langs:
             lang = self._langs.pop(name)
             lang.shutdown()
@@ -906,6 +1132,7 @@ class Command:
         global opt_use_markers
         global opt_complete_from_text
         global opt_diagnostics_in_a_corner
+        global opt_spy_file
 
         # general cfg
         if os.path.exists(fn_config):
@@ -953,6 +1180,13 @@ class Command:
             Language.complete_from_text = opt_complete_from_text
             opt_diagnostics_in_a_corner = j.get('diagnostics_in_a_corner', opt_diagnostics_in_a_corner)
             DiagnosticsMan.opt_diagnostics_in_a_corner = opt_diagnostics_in_a_corner
+
+            # full spy log file (empty = off): every JSON-RPC message of
+            # every server, both directions, untruncated - see
+            # language.SPY_FILE
+            opt_spy_file = j.get('spy_file', '')
+            language_mod_spy = __import__('cuda_lsp.language', fromlist=['language'])
+            language_mod_spy.SPY_FILE = opt_spy_file
             
             opt_enable_code_tree = j.get('enable_code_tree', opt_enable_code_tree)
             opt_tree_types_show = j.get('tree_types_show', opt_tree_types_show)
@@ -1048,6 +1282,7 @@ class Command:
             'complete_from_text':        opt_complete_from_text,
             'use_markers':               opt_use_markers,
             'diagnostics_in_a_corner':   opt_diagnostics_in_a_corner,
+            'spy_file':                  opt_spy_file,
         }
         if opt_manual_didopen is not None:
             j['manual_didopen'] = opt_manual_didopen
@@ -1060,21 +1295,12 @@ class Command:
     @property
     def lcs(self):
         return self._langs.get('csharp')
-    def _killcs(self):
-        lcs = self._langs.pop('csharp')
-        lcs.shutdown()
     @property
     def lpy(self):
         return self._langs.get('python')
-    def _killpy(self):
-        lpy = self._langs.pop('python')
-        lpy.shutdown()
     @property
     def lcpp(self):
         return self._langs.get('cpp')
-    def _killcpp(self):
-        lcpp = self._langs.pop('cpp')
-        lcpp.shutdown()
 
     def _kill_servers(self):
         """ only use before exiting

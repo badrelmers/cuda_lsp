@@ -114,6 +114,22 @@ In short: 'work_dir' is useful only when you don't use the Project Manager,
 e.g. when all your projects live inside one big folder and you want a fixed
 root for the server regardless of the opened file.
 
+Force "single-root" handling for a server (per-folder instances):
+  "single_root": true
+Single-root servers read only rootUri from 'initialize' and ignore workspace
+folders entirely (OmniSharp: it requires a single root at startup and has no
+handler for folder-change notifications - see OmniSharp/omnisharp-roslyn#909;
+it even ADVERTISES workspaceFolders support in its capabilities while silently
+dropping the notification). For such servers the plugin uses the method of
+VS Code's multi-root samples: ONE SERVER INSTANCE PER project folder, and each
+file is served by the instance of the folder containing it. Files under no
+project folder share one fallback instance over all folders (like before the
+multi-root support). When a folder is removed from the project, its instance
+is shut down; when a folder is added, its instance starts on the first file
+opened from that folder. OmniSharp needs no config: it is auto-detected from
+its command line ('omnisharp' in it) and from its serverInfo after
+initialization.
+
 Re-send the full document text as a single 'textDocument/didChange' right after
 'textDocument/didOpen' (on by default). Needed for servers which discard the
 didOpen buffer for documents they don't know yet (OmniSharp up to v1.39.x shows

@@ -93,6 +93,12 @@ LOG_NAME = 'LSP'
 
 DEBUG_DEV = True # enable spying of request/response messages in LSP panel ('Spy' category)
 SPY_MSG_LIMIT = 3000 # spy: max chars of a message body, longer bodies get truncated
+# Full spy log file (set from cuda_lsp.json 'spy_file' by lsp.py): when set,
+# EVERY JSON-RPC message of every server (both directions) is appended there
+# as one line with FULL text - the panel 'Spy' category truncates bodies at
+# SPY_MSG_LIMIT chars, this file loses nothing. Debug aid: set it, repeat
+# the problem, send the file.
+SPY_FILE = ''
 
 api_ver = app_api_version()
 
@@ -114,6 +120,11 @@ GOTO_RESPONSE_TYPES = {
     lsp.TypeDefinitionResponse,
     lsp.DeclarationResponse,
 }
+# Servers which read rootUri ONLY (no real workspaceFolders support, no
+# didChangeWorkspaceFolders handler - see language.SPY_FILE comment and
+# lsp.py for how this is used). Compared case-insensitively against
+# initialize's serverInfo.name.
+KNOWN_SINGLE_ROOT_SERVERS = {'omnisharp'}
 CALLABLE_COMPLETIONS = {
     lsp.CompletionItemKind.Method,
     lsp.CompletionItemKind.Function,
@@ -159,10 +170,24 @@ class Language:
         self._tcp_port = cfg.get('tcp_port') # None => use Popen
         self._work_dir = cfg.get('work_dir')
         if DEBUG_DEV: print(">>> DEBUG_DEV _work_dir",self._work_dir)
+        # "single_root" servers: they only read rootUri from 'initialize'
+        # and ignore workspaceFolders / didChangeWorkspaceFolders entirely
+        # (OmniSharp - see its source: the handlers are simply not
+        # registered; such a server can only serve ONE root per process).
+        # For them lsp.py uses the VS Code multi-root method: one server
+        # INSTANCE per workspace folder. Default False, set explicitly by
+        # lsp.py (_get_lang / reconcile) or the server config
+        # ('single_root': true); re-computed after 'initialize' from the
+        # server's own serverInfo (OmniSharp always identifies itself).
+        self.single_root = bool(cfg.get('single_root'))
         # All workspace folders (LSP multi-root). Defaults to [work_dir]:
         # lsp.py widens it to the folder nodes of the opened CudaText project.
         self._workspace_dirs = list(cfg.get('workspace_dirs') or
                                     ([self._work_dir] if self._work_dir else []))
+        # The folder this instance was created FOR (single_root only):
+        # its path is the rootUri/cwd of this process. None = not
+        # folder-bound (multi-root instance, or no project opened)
+        self._root_folder = cfg.get('_root_folder')
         # paths to add to env  -- {var_name: list[paths]}
         self._env_paths = cfg.get('env_paths')
         self._log_stderr = bool(cfg.get('log_stderr'))
@@ -344,6 +369,16 @@ class Language:
             self._reader = self.process.stdout
             self._writer = self.process.stdin
             self._err = self.process.stderr
+
+            # stderr is drained but DISCARDED unless the server config sets
+            # 'log_stderr': true. Servers commonly explain their problems
+            # there (OmniSharp writes its log there without -lsp host log
+            # options), so tell the user where the missing output is
+            if not self._log_stderr:
+                print(_('NOTE: {name}: {lang} - server stderr is not logged;'
+                        ' set "log_stderr": true in its lsp_*.json config to'
+                        ' see the server\'s own error log').format(
+                            name=LOG_NAME, lang=self.lang_str))
 
         # if config has tcp port - connect to it
         if self._tcp_port and type(self._tcp_port) == int:
@@ -538,6 +573,7 @@ class Language:
 
         if msgtype is lsp.InitializeResponse:
             self.scfg = ServerConfig(msg.result.capabilities, self.langids, self.lang_str)
+            self._detect_single_root(msg.result)
             app_proc(PROC_EXEC_PLUGIN, 'cuda_lsp,on_lang_inited,'+self.name)
 
         elif msgtype is lsp.RegistrationRequest:
@@ -813,6 +849,19 @@ class Language:
             if len(body) > SPY_MSG_LIMIT:
                 body = body[:SPY_MSG_LIMIT] + f' [TRUNCATED... total: {len(body)}]'
 
+            # 3b. Full-text copy to SPY_FILE (option 'spy_file'): the panel
+            # truncates at SPY_MSG_LIMIT, this loses NOTHING. Line-buffered
+            # plain text, one message per line, so a hung/crashed CudaText
+            # still leaves everything received so far on disk
+            if SPY_FILE:
+                try:
+                    with open(SPY_FILE, 'a', encoding='utf-8') as f:
+                        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        f.write(f'[{self.name}] [{ts}] {way} {kind:<12}: '
+                                f'{name} _ {json.dumps(content, ensure_ascii=False)}\n')
+                except Exception:
+                    pass  # logging must never break message processing
+
             # 4. Log it (update_memo=False: batched render by flush(),
             # fast enough for high-volume traffic)
             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
@@ -958,6 +1007,36 @@ class Language:
                 if eddoc.ed.get_prop(PROP_TAB_TITLE) is not None:
                     eddoc.ed.set_prop(PROP_RO, False)
 
+    def _detect_single_root(self, init_result):
+        """ After 'initialize': re-check 'single_root' from the server's own
+        serverInfo (its name is the one thing that cannot lie) and keep the
+        config value otherwise. Used by lsp.py's reconcile: a single_root
+        server gets one instance per workspace folder (VS Code's method for
+        multi-root - OmniSharp has no multi-root support, see
+        OmniSharp/omnisharp-roslyn#909).
+
+        The darker case this covers: OmniSharp ADVERTISES
+        'workspaceFolders: {supported: true, changeNotifications: true}'
+        in its capabilities but has NO handler for the notification - the
+        server drops it silently, nothing ever comes back. Capability
+        declarations cannot be trusted blindly; serverInfo.name is compared
+        case-insensitively against KNOWN_SINGLE_ROOT_SERVERS.
+        """
+        try:
+            info = getattr(init_result, 'server_info', None)
+            server_name = (getattr(info, 'name', None) or '').strip().lower()
+            if server_name in KNOWN_SINGLE_ROOT_SERVERS:
+                if not self.single_root:
+                    self.single_root = True
+                    self.plog.log_str(
+                        _('{}: server identifies itself as "{}" - single-root '
+                          'server, one instance per workspace folder is used '
+                          '(its workspaceFolders capability advertisement '
+                          'cannot be trusted)').format(LOG_NAME, info.name),
+                        type_=TYPE_LOG, severity=SEVERITY_WRN, scroll=True)
+        except Exception:
+            pass  # detection must never break message handling
+
     def on_workspace_change(self, newroot, new_dirs):
         """ Workspace folders changed (CudaText project opened/closed or its
         folder nodes changed). Sends 'workspace/didChangeWorkspaceFolders' to
@@ -978,6 +1057,15 @@ class Language:
 
         opts = self.scfg.method_opts(METHOD_WS_FOLDERS)
         if not (opts and opts.get('supported') and opts.get('changeNotifications')):
+            return False
+
+        if self.single_root:
+            # capability LIE: the server advertises workspaceFolders +
+            # changeNotifications but never implemented the notification
+            # handler (OmniSharp v1.39.x does exactly this - the message is
+            # dropped server-side and nothing ever comes back). A
+            # single_root server must be restarted/re-instantiated instead
+            # of notified
             return False
 
         def _folder(path):
@@ -1464,7 +1552,10 @@ class Language:
 
 
     def get_state_pair(self):
-        key = self.name
+        # folder-bound instances ('single_root' server, one per workspace
+        # folder) get their own state key, so they don't overwrite each
+        # other in lsp.STATE
+        key = self.name + ('//' + self._root_folder if self._root_folder else '')
         state = self.plog.get_state()
 
         return key,state

@@ -5,6 +5,13 @@
     * 1 - first directory in project
     * 2 - project main-file's directory
 
+* spy_file - full LSP message log file path (default is empty = off). When set, EVERY
+  JSON-RPC message of every server (both directions, all servers) is appended to that
+  file as one line with the complete untruncated JSON body. The LSP panel's 'Spy'
+  category shows the same traffic but truncates bodies at 3000 chars; this file loses
+  nothing. Debug aid: set the path, repeat the problem, inspect or send the file.
+  Example: "spy_file": "C:\\temp\\lsp_spy.log"
+
 * send_change_on_request - how to send editor's changes to server:
     * false - changes are sent to server after editing and a short delay (default).
     * true - changes are sent only before requests (will delay server's analysis).
