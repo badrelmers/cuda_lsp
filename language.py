@@ -159,6 +159,10 @@ class Language:
         self._tcp_port = cfg.get('tcp_port') # None => use Popen
         self._work_dir = cfg.get('work_dir')
         if DEBUG_DEV: print(">>> DEBUG_DEV _work_dir",self._work_dir)
+        # All workspace folders (LSP multi-root). Defaults to [work_dir]:
+        # lsp.py widens it to the folder nodes of the opened CudaText project.
+        self._workspace_dirs = list(cfg.get('workspace_dirs') or
+                                    ([self._work_dir] if self._work_dir else []))
         # paths to add to env  -- {var_name: list[paths]}
         self._env_paths = cfg.get('env_paths')
         self._log_stderr = bool(cfg.get('log_stderr'))
@@ -242,12 +246,18 @@ class Language:
 
     @property
     def workspace_folders(self):
-        if self._work_dir:
-            # for now just a single folder in workspace
-            root_uri = path_to_uri(self._work_dir)
-            return [ lsp.WorkspaceFolder(uri=root_uri, name='Root'), ]
-        else:
+        """ LSP multi-root workspace: one WorkspaceFolder per known folder
+        (all folder nodes of the opened CudaText project, or ['work_dir']).
+        rootUri is always workspace_folders[0] - the spec deprecates rootUri
+        in favour of workspaceFolders, but rootUri-only servers (OmniSharp)
+        still need it to match one of the folders.
+        """
+        if not self._workspace_dirs:
             return None
+        return [
+            lsp.WorkspaceFolder(uri=path_to_uri(d), name=os.path.basename(d) or d)
+            for d in self._workspace_dirs
+        ]
 
     @property
     def tree_enabled(self):
@@ -276,15 +286,15 @@ class Language:
     def _start_server(self):
 
         if not self._work_dir:
-            # No root will be sent (rootUri/workspaceFolders stay null):
+            # No roots will be sent (rootUri/workspaceFolders stay null):
             # project-aware servers (OmniSharp, clangd with compilation
             # database...) then fall back to their own startup location for
             # project discovery - make that visible once, it is the usual
             # reason for 'missing' project-scoped features/diagnostics.
-            note = (_("{}: {} - no 'work_dir'/CudaText project set: rootUri is "
-                      "not sent and the server picks its own location for "
-                      "project discovery; set 'work_dir' in the server config "
-                      "(or open a CudaText project) for project-aware servers "
+            note = (_("{}: {} - no 'work_dir'/CudaText project set: rootUri and "
+                      "workspaceFolders are not sent and the server picks its own "
+                      "location for project discovery; set 'work_dir' in the server "
+                      "config (or open a CudaText project) for project-aware servers "
                       "like OmniSharp").format(LOG_NAME, self.lang_str))
             print(note)
             self.plog.log_str(note, type_=TYPE_LOG, severity=SEVERITY_WRN,
@@ -948,22 +958,43 @@ class Language:
                 if eddoc.ed.get_prop(PROP_TAB_TITLE) is not None:
                     eddoc.ed.set_prop(PROP_RO, False)
 
-    def on_rootdir_change(self, newroot):
-        if self._client is not None  and  self.client.is_initialized:
-            opts = self.scfg.method_opts(METHOD_WS_FOLDERS)
-            if opts  and  opts.get('supported')  and  opts.get('changeNotifications'):
-                removed = [] # emptys if no folder
-                added = []
-                if self._work_dir:
-                    old_root_uri = path_to_uri(self._work_dir)
-                    removed.append(lsp.WorkspaceFolder(uri=old_root_uri, name='Root'))
-                if newroot:
-                    new_root_uri = path_to_uri(newroot) if newroot else None
-                    added.append(lsp.WorkspaceFolder(uri=new_root_uri, name='Root'))
-                self._work_dir = newroot
+    def on_workspace_change(self, newroot, new_dirs):
+        """ Workspace folders changed (CudaText project opened/closed or its
+        folder nodes changed). Sends 'workspace/didChangeWorkspaceFolders' to
+        servers which subscribed to it (statically or dynamically), with the
+        minimal diff of folders; returns True when handled this way.
 
-                self.client.did_change_workspace_folders(removed=removed, added=added)
-                return True
+        Returns False when the server must be RESTARTED instead: it didn't
+        subscribe to folder notifications, so its rootUri (fixed at
+        'initialize') cannot be amended - e.g. OmniSharp reads rootUri only
+        and ignores workspaceFolders/didChangeWorkspaceFolders entirely.
+        """
+        if self._client is None  or  not self.client.is_initialized:
+            # not started/initialized yet: adopt silently, the folders go
+            # into the next 'initialize'
+            self._work_dir = newroot
+            self._workspace_dirs = list(new_dirs)
+            return True
+
+        opts = self.scfg.method_opts(METHOD_WS_FOLDERS)
+        if not (opts and opts.get('supported') and opts.get('changeNotifications')):
+            return False
+
+        def _folder(path):
+            return lsp.WorkspaceFolder(uri=path_to_uri(path),
+                                       name=os.path.basename(path) or path)
+
+        old_uris = {path_to_uri(d) for d in self._workspace_dirs}
+        new_uris = {path_to_uri(d) for d in new_dirs}
+        removed = [_folder(d) for d in self._workspace_dirs
+                   if path_to_uri(d) not in new_uris]
+        added = [_folder(d) for d in new_dirs
+                 if path_to_uri(d) not in old_uris]
+        if removed or added:
+            self.client.did_change_workspace_folders(removed=removed, added=added)
+        self._work_dir = newroot
+        self._workspace_dirs = list(new_dirs)
+        return True
 
     def _action_by_name(self, method_name, eddoc, caret=None):
         if self.client.is_initialized:

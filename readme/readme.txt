@@ -94,11 +94,25 @@ Log 'stderr' of server's process to log-panel (off by default):
   "log_stderr": true
 
 Working directory for the server's process; it is also sent to the server as the
-workspace root (rootUri) in 'initialize'. Project-aware servers (OmniSharp,
-clangd...) discover projects from that folder: without it the server picks its
-own location, and files outside every loaded project only get limited
-diagnostics (e.g. OmniSharp gives syntax-only diagnostics for such "misc" files):
+workspace root (rootUri) in 'initialize', and the server process is started in
+that directory. Project-aware servers (OmniSharp, clangd...) discover projects
+from that folder: without it the server picks its own location, and files
+outside every loaded project only get limited diagnostics (e.g. OmniSharp gives
+syntax-only diagnostics for such "misc" files):
   "work_dir": "C:\\path\\to\\project_or_solution"
+
+Note: a much more convenient alternative is CudaText's built-in Project Manager
+(plugins are shipped together with CudaText). Opening a project there does the
+same thing - actually more: every folder node of the project tree is sent to
+the LSP server as a "workspace folder" (LSP multi-root workspace), and the
+folder containing the currently opened file is used as rootUri/working
+directory. So the project's folders can even live in different places on disk,
+and the server is told about all of them. When you open or close a project, or
+switch between projects, running servers adapt: servers which support folder
+change notifications get them live, others are restarted with the new root.
+In short: 'work_dir' is useful only when you don't use the Project Manager,
+e.g. when all your projects live inside one big folder and you want a fixed
+root for the server regardless of the opened file.
 
 Re-send the full document text as a single 'textDocument/didChange' right after
 'textDocument/didOpen' (on by default). Needed for servers which discard the

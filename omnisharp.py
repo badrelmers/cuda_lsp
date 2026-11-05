@@ -17,9 +17,12 @@ Method names and payload shapes follow OmniSharp's
         {FileName, Warnings: [...], Errors: [...]} - .csproj load problems
         (each item: {LogLevel, FileName, Text, StartLine, StartColumn, ...};
         MSBuild lines are 1-based)
-    o#/backgrounddiagnosticstatus
-        {Status: 0=Started|1=Progress|2=Finished, NumberProjects,
-         NumberFilesTotal, NumberFilesRemaining}
+o#/backgrounddiagnosticstatus
+    {Status: 0=Started|1=Progress|2=Finished, NumberProjects,
+     NumberFilesTotal, NumberFilesRemaining} - the payload carries only
+     counts; the 'Finished' panel line appends the tracked project names
+     (from the o#/projectadded/removed events) in [brackets], so the user
+     sees WHAT was analyzed, not just how much
     o#/projectdiagnosticstatus  (obsolete shim, twin of the above)
         {Type, Status: 0=Started|1=Ready, ProjectFilePath} - quirk: OmniSharp
         puts the percent string '(NN %)' into ProjectFilePath, not a path
@@ -68,7 +71,7 @@ import re
 from cudatext import msg_status
 
 from .dlg import TYPE_OMNISHARP, SEVERITY_ERR, SEVERITY_INFO, SEVERITY_WRN
-from .util import uri_to_path
+from .util import collapse_path, uri_to_path
 
 
 LOG_NAME = 'LSP'
@@ -144,8 +147,13 @@ def _project_event(session, params, verb):
         if isinstance(srcs, list):
             details.append(f'{len(srcs)} file(s)')
         extra = f' ({", ".join(details)})' if details else ''
+        # full (home-collapsed) path: the one place the real project path
+        # is visible - the 'background analysis finished' summary lines
+        # refer to projects by name
+        path = info.get('Path')
+        path = collapse_path(path) if isinstance(path, str) and path else '?'
         _log(session,
-             f"project '{asm}' {verb}: {_basename(info.get('Path'))}{extra}",
+             f"project '{asm}' {verb}: {path}{extra}",
              SEVERITY_INFO)
     else:
         # non-MSBuild project systems send other shapes: compact dump
@@ -155,14 +163,23 @@ def _project_event(session, params, verb):
 
 
 def on_project_added(session, params):
+    info = params.get('MsBuildProject')
+    if _is_dict(info) and info.get('Path'):
+        _track_project(session, info)
     _project_event(session, params, 'added')
 
 
 def on_project_changed(session, params):
+    info = params.get('MsBuildProject')
+    if _is_dict(info) and info.get('Path'):
+        _track_project(session, info)
     _project_event(session, params, 'changed')
 
 
 def on_project_removed(session, params):
+    info = params.get('MsBuildProject')
+    if _is_dict(info) and info.get('Path'):
+        _untrack_project(session, info)
     _project_event(session, params, 'removed')
 
 
@@ -202,6 +219,57 @@ def on_msbuild_project_diagnostics(session, params):
             _log(session, f'  {_msbuild_item_str(item)}', SEVERITY_WRN)
 
 
+# --------------------------------------------------------------------------
+# server workspace tracking (for 'background analysis finished' with paths)
+# --------------------------------------------------------------------------
+
+def _tracked_projects(session):
+    """ {_norm_path(csproj): basename} of the projects OmniSharp loaded. """
+    tracked = getattr(session, '_omnisharp_projects', None)
+    if tracked is None:
+        tracked = session._omnisharp_projects = {}
+    return tracked
+
+
+def _track_project(session, info):
+    try:
+        path = info.get('Path')
+        if isinstance(path, str) and path:
+            _tracked_projects(session)[_norm_path(path)] = _basename(path)
+    except Exception:
+        pass
+
+
+def _untrack_project(session, info):
+    try:
+        path = info.get('Path')
+        if isinstance(path, str) and path:
+            _tracked_projects(session).pop(_norm_path(path), None)
+    except Exception:
+        pass
+
+
+def _fmt_count(n, word):
+    n = n if isinstance(n, int) else 0
+    return f'{n} {word}(s)'
+
+
+def _workspace_summary(session):
+    """ 'rxfind.csproj' / 'A.csproj, B.csproj' / '1 unknown project(s)' -
+    what OmniSharp actually analyzed, from the tracked o#/projectadded
+    events; 'unknown' means no project event was seen (older/newer server,
+    or analysis which ran before any project got added).
+    """
+    tracked = _tracked_projects(session)
+    if tracked:
+        names = sorted(tracked.values())
+        listed = ', '.join(names[:4])
+        if len(names) > 4:
+            listed += f', ... (+{len(names) - 4} more)'
+        return listed
+    return 'unknown project(s)'
+
+
 def on_background_diagnostic_status(session, params):
     status = params.get('Status')
     if not isinstance(status, int):
@@ -211,9 +279,11 @@ def on_background_diagnostic_status(session, params):
     projects = params.get('NumberProjects') or 0
 
     if status == 2:    # Finished
+        summary = _workspace_summary(session)
         _status(session, f'analysis finished ({total} file(s), {projects} project(s))')
         _log(session,
-             f'background analysis finished: {total} file(s) in {projects} project(s)',
+             f'background analysis finished: {_fmt_count(total, "file")} in '
+             f'{_fmt_count(projects, "project")} [{summary}]',
              SEVERITY_INFO)
     elif status == 0:  # Started
         _status(session, f'analysis started: {total} file(s) in {projects} project(s)')
@@ -318,8 +388,10 @@ def note_misc_file(session, params):
     (CSharpDiagnosticWorkerWithAnalyzers: misc project -> plain
     syntaxTree.GetDiagnostics()). Semantic/analyzer diagnostics (unused
     usings, IDE hints, unresolved symbols...) require the file to be inside a
-    real project: set the server config 'work_dir' to the solution/project
-    folder (rootUri is sent from it) or open that project in CudaText.
+    real project: open that project in CudaText's Project Manager (all its
+    folder nodes are sent to the server as LSP workspace folders) or set
+    the server config 'work_dir' to the project/solution folder (rootUri is
+    sent from it), then restart the server.
 
     Deduped per file path; never raises.
     """
@@ -357,7 +429,8 @@ def note_misc_file(session, params):
              f"'{fname}' is not in any loaded OmniSharp project (misc file): "
              f"only syntax diagnostics are provided; for full diagnostics set "
              f"'work_dir' to the project/solution folder (or open it as a "
-             f"CudaText project) and restart the server",
+             f"CudaText project - its folders are sent as LSP workspace "
+             f"folders) and restart the server",
              SEVERITY_WRN)
         _status(session, f'misc file (no project): {fname} - syntax-only diagnostics')
     except Exception:

@@ -30,7 +30,6 @@ from .util import (
 
 # imported on access
 #from .language import Language
-#import cuda_project_man
 #from .book import DocBook
 
 from .language import CompletionMan, DiagnosticsMan, Language
@@ -160,32 +159,99 @@ https://microsoft.github.io/language-server-protocol/specifications/specificatio
 
 """
 
-def get_project_dir():
-    """ choose root directory for server: .opt_root_dir_source
+_projman_failed = False
+
+def _projman():
+    """ Module handle of the built-in Project Manager plugin, or None when it
+    is not installed (then all project/workspace-folder support is off).
     """
-    import cuda_project_man
+    global _projman_failed
+    if _projman_failed:
+        return None
+    try:
+        import cuda_project_man
+        return cuda_project_man
+    except ImportError:
+        _projman_failed = True
+        print(f'NOTE: {LOG_NAME}: built-in Project Manager plugin not found,'
+              ' "work_dir" is the only workspace root source')
+        return None
 
-    path = None
-    for optval in opt_root_dir_source:
-        if optval == 0: # project file dir
-            path = cuda_project_man.project_variables()["ProjDir"]
-        elif optval == 1: # first node
-            _nodes = cuda_project_man.global_project_info.get('nodes')
-            if _nodes:
-                _nodes = [fn for fn in _nodes if os.path.isdir(fn)] # skip FILEnames in root
-            path = _nodes[0] if _nodes else None
-        elif optval == 2: # project's main-file dir
-            path = cuda_project_man.global_project_info.get('mainfile')
-            if path:
-                path = os.path.dirname(path)
 
-        if path:
-            return path
+def get_workspace_roots(ed_file=None):
+    """ Workspace folders of the opened CudaText project (see readme:
+    "work_dir" / Project Manager).
+
+    Returns (root, folders):
+      root    - single dir for rootUri and the server process cwd: the project
+                folder CONTAINING ed_file (deepest match wins), else the first
+                value of opt_root_dir_source that exists (0 - dir of the
+                '.cuda-proj' file, 1 - first folder node, 2 - main-file dir).
+      folders - ALL top-level folder nodes of the project (order kept, dupes
+                and non-dirs dropped) - they all go to the server as LSP
+                workspaceFolders, so a project may combine folders from
+                different places on disk.
+    Both are empty when no project is opened.
+    """
+    pm = _projman()
+    if pm is None:
+        return None, []
+
+    info = pm.global_project_info
+    if not info.get('filename'):    # no project opened
+        return None, []
+
+    folders = []
+    for node in info.get('nodes') or []:
+        if os.path.isdir(node) and node not in folders:
+            folders.append(node)
+
+    # the folder holding the file (which starts/uses the server) is the best
+    # single root: servers which only read rootUri (OmniSharp) then discover
+    # the project/solution this file belongs to
+    root = None
+    if ed_file:
+        norm_file = os.path.normcase(os.path.normpath(ed_file))
+        best_len = -1
+        for folder in folders:
+            norm_folder = os.path.normcase(os.path.normpath(folder)) + os.sep
+            if norm_file.startswith(norm_folder) and len(folder) > best_len:
+                root = folder
+                best_len = len(folder)
+
+    if root is None:
+        for optval in opt_root_dir_source:
+            if optval == 0:    # project file dir
+                path = pm.project_variables()["ProjDir"]
+            elif optval == 1:  # first folder node
+                path = folders[0] if folders else None
+            else:              # project's main-file dir
+                path = info.get('mainfile')
+                if path:
+                    path = os.path.dirname(path)
+
+            if path and os.path.isdir(path):
+                root = path
+                break
+
+    if root and root not in folders:
+        # rootUri must be one of workspaceFolders (like other LSP clients)
+        folders.insert(0, root)
+    return root, folders
+
+
+def _same_dirs(dirs1, dirs2):
+    def _norm(dirs):
+        return {os.path.normcase(os.path.normpath(d)) for d in dirs}
+    return _norm(dirs1 or []) == _norm(dirs2 or [])
+
 
 def get_project_lsp_cfg_path():
-    import cuda_project_man
+    pm = _projman()
+    if pm is None:
+        return None
 
-    fn_proj = cuda_project_man.global_project_info.get('filename')
+    fn_proj = pm.global_project_info.get('filename')
     if fn_proj:
         return os.path.splitext(fn_proj)[0] + '.cuda-proj-lsp'
 
@@ -212,7 +278,6 @@ class Command:
         self._sesh_eds = []
         self._langs = {} # langid -> Language
         self._book = None
-        self._project_dir = None
 
         self._load_config()
 
@@ -461,7 +526,13 @@ class Command:
     def on_tab_change(self, ed_self):
         if SignaturesDialog.is_visible():
             SignaturesDialog.hide()
-        
+
+        # Project Manager fires no app event when folders are added to or
+        # removed from the project tree (only project open/close has
+        # APPSTATE_PROJECT) - re-check the folder list here; cheap: one
+        # dict read + compare, and a no-op without an opened project
+        self._on_project_dirs_change()
+
         doc = self.book.get_doc(ed_self)
         if doc  and  doc.lang:
             doc.lang.on_ed_shown(doc)
@@ -497,25 +568,8 @@ class Command:
         elif state == APPSTATE_PROJECT:
             for name,lang in list(self._langs.items()):
                 lang.plog.clear()
-            
-            new_project_dir = get_project_dir()
-            if self._project_dir != new_project_dir  and  self._langs:
-                _collapsed_path = collapse_path(new_project_dir)
-                print(f'{LOG_NAME}: project root folder changed: {_collapsed_path}; notifying servers...')
 
-                for name,lang in list(self._langs.items()):
-                    handled = lang.on_rootdir_change(new_project_dir)
-                    if not handled:
-                        self.shutdown_server(name=name)
-
-                ### == this code block can launch same server again after we triggered shutdown of it above.
-                ### == that's bad.
-                ## on_open visible eds/docs without lang
-                #for edt in get_visible_eds():
-                #    doc = self.book.get_doc(edt)
-                #    if not doc  or  not doc.lang:
-                #        self.on_open(edt)
-                ### ==
+            self._on_project_dirs_change()
 
         elif state == APPSTATE_THEME_UI:
             from .dlg import PanelLog
@@ -528,6 +582,40 @@ class Command:
                     doc = self.book.get_doc(edt)
                     if doc and doc.lang:
                         doc.lang.request_semantic_tokens(doc)
+
+    def _on_project_dirs_change(self):
+        """ React to the CudaText project (or its folder list) changing.
+        Every server's folder set is compared against the fresh project
+        folders (or, with no project open, the server config's 'work_dir'):
+        servers subscribed to folder-change notifications get a live
+        'workspace/didChangeWorkspaceFolders'; the others are restarted -
+        their rootUri was fixed at 'initialize' (e.g. OmniSharp reads
+        nothing else), and the restart re-picks the root for the file being
+        opened.
+        """
+        if not self._langs:
+            return
+
+        root, folders = get_workspace_roots()
+        for name, lang in list(self._langs.items()):
+            if folders:
+                new_dirs = folders
+            else:
+                # no project opened: keep the server config's 'work_dir'
+                wd = lang._cfg.get('work_dir')
+                new_dirs = [wd] if wd else []
+
+            if _same_dirs(lang._workspace_dirs, new_dirs):
+                continue
+
+            collapsed = ', '.join(collapse_path(d) for d in new_dirs) or _('(none)')
+            print(f'{LOG_NAME}: workspace folders changed ({lang.lang_str}): '
+                  f'{collapsed}; notifying server...')
+
+            handled = lang.on_workspace_change(
+                root or (new_dirs[0] if new_dirs else None), new_dirs)
+            if not handled:
+                self.shutdown_server(name=name)
 
     def on_key(self, ed_self, key, state):
         # VK_ESCAPE==27
@@ -609,8 +697,13 @@ class Command:
                     proj_lsp_cfg = get_project_lsp_cfg()
                     cfg.setdefault('settings', {}).update(proj_lsp_cfg or {})
 
-                    self._project_dir = get_project_dir()
-                    cfg['work_dir'] = self._project_dir
+                    # project folders (all of them) go as LSP workspaceFolders;
+                    # the root (rootUri/cwd) is the folder of the opened file's
+                    # project when set, else the server config's 'work_dir'
+                    proj_root, proj_dirs = get_workspace_roots(ed_self.get_filename())
+                    if proj_dirs:
+                        cfg['work_dir'] = proj_root or proj_dirs[0]
+                        cfg['workspace_dirs'] = proj_dirs
 
                     try:
                         lang = Language(cfg,
