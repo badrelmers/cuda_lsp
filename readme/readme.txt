@@ -216,6 +216,33 @@ To enable and configure this, call "LSP Client / Config" command and see the fol
 - "semantic_colors_dark"
 
 
+LSP panel (bottom panel "LSP: <server name>")
+--------------------------------------------
+The panel shows messages of the LSP server of the FOCUSED EDITOR TAB - it follows
+the tab you switch to (like Zed's language-server logs; VS Code has one output
+channel per server instead, which must be picked by hand).
+Every server instance has its own set of messages; single-root servers with one
+instance per project folder (OmniSharp) show 'name (folder)' per instance.
+
+Cells in the panel's top bar:
+- instance cell - name of the shown server instance; click to cycle through
+  the running instances of the server;
+- 'File/Server' scope toggle (like VS Code Problems' 'active file' filter):
+  'File' (default) shows only messages of the focused document plus
+  server-level messages (startup, workspace events...), 'Server' shows
+  everything of the instance;
+- category cells (Messages, Logs, Diagnostics, Spy, OmniSharp, server
+  stderr...) and severity icons - toggle filters, counters on cells show
+  what is visible in the current context.
+
+This applies to all message kinds: diagnostics of the focused file, server
+Messages/Logs, OmniSharp 'o#/...' events, Spy (JSON-RPC traffic - messages
+which carry a document uri, like didOpen/completion/publishDiagnostics of
+other files, are filtered out in 'File' scope), and server stderr.
+Double-click a 'Line N: ...' diagnostic to jump to it.
+The filters, word wrap and the File/Server toggle are remembered per server.
+
+
 About
 -----
 Authors:

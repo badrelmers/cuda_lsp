@@ -898,12 +898,15 @@ class Command:
 
         root_folder = cfg.get('_root_folder')
         key = cfg['name'] + ('//' + root_folder if root_folder else '')
+        # view-level state (panel filter/wrap/scope) is shared by all
+        # instances of the server config: read the bare-name entry so the
+        # toggles survive restarts of any instance
         try:
             lang = Language(cfg,
                     cmds=self._hint_cmds,
                     lintstr=opt_lint_type,
                     underline_style=LINT_STYLE_MAP[opt_lint_underline_style],
-                    state=STATE.get(key) or STATE.get(cfg.get('name'))
+                    state=STATE.get(cfg.get('name'))
             )
         except ValidationError:
             if cfg in servers_cfgs:

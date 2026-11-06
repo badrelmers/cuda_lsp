@@ -9,7 +9,7 @@ import cudatext_cmd as cmds
 
 from lsprotocol import types as lsp
 
-LogMsg = namedtuple('LogMsg', 'msg type severity')
+LogMsg = namedtuple('LogMsg', 'msg type severity uri')
 
 _   = apx.get_translation(__file__)  # I18N
 
@@ -386,6 +386,124 @@ def on_panellog_sb_click(id_dlg, id_ctl, data='', info=''):
     PanelLog.on_sb_click(id_dlg, id_ctl, data, info)
 
 
+def _type_caption(t):
+    """ Category of a message: 'Messages'/'Logs' for the lsp params classes,
+    the type string itself for everything else. """
+    return PanelLog.type_captions.get(t, t)
+
+
+class LogStore:
+    """ Per server-instance log MODEL: the messages of ONE Language
+    instance (single-root servers like OmniSharp get one instance per
+    project folder - each instance has its own store, so their logs never
+    mix). Rendering is done by the shared PanelLog VIEW (one per server
+    config name): the store forwards render requests there and the view
+    shows whichever store belongs to the focused editor tab.
+
+    Carries the full old-PanelLog logging API (log_str, log, flush,
+    clear...) so call sites don't care which side of the split they talk
+    to (DiagnosticsMan and omnisharp.py hold a store as their 'logger').
+
+    'uri' tagging: messages which belong to one document (diagnostic
+    blocks, per-document spy traffic) carry its uri - the view's 'File'
+    scope filters by it; server-level messages (uri None) show only in
+    the 'Server' scope.
+    """
+
+    def __init__(self, display_name, view):
+        self.display_name = display_name
+        self.view = view
+        self.msgs = []              # LogMsg
+        self._spy_count = 0         # for the PanelLog.SPY_BACKLOG cap
+        self._extra_types = set()   # server stderr, 'o#/...' etc
+        self.diag_filename_info = {}  # uri -> file name (dbl-click jumps)
+
+    @property
+    def name(self):
+        return self.display_name
+
+    def log_str(self, s, type_, severity=SEVERITY_NA, uri=None,
+                scroll=False, update_memo=True):
+        if s and s[-1] != '\n':
+            s += '\n'
+
+        self.msgs.append(LogMsg(s, type_, severity, uri))
+
+        # high-volume spy traffic: keep only the newest SPY_BACKLOG entries
+        if type_ == TYPE_SPY:
+            self._spy_count += 1
+            if self._spy_count > PanelLog.SPY_BACKLOG:
+                drop = self._spy_count - PanelLog.SPY_BACKLOG
+                kept = []
+                for m in self.msgs:
+                    if m.type == TYPE_SPY:
+                        if drop > 0:
+                            drop -= 1
+                            continue
+                    kept.append(m)
+                self.msgs[:] = kept
+                self._spy_count = PanelLog.SPY_BACKLOG
+
+        self.view.on_store_msg(self, scroll=scroll, render=update_memo)
+
+        # new log type appeared -> statusbar filter cells must show it
+        if isinstance(type_, str) and type_ not in self._extra_types:
+            self._extra_types.add(type_)
+            self.view.on_store_types(self)
+
+    def log(self, msg):   # lsp: ShowMessageParams, LogMessageParams
+        severity_str = SEVERITY_MAP[msg.type.value]
+        self.log_str(msg.message, type_=type(msg), severity=severity_str,
+                     scroll=True)
+
+    def flush(self):
+        """ Render messages which were logged with update_memo=False (e.g.
+        the spy traffic) - call once after a batch of messages was logged.
+        """
+        self.view.flush()
+
+    def _update_memo(self):
+        self.view.render()
+
+    def _scroll_to_end(self, *args, **vargs):
+        if self.view is not None:
+            self.view._scroll_to_end()
+
+    def clear_diagnostics(self, uri=None):
+        """ Drop diagnostic messages - only of ONE document when its uri is
+        given (per-file: other documents' blocks stay for their own focus).
+        """
+        if uri is None:
+            self.msgs[:] = [m for m in self.msgs
+                            if _type_caption(m.type) != TYPE_DIAG]
+            self.diag_filename_info.clear()
+        else:
+            self.msgs[:] = [m for m in self.msgs
+                            if not (m.uri == uri and
+                                    _type_caption(m.type) == TYPE_DIAG)]
+            self.diag_filename_info.pop(uri, None)
+        self._spy_count = sum(1 for m in self.msgs if m.type == TYPE_SPY)
+        self.view.on_store_cleared(self)
+
+    def clear(self):
+        self.msgs.clear()
+        self._spy_count = 0
+        self.diag_filename_info.clear()
+        self.view.on_store_cleared(self)
+
+    def set_lex(self, lexer):
+        self.view.set_lex(lexer)
+
+    def get_state(self):
+        # filter/wrap/scope are VIEW state (shared by all instances of one
+        # server config: one panel, one set of toggles)
+        return self.view.get_state()
+
+    def detach(self):
+        """ Instance is being shut down: forget it in the shared view. """
+        self.view.forget_store(self)
+
+
 class PanelLog:
 
     fn_icon = os.path.join(os.path.dirname(__file__), 'icons', 'lsp.png')
@@ -400,22 +518,110 @@ class PanelLog:
     # session): bound the backlog so the panel stays fast and small.
     SPY_BACKLOG = 500
 
+    # lsp params classes -> panel category (used by _type_caption)
+    type_captions = {
+        lsp.ShowMessageParams: TYPE_MSG,
+        lsp.LogMessageParams: TYPE_LOG,
+    }
+
+    # statusbar cells which are not category filters
+    CELL_SCOPE = '__scope__'
+    CELL_INSTANCE = '__instance__'
+
+    def register_store(self, store):
+        """ Attach a server instance's store to this view (called by
+        Language.__init__). The first one becomes the shown context. """
+        if store not in self._stores:
+            self._stores.append(store)
+        if self._store is None:
+            self.set_context(store, None)
+
+    def forget_store(self, store):
+        """ Instance shut down (folder removed / server restarted): drop it
+        from the instance picker; blank the view if it was shown. """
+        if store in self._stores:
+            self._stores.remove(store)
+        if self._store is store:
+            self._store = None
+            self._uri = None
+            self.render()
+            self._update_sb()
+            self._update_counts()
+            self._update_sidebar()
+
+    def set_context(self, store, uri=None):
+        """ Show this server instance's store, scoped to this document uri
+        (the panel follows the focused editor tab). No-op when unchanged.
+        Stores register via register_store() at Language creation; a
+        detached (shut down) store is NOT resurrected here.
+        """
+        if store is not None and store not in self._stores:
+            return  # stale focus event of a shut-down instance
+        if self._store is store and self._uri == uri:
+            return
+        self._store = store
+        self._uri = uri
+        self._memo_dirty = False
+        self.render()
+        self._update_sb()
+        self._update_counts()
+        self._update_sidebar()
+
+    # -- store -> view notifications --
+
+    def on_store_msg(self, store, scroll=False, render=True):
+        if self._store is not store:
+            return  # not shown: full render happens on the next set_context
+        if render:
+            self._memo_dirty = False
+            self.render()
+        else:
+            # batched: rendered later by flush() - fast for high-volume traffic
+            self._memo_dirty = True
+
+        if scroll:
+            # let the memo render first, then scroll it to the last entry
+            timer_proc(TIMER_START_ONE, self._scroll_to_end, 50, tag='')
+
+        timer_proc(TIMER_START_ONE, self._update_counts, 500)
+        self._update_sidebar()
+
+    def on_store_types(self, store):
+        if self._store is store:
+            self._update_sb()
+
+    def on_store_cleared(self, store):
+        if self._store is store:
+            self._memo_dirty = False
+            self.render()
+            self._update_counts()
+            self._update_sidebar()
+
     def __init__(self, panel_name, state=None):
         PanelLog.panels[panel_name] = self
-        PanelLog.type_captions = {
-            lsp.ShowMessageParams: TYPE_MSG,
-            lsp.LogMessageParams: TYPE_LOG,
-        }
 
         self.name = panel_name
 
-        self._msgs = [] # lsp.ShowMessageParams, lsp.LogMessageParams, tuple(type_, str)
+        # context: which server instance's store + which document's uri the
+        # view currently shows. Follows the focused editor tab
+        # (Language.on_ed_shown -> set_context), like Zed's logs pane.
+        self._stores = []   # registered LogStores (instances of the server)
+        self._store = None  # currently shown store
+        self._uri = None    # focused document's uri (for 'file' scope)
+
+        # scope toggle (VS Code Problems-style 'active file' filter):
+        # 'file'   - only messages of the focused document (its uri-tagged
+        #            entries) + server-level entries of its instance;
+        #            the DEFAULT - the panel never mixes files
+        # 'server' - all messages of the shown server instance
+        self._scope = state.get('log_panel_scope')  if isinstance(state, dict) else  None
+        if self._scope not in ('server', 'file'):
+            self._scope = 'file'
+
         self._extra_types = set() # server stderr, etc
-        self._spy_count = 0 # for the SPY_BACKLOG cap
         self._memo_dirty = False # msgs added without memo update (spy batching)
-        self.diag_filename_info = {}
         # filter panel: disabled "categories"
-        self._disabled_items = set(state.get('log_panel_filter'))  if isinstance(state, dict) else  set()
+        self._disabled_items = set(state.get('log_panel_filter') or ())  if isinstance(state, dict) else  set()
         self._is_wrap = state.get('is_wrap')  if isinstance(state, dict) else  True
 
         self._memo_pos = (0,0)
@@ -449,8 +655,11 @@ class PanelLog:
         y = self._memo.get_carets()[0][1]
         lines = self._memo.get_text_all().splitlines()
 
-        # read the cached filename (and falls back to old scanning 'File: ' if cached filename is absent).
-        fn = self.diag_filename_info.get(self.name)
+        # read the cached filename (and falls back to old scanning 'File: '
+        # if cached filename is absent).
+        fn = None
+        if self._store is not None:
+            fn = self._store.diag_filename_info.get(self._uri)
         if not fn:
             for i in reversed(range(y)):
                 line_txt = lines[i]
@@ -571,9 +780,32 @@ class PanelLog:
         statusbar_proc(h_sb, STATUSBAR_SET_COLOR_BORDER_R, value=self.colors['TabBorderActive']['color'])
 
         callbac_fstr = 'module=cuda_lsp.dlg;func=on_panellog_sb_click;info="{}";'
+
         ###### FILL
-        # Left: classes (Msg, Log, Other)  +  State - On/Off
-        for name in [TYPE_MSG,  TYPE_LOG,  *sorted(self._extra_types)]:
+        # Left: server instance picker + scope toggle (File/Server)
+        inst_caption = self._store.display_name  if self._store else  '-'
+        for cell_name, caption, hint in [
+            (self.CELL_INSTANCE, inst_caption, _('Server instance (click to switch)')),
+            (self.CELL_SCOPE,
+             _('File') if self._scope == 'file' else _('Server'),
+             _('Scope: messages of the focused file only / of its whole server')),
+        ]:
+            cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
+            self._sb_cellind_map[cell_name] = cellind
+
+            statusbar_proc(h_sb, STATUSBAR_SET_CELL_TEXT, index=cellind, value=caption)
+            _callback = callbac_fstr.format(cell_name)
+            statusbar_proc(h_sb, STATUSBAR_SET_CELL_CALLBACK, index=cellind, value=_callback)
+            statusbar_proc(h_sb, STATUSBAR_SET_CELL_HINT, index=cellind, value=hint)
+            statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_LINE2, index=cellind,
+                                                                    value=line_enabled_color)
+            statusbar_proc(h_sb, STATUSBAR_SET_CELL_AUTOSIZE, index=cellind, value=True)
+            statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind, value=bg_color)
+            statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_FONT, index=cellind, value=font_enabled_color)
+
+        # classes (Msg, Log, Spy, ...) of the SHOWN instance
+        extra = self._store._extra_types  if self._store else  set()
+        for name in [TYPE_MSG,  TYPE_LOG,  *sorted(extra)]:
             cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
             self._sb_cellind_map[name] = cellind
 
@@ -629,12 +861,23 @@ class PanelLog:
             _overlay = msg_counts.get(name, '')
             statusbar_proc(self._h_sb, STATUSBAR_SET_CELL_OVERLAY, index=cellind, value=str(_overlay))
 
-    def _update_memo(self):
+    def _visible_msgs(self):
+        """ Messages of the shown store, after scope + category filtering -
+        exactly what the memo displays. 'file' scope keeps the focused
+        document's uri-tagged messages plus server-level ones (uri None). """
+        if self._store is None:
+            return []
+        msgs = self._store.msgs
+        if self._scope == 'file' and self._uri is not None:
+            msgs = [m for m in msgs if m.uri in (None, self._uri)]
+        return [m for m in msgs if self._filter_msg(m)]
+
+    def render(self):
         self._reset_memo()
         self._memo.decor(DECOR_DELETE_BY_TAG, tag=PANEL_LOG_TAG)
 
-        self._append_memo_msgs([msg for msg in self._msgs if self._filter_msg(msg)])
-        
+        self._append_memo_msgs(self._visible_msgs())
+
         ## some bugs workarounds:
         # make sure ..line_top is never greater then ..line_count
         if self._memo.get_prop(PROP_LINE_TOP) >= self._memo.get_line_count()-1:
@@ -645,79 +888,18 @@ class PanelLog:
             self._memo.set_prop(PROP_LINE_TOP, self._memo.get_prop(PROP_LINE_TOP))
         ##
 
-    def log(self, msg):   # lsp: ShowMessageParams, LogMessageParams
-        severity_str = SEVERITY_MAP[msg.type.value]
-        self.log_str(msg.message, type_=type(msg), severity=severity_str, scroll=True)
-
-    def log_str(self, s, type_, severity=SEVERITY_NA, scroll=False, update_memo=True):
-        if s and s[-1] != '\n':
-            s += '\n'
-
-        lm = LogMsg(s, type=type_, severity=severity)
-
-        self._msgs.append(lm)
-
-        # high-volume spy traffic: keep only the newest SPY_BACKLOG entries
-        if type_ == TYPE_SPY:
-            self._spy_count += 1
-            if self._spy_count > self.SPY_BACKLOG:
-                drop = self._spy_count - self.SPY_BACKLOG
-                kept = []
-                for m in self._msgs:
-                    if m.type == TYPE_SPY:
-                        if drop > 0:
-                            drop -= 1
-                            continue
-                    kept.append(m)
-                self._msgs[:] = kept
-                self._spy_count = self.SPY_BACKLOG
-
-        if update_memo:
-            self._memo_dirty = False
-            self._update_memo()
-        else:
-            # batched: rendered later by flush() - fast for high-volume traffic
-            self._memo_dirty = True
-
-        if scroll:
-            # let the memo render first, then scroll it to the last entry
-            timer_proc(TIMER_START_ONE, self._scroll_to_end, 50, tag='')
-
-        timer_proc(TIMER_START_ONE, self._update_counts, 500)
-        self._update_sidebar()
-
-        # add na severity if needed
-        if severity == SEVERITY_NA  and  not self._have_na_severity:
-            SEVERITYS.append(SEVERITY_NA)
-            self._have_na_severity = True
-        # new log type appeared
-        if isinstance(type_, str)  and  type_ not in self._extra_types:
-            self._extra_types.add(type_)
-            self._update_sb()
-
     def flush(self):
-        """ Render messages which were logged with update_memo=False (e.g. the
-        spy traffic) - call once after a batch of messages was logged.
-        """
+        """ Render messages of the shown store which were logged with
+        update_memo=False (e.g. the spy traffic). """
         if self._memo_dirty:
             self._memo_dirty = False
-            self._update_memo()
+            self.render()
 
-    def clear_diagnostics(self):
-        self._msgs = [ msg for msg in self._msgs if PanelLog.type_captions.get(msg.type, msg.type) != TYPE_DIAG ]
-        self._spy_count = sum(1 for msg in self._msgs if msg.type == TYPE_SPY)
-        self._update_memo()
-        self._update_counts()
-        self._update_sidebar()
-        self.diag_filename_info.pop(self.name, None)
-        
     def clear(self):
-        self._msgs.clear()
-        self._spy_count = 0
-        self._update_memo()
-        self._update_counts()
-        self._update_sidebar()
-        self.diag_filename_info.clear()
+        """ User 'Clear' (editor context menu): drop everything from the
+        SHOWN instance's store. """
+        if self._store is not None:
+            self._store.clear()
 
     def toggle_wrap(self):
         self._is_wrap = not self._is_wrap
@@ -729,7 +911,8 @@ class PanelLog:
 
     def _update_sidebar(self):
         if self._h_btn_sidebar:
-            overlay_text = str(len(self._msgs)) if len(self._msgs) > 0 else '' # clear if zero
+            n = len(self._store.msgs)  if self._store else  0
+            overlay_text = str(n) if n > 0 else '' # clear if zero
             button_proc(self._h_btn_sidebar, BTN_SET_OVERLAY, overlay_text)
             
     def _scroll_to_end(self, *args, **vargs):
@@ -777,15 +960,15 @@ class PanelLog:
 
 
     def _filter_msg(self, msg):
-        type_str = PanelLog.type_captions.get(msg.type, msg.type)
+        type_str = _type_caption(msg.type)
 
         if type_str not in self._disabled_items  and  msg.severity not in self._disabled_items:
             return True
 
     def _get_msg_counts(self):
         r = defaultdict(int)
-        for msg in self._msgs:
-            type_str = PanelLog.type_captions.get(msg.type, msg.type)
+        for msg in self._visible_msgs():
+            type_str = _type_caption(msg.type)
             r[type_str] += 1
             r[msg.severity] += 1
         return r
@@ -795,6 +978,7 @@ class PanelLog:
         state = {
             'log_panel_filter': list(self._disabled_items),
             'is_wrap': self._is_wrap,
+            'log_panel_scope': self._scope,
         }
         return state
 
@@ -812,12 +996,13 @@ class PanelLog:
 
     def close(self):
         self._reset_memo()
-        self._msgs.clear()
+        for store in self._stores:
+            store.view = None
+        self._stores.clear()
+        self._store = None
 
         app_proc(PROC_BOTTOMPANEL_REMOVE, self.sidepanel_name)
         dlg_proc(self.h_dlg, DLG_FREE)
-
-        self.diag_filename_info.clear()
 
         del PanelLog.panels[self.name]
 
@@ -828,14 +1013,32 @@ class PanelLog:
         """
         for plog in cls.panels.values():
             if plog.h_dlg == id_dlg:
-                if info in plog._disabled_items:
-                    plog._disabled_items.remove(info)
-                else:
-                    plog._disabled_items.add(info)
-
-                plog._update_sb()
-                plog._update_memo()
+                plog.on_cell_click(info)
                 break
+
+    def on_cell_click(self, info):
+        if info == self.CELL_SCOPE:
+            self._scope = 'file'  if self._scope == 'server' else  'server'
+            self.render()
+            self._update_sb()
+            self._update_counts()
+            return
+
+        if info == self.CELL_INSTANCE:
+            # cycle through the instances of this server config
+            if self._store is not None and len(self._stores) > 1:
+                ind = self._stores.index(self._store)
+                self.set_context(self._stores[(ind + 1) % len(self._stores)],
+                                 self._uri)
+            return
+
+        if info in self._disabled_items:
+            self._disabled_items.remove(info)
+        else:
+            self._disabled_items.add(info)
+
+        self._update_sb()
+        self.render()
 
     @classmethod
     def on_theme_change(cls):
@@ -861,12 +1064,23 @@ class PanelLog:
 
     @classmethod
     def get_logger(cls, panel_name, state):
-        """ Main way to create panel objects
+        """ Get/create the shared VIEW (bottom panel) of one server config
+        name. Per-instance models (LogStore) are created by the caller and
+        registered via register_store().
         """
         if panel_name not in cls.panels:
             cls.panels[panel_name] = PanelLog(panel_name, state)
 
         return cls.panels[panel_name]
+
+    @classmethod
+    def make_store(cls, panel_name, display_name, state=None):
+        """ Create the per-instance log model shown in the shared view of
+        'panel_name' (the server config name). 'display_name' tells
+        instances apart in the view's picker cell: the bare config name,
+        or 'name (folder)' for per-folder instances. """
+        view = cls.get_logger(panel_name, state)
+        return LogStore(display_name, view)
 
 class SignaturesDialog:
     

@@ -24,6 +24,7 @@ _ = get_translation(__file__)  # I18N
 from .util import (
         get_first,
         ed_uri,
+        ed_uri as doc_uri,
         get_visible_eds,
         get_word,
         get_nonwords_chars,
@@ -210,7 +211,19 @@ class Language:
 
 
         self._client = None
-        self.plog = PanelLog.get_logger(self.name, state=state)
+        # per-instance log model ('plog' API kept: log/log_str/flush/clear/
+        # set_lex/get_state/diag_filename_info), rendered by the shared
+        # PanelLog view of the server config name - so per-folder instances
+        # of one single-root server each get their OWN messages while
+        # sharing one bottom panel (the view follows the focused tab)
+        state_cfg = state or {}
+        panel_key = self.name
+        if self._root_folder:
+            disp = f'{self.name} ({os.path.basename(self._root_folder)})'
+        else:
+            disp = self.name
+        self.plog = PanelLog.make_store(panel_key, disp, state=state_cfg)
+        self.plog.view.register_store(self.plog)
         self._treeman = None
         # weakref needs a strong reference for a method-ref to work
         self._timer_callback = self.process_queues
@@ -815,6 +828,24 @@ class Language:
         self.plog.log_str(text, type_=TYPE_UNHANDLED, severity=SEVERITY_WRN, scroll=True)
 
 
+    @staticmethod
+    def _spy_msg_uri(content):
+        """ Document uri a spy'd JSON-RPC message belongs to (for the
+        panel's per-file scope), None for server-level messages. """
+        try:
+            params = content.get('params')
+            if not isinstance(params, dict):
+                return None
+            td = params.get('textDocument')
+            if isinstance(td, dict) and isinstance(td.get('uri'), str):
+                return td['uri']
+            uri = params.get('uri')
+            if isinstance(uri, str):
+                return uri
+        except Exception:
+            pass
+        return None
+
     def _on_spy_message(self, direction, content, method=None):
         """ DEBUG_DEV message spy: log every JSON-RPC message (raw JSON, both
         directions) to the LSP panel's 'Spy' category. Registered on the
@@ -851,7 +882,7 @@ class Language:
 
             # 3b. Full-text copy to SPY_FILE (option 'spy_file'): the panel
             # truncates at SPY_MSG_LIMIT, this loses NOTHING. Line-buffered
-            # plain text, one message per line, so a hung/crashed CudaText
+            # plain text, so a hung/crashed CudaText
             # still leaves everything received so far on disk
             if SPY_FILE:
                 try:
@@ -863,11 +894,13 @@ class Language:
                     pass  # logging must never break message processing
 
             # 4. Log it (update_memo=False: batched render by flush(),
-            # fast enough for high-volume traffic)
+            # fast enough for high-volume traffic); uri-tagged so the
+            # panel's 'File' scope shows only the focused document's traffic
             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
             self.plog.log_str(
                 f'[{timestamp}] {arrow} {way} {kind:<12}: {name} _ {body}',
-                type_=TYPE_SPY, severity=SEVERITY_LOG, update_memo=False)
+                type_=TYPE_SPY, severity=SEVERITY_LOG, uri=self._spy_msg_uri(content),
+                update_memo=False)
         except Exception:
             # spying must never break message processing
             pass
@@ -900,7 +933,14 @@ class Language:
 
 
     def on_ed_shown(self, eddoc):
+        """ The doc's editor became the visible one (tab switched to it):
+        refresh its diagnostics AND switch the LSP panel to THIS server
+        instance, scoped to THIS document - the panel follows the focused
+        tab, like Zed's language-server logs pane. """
         self.diagnostics_man.on_doc_shown(eddoc)
+        view = self.plog.view
+        if view is not None:
+            view.set_context(self.plog, eddoc.uri)
 
     def on_open(self, eddoc):
         if self.client.is_initialized:
@@ -1552,13 +1592,12 @@ class Language:
 
 
     def get_state_pair(self):
-        # folder-bound instances ('single_root' server, one per workspace
-        # folder) get their own state key, so they don't overwrite each
-        # other in lsp.STATE
-        key = self.name + ('//' + self._root_folder if self._root_folder else '')
+        # the state is VIEW-level (panel filter/wrap/scope toggles) and
+        # shared by all instances of one server config: saved under the
+        # bare config name, per-folder instances don't overwrite each other
         state = self.plog.get_state()
 
-        return key,state
+        return self.name, state
 
     def shutdown(self, *args, **vargs):
         pass;       LOG and print('-- lang - shutting down')
@@ -1577,6 +1616,13 @@ class Language:
 
             if self.sock:
                 self.sock.close()
+
+            # forget this instance's log store in the shared panel view
+            # (its messages must not appear as another instance's context)
+            try:
+                self.plog.detach()
+            except Exception:
+                pass
 
             self._closed = True
             self._timer.stop()
@@ -1761,7 +1807,7 @@ class DiagnosticsMan:
                 self.dirtys.add(uri)
 
     def _apply_diagnostics(self, ed: Editor, diag_list):
-        self.logger.clear_diagnostics()
+        self.logger.clear_diagnostics(doc_uri(ed))
         if self._linttype  or  self._highlight_bg:
             self._clear_old(ed)
 
@@ -1809,11 +1855,13 @@ class DiagnosticsMan:
                         fn = ed.get_filename()
                         self.logger.log_str(f"File: {fn}",
                             type_=TYPE_DIAG, severity=SEVERITY_MAP.get(d.severity, SEVERITY_NA),
+                            uri=doc_uri(ed), # per-file: panel 'File' scope
                             update_memo=False # _update_memo() will be called after the loop
                         )
-                        self.logger.diag_filename_info[self.logger.name] = fn
+                        self.logger.diag_filename_info[doc_uri(ed)] = fn
                     self.logger.log_str(f"Line {d.range.start.line+1}: {text}",
                         type_=TYPE_DIAG, severity=SEVERITY_MAP.get(d.severity, SEVERITY_NA),
+                        uri=doc_uri(ed), # per-file: panel 'File' scope
                         update_memo=False # _update_memo() will be called after the loop
                     )
 
