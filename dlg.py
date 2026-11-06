@@ -525,14 +525,18 @@ class PanelLog:
     }
 
     # statusbar cells which are not category filters
-    CELL_SCOPE = '__scope__'
     CELL_INSTANCE = '__instance__'
+
+    # fixed width of the instance cell (pixels): names like
+    # 'server (project-folder)' must not resize the bar on every switch
+    INSTANCE_CELL_W = 180
 
     def register_store(self, store):
         """ Attach a server instance's store to this view (called by
         Language.__init__). The first one becomes the shown context. """
         if store not in self._stores:
             self._stores.append(store)
+            self._update_sidebar()  # instance count / total messages grew
         if self._store is None:
             self.set_context(store, None)
 
@@ -546,14 +550,15 @@ class PanelLog:
             self._uri = None
             self.render()
             self._update_sb()
-            self._update_counts()
-            self._update_sidebar()
+        self._update_counts()
+        self._update_sidebar()
 
     def set_context(self, store, uri=None):
         """ Show this server instance's store, scoped to this document uri
         (the panel follows the focused editor tab). No-op when unchanged.
         Stores register via register_store() at Language creation; a
-        detached (shut down) store is NOT resurrected here.
+        detached (shut down) store is NOT resurrected here. store=None
+        (tab without a server) blanks the panel.
         """
         if store is not None and store not in self._stores:
             return  # stale focus event of a shut-down instance
@@ -570,19 +575,20 @@ class PanelLog:
     # -- store -> view notifications --
 
     def on_store_msg(self, store, scroll=False, render=True):
-        if self._store is not store:
-            return  # not shown: full render happens on the next set_context
-        if render:
-            self._memo_dirty = False
-            self.render()
-        else:
-            # batched: rendered later by flush() - fast for high-volume traffic
-            self._memo_dirty = True
+        if self._store is store:
+            if render:
+                self._memo_dirty = False
+                self.render()
+            else:
+                # batched: rendered later by flush() - fast for high-volume traffic
+                self._memo_dirty = True
 
-        if scroll:
-            # let the memo render first, then scroll it to the last entry
-            timer_proc(TIMER_START_ONE, self._scroll_to_end, 50, tag='')
-
+            if scroll:
+                # let the memo render first, then scroll it to the last entry
+                timer_proc(TIMER_START_ONE, self._scroll_to_end, 50, tag='')
+        # totals must update for ANY instance's messages - shown or not:
+        # the counters and the sidebar overlay tell the user "there is
+        # something in the panel" without activating it first
         timer_proc(TIMER_START_ONE, self._update_counts, 500)
         self._update_sidebar()
 
@@ -607,16 +613,7 @@ class PanelLog:
         # (Language.on_ed_shown -> set_context), like Zed's logs pane.
         self._stores = []   # registered LogStores (instances of the server)
         self._store = None  # currently shown store
-        self._uri = None    # focused document's uri (for 'file' scope)
-
-        # scope toggle (VS Code Problems-style 'active file' filter):
-        # 'file'   - only messages of the focused document (its uri-tagged
-        #            entries) + server-level entries of its instance;
-        #            the DEFAULT - the panel never mixes files
-        # 'server' - all messages of the shown server instance
-        self._scope = state.get('log_panel_scope')  if isinstance(state, dict) else  None
-        if self._scope not in ('server', 'file'):
-            self._scope = 'file'
+        self._uri = None    # focused document's uri (per-file Diagnostics)
 
         self._extra_types = set() # server stderr, etc
         self._memo_dirty = False # msgs added without memo update (spy batching)
@@ -782,26 +779,23 @@ class PanelLog:
         callbac_fstr = 'module=cuda_lsp.dlg;func=on_panellog_sb_click;info="{}";'
 
         ###### FILL
-        # Left: server instance picker + scope toggle (File/Server)
+        # Left: server instance picker - constant width, dropdown on click
         inst_caption = self._store.display_name  if self._store else  '-'
-        for cell_name, caption, hint in [
-            (self.CELL_INSTANCE, inst_caption, _('Server instance (click to switch)')),
-            (self.CELL_SCOPE,
-             _('File') if self._scope == 'file' else _('Server'),
-             _('Scope: messages of the focused file only / of its whole server')),
-        ]:
-            cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
-            self._sb_cellind_map[cell_name] = cellind
+        cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
+        self._sb_cellind_map[self.CELL_INSTANCE] = cellind
 
-            statusbar_proc(h_sb, STATUSBAR_SET_CELL_TEXT, index=cellind, value=caption)
-            _callback = callbac_fstr.format(cell_name)
-            statusbar_proc(h_sb, STATUSBAR_SET_CELL_CALLBACK, index=cellind, value=_callback)
-            statusbar_proc(h_sb, STATUSBAR_SET_CELL_HINT, index=cellind, value=hint)
-            statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_LINE2, index=cellind,
-                                                                    value=line_enabled_color)
-            statusbar_proc(h_sb, STATUSBAR_SET_CELL_AUTOSIZE, index=cellind, value=True)
-            statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind, value=bg_color)
-            statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_FONT, index=cellind, value=font_enabled_color)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_TEXT, index=cellind, value=inst_caption)
+        _callback = callbac_fstr.format(self.CELL_INSTANCE)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_CALLBACK, index=cellind, value=_callback)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_HINT, index=cellind,
+                       value=_('Server instance (click to pick)'))
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_ALIGN, index=cellind, value='C')
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_LINE2, index=cellind,
+                                                                value=line_enabled_color)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_SIZE, index=cellind,
+                       value=self.INSTANCE_CELL_W)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind, value=bg_color)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_FONT, index=cellind, value=font_enabled_color)
 
         # classes (Msg, Log, Spy, ...) of the SHOWN instance
         extra = self._store._extra_types  if self._store else  set()
@@ -861,16 +855,29 @@ class PanelLog:
             _overlay = msg_counts.get(name, '')
             statusbar_proc(self._h_sb, STATUSBAR_SET_CELL_OVERLAY, index=cellind, value=str(_overlay))
 
-    def _visible_msgs(self):
-        """ Messages of the shown store, after scope + category filtering -
-        exactly what the memo displays. 'file' scope keeps the focused
-        document's uri-tagged messages plus server-level ones (uri None). """
+    def _total_msg_count(self):
+        """ Messages of ALL instances of this server config - the sidebar
+        button overlay ("the panel has something") must grow no matter
+        which instance (shown or not) received them. """
+        return sum(len(store.msgs) for store in self._stores)
+
+    def _context_msgs(self):
+        """ Messages of the shown store in the current context. Only the
+        Diagnostics category is per-file (its blocks carry the document
+        uri; blocks of other files are hidden - the shown block is always
+        the focused file's): everything else the server sends is visible.
+        """
         if self._store is None:
             return []
-        msgs = self._store.msgs
-        if self._scope == 'file' and self._uri is not None:
-            msgs = [m for m in msgs if m.uri in (None, self._uri)]
-        return [m for m in msgs if self._filter_msg(m)]
+        if self._uri is None:
+            return self._store.msgs
+        return [m for m in self._store.msgs
+                if _type_caption(m.type) != TYPE_DIAG or m.uri == self._uri]
+
+    def _visible_msgs(self):
+        """ What the memo displays: context messages after category /
+        severity filtering. """
+        return [m for m in self._context_msgs() if self._filter_msg(m)]
 
     def render(self):
         self._reset_memo()
@@ -911,7 +918,7 @@ class PanelLog:
 
     def _update_sidebar(self):
         if self._h_btn_sidebar:
-            n = len(self._store.msgs)  if self._store else  0
+            n = self._total_msg_count()
             overlay_text = str(n) if n > 0 else '' # clear if zero
             button_proc(self._h_btn_sidebar, BTN_SET_OVERLAY, overlay_text)
             
@@ -966,11 +973,16 @@ class PanelLog:
             return True
 
     def _get_msg_counts(self):
+        """ Cell counters, computed from the CONTEXT messages, NOT the
+        category-filtered ones: a disabled category still shows its count,
+        so the user sees there is something in it without enabling it.
+        The instance cell's overlay is the number of running instances. """
         r = defaultdict(int)
-        for msg in self._visible_msgs():
+        for msg in self._context_msgs():
             type_str = _type_caption(msg.type)
             r[type_str] += 1
             r[msg.severity] += 1
+        r[self.CELL_INSTANCE] = len(self._stores)
         return r
 
 
@@ -978,7 +990,6 @@ class PanelLog:
         state = {
             'log_panel_filter': list(self._disabled_items),
             'is_wrap': self._is_wrap,
-            'log_panel_scope': self._scope,
         }
         return state
 
@@ -1017,19 +1028,16 @@ class PanelLog:
                 break
 
     def on_cell_click(self, info):
-        if info == self.CELL_SCOPE:
-            self._scope = 'file'  if self._scope == 'server' else  'server'
-            self.render()
-            self._update_sb()
-            self._update_counts()
-            return
-
         if info == self.CELL_INSTANCE:
-            # cycle through the instances of this server config
-            if self._store is not None and len(self._stores) > 1:
-                ind = self._stores.index(self._store)
-                self.set_context(self._stores[(ind + 1) % len(self._stores)],
-                                 self._uri)
+            # dropdown: pick which instance of this server config to show.
+            # The panel follows the focused tab - this is for looking into
+            # another instance's log without switching tabs
+            names = [store.display_name for store in self._stores]
+            if names:
+                focused = self._stores.index(self._store)  if self._store in self._stores else  0
+                ind = dlg_menu(DMENU_LIST, names, focused=focused)
+                if ind is not None and 0 <= ind < len(self._stores):
+                    self.set_context(self._stores[ind], None)
             return
 
         if info in self._disabled_items:

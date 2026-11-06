@@ -14,7 +14,7 @@ from cudax_lib import get_translation
 _ = get_translation(__file__)  # I18N
 
 from . import dlg
-from .dlg import Hint, SignaturesDialog
+from .dlg import Hint, SignaturesDialog, PanelLog
 from .util import (
         lex2langid,
         update_lexmap,
@@ -547,10 +547,30 @@ class Command:
         self._on_project_dirs_change()
 
         doc = self.book.get_doc(ed_self)
-        if doc  and  doc.lang:
-            doc.lang.on_ed_shown(doc)
-        else: # look for matching server if not already opened
+        lang = doc.lang  if doc else  None
+
+        if lang is None:
+            # no server yet for this tab - look for a matching server.
+            # This can LAZILY CREATE the server instance (folder-bound
+            # single-root servers, first file of a folder): the instance
+            # then needs a handshake before it can didOpen, doc.lang gets
+            # set later in on_lang_inited() - which also switches the
+            # panel context to it then
             self.on_open(ed_self)
+            lang = None
+            doc = self.book.get_doc(ed_self)
+            if doc:
+                lang = doc.lang
+            if lang is None:
+                # still no server for this tab: the panel must not keep
+                # showing the previous tab's server content - reset it
+                # (all shared panels; only the focused file's one has any)
+                uri = ed_uri(ed_self)
+                for panel in PanelLog.panels.values():
+                    panel.set_context(None, uri)
+                return
+
+        lang.on_ed_shown(doc)
 
 
     def on_lang_inited(self, name):
@@ -564,6 +584,22 @@ class Command:
                 for doc in self.book.get_docs():
                     if doc.lang is None  and  is_ed_visible(doc.ed):
                         self.on_open(doc.ed)
+                # a tab switched to this server's file BEFORE the handshake
+                # finished may still have no doc.lang (lazily created
+                # instance, didOpen pending): switch the panel to the
+                # instance anyway - the focused file's messages must render
+                # as they arrive, not after another tab switch
+                for ed in get_visible_eds():
+                    if lex2langid(ed.get_prop(PROP_LEXER_FILE)) not in lang.langids:
+                        continue
+                    doc = self.book.get_doc(ed)
+                    if doc is not None and doc.lang is not None and doc.lang is not lang:
+                        continue  # visible tab is served by another server
+                    if doc is not None and doc.lang is lang:
+                        lang.on_ed_shown(doc)
+                    else:
+                        lang.on_ed_shown_panel_only(ed)
+                    break
                 break # found initted lang
 
     def on_state(self, ed_self, state):

@@ -219,28 +219,32 @@ To enable and configure this, call "LSP Client / Config" command and see the fol
 LSP panel (bottom panel "LSP: <server name>")
 --------------------------------------------
 The panel shows messages of the LSP server of the FOCUSED EDITOR TAB - it follows
-the tab you switch to (like Zed's language-server logs; VS Code has one output
-channel per server instead, which must be picked by hand).
+the tab you switch to, immediately (like Zed's language-server logs; VS Code has
+one output channel per server instead, which must be picked by hand).
 Every server instance has its own set of messages; single-root servers with one
 instance per project folder (OmniSharp) show 'name (folder)' per instance.
 
 Cells in the panel's top bar:
-- instance cell - name of the shown server instance; click to cycle through
-  the running instances of the server;
-- 'File/Server' scope toggle (like VS Code Problems' 'active file' filter):
-  'File' (default) shows only messages of the focused document plus
-  server-level messages (startup, workspace events...), 'Server' shows
-  everything of the instance;
+- instance cell - name of the shown server instance (fixed width); click for
+  a dropdown of all running instances of the server, click an entry to switch
+  to it; the counter on the cell shows the number of running instances;
 - category cells (Messages, Logs, Diagnostics, Spy, OmniSharp, server
-  stderr...) and severity icons - toggle filters, counters on cells show
-  what is visible in the current context.
+  stderr...) and severity icons - toggle filters; counters on the cells show
+  the message totals of the shown instance ALWAYS (also for disabled
+  categories), so you see there is something without enabling the category.
 
-This applies to all message kinds: diagnostics of the focused file, server
-Messages/Logs, OmniSharp 'o#/...' events, Spy (JSON-RPC traffic - messages
-which carry a document uri, like didOpen/completion/publishDiagnostics of
-other files, are filtered out in 'File' scope), and server stderr.
+All message kinds of the focused file's server instance are shown:
+server Messages/Logs, OmniSharp 'o#/...' events, Spy (JSON-RPC traffic),
+server stderr. Only the Diagnostics blocks are per-file: the panel shows
+the diagnostics of the focused file, blocks of other files are hidden
+(the focused file's server re-sends them when they change).
 Double-click a 'Line N: ...' diagnostic to jump to it.
-The filters, word wrap and the File/Server toggle are remembered per server.
+The category filters and word wrap are remembered per server.
+The 'Messages' category receives 'window/showMessage' - one-shot messages
+with a severity which the server wants to SHOW to the user (e.g. "project
+loaded", or an error banner); most servers send none, that is why the
+category is often empty. 'Logs' receives 'window/logMessage' (plain log
+lines) - that is the one usually filled.
 
 
 About

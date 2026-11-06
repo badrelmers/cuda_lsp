@@ -942,6 +942,16 @@ class Language:
         if view is not None:
             view.set_context(self.plog, eddoc.uri)
 
+    def on_ed_shown_panel_only(self, ed):
+        """ Panel-context switch only (no diagnostics refresh): the editor
+        became visible while its server is still initializing - doc.lang
+        is not set yet, so on_ed_shown(eddoc) cannot be used, but the
+        panel must already follow this tab (its messages render as the
+        server starts talking). """
+        view = self.plog.view
+        if view is not None:
+            view.set_context(self.plog, ed_uri(ed))
+
     def on_open(self, eddoc):
         if self.client.is_initialized:
             opts = self.scfg.method_opts(METHOD_DID_OPEN, eddoc)
