@@ -292,6 +292,13 @@ class Command:
 
         self._load_config()
 
+        # give the LSP panel views a self-heal hook: they re-derive their
+        # context from the focused editor tab (sync_panels) whenever a
+        # message arrives for a store which is not shown, or an instance
+        # registers/forgets - no event-ordering assumptions left
+        from .dlg import PanelLog
+        PanelLog.sync_hook = self.sync_panels
+
         # hover dlg calls these with "caret" named param, caret is tuple(caretx, carety)
         self._hint_cmds = {
             _('Definition'):        self.call_definition,
@@ -442,6 +449,9 @@ class Command:
             if doc.lang:
                 doc.lang.on_close(doc)
             self.book.on_close(ed_self) # deletes doc
+            # the tab lost its server binding: if it was the focused one,
+            # the panel must not keep showing that server's content
+            self.sync_panels()
 
     #NOTE: also gets called when document first activated
     def on_lexer(self, ed_self):
@@ -455,6 +465,9 @@ class Command:
                     doc.lang.on_close(doc) # sends on_close to server
                 doc.update()
                 self.on_open(ed_self) # changes/removes lang server of doc
+                # server binding may have changed (lexer switched to/from
+                # a server-supported one): the panel follows the new state
+                self.sync_panels()
         else:    # create doc if new lexer is supported by lsp server
             self.on_open(ed_self)
 
@@ -534,6 +547,98 @@ class Command:
 
         SignaturesDialog.hide()
         
+    def _tab_lang_candidates(self, ed_self):
+        """ Language instances which may serve this editor tab: its doc's
+        server (doc.lang), or instances matching the tab's file/langid -
+        including ones still initializing (their capabilities didn't
+        arrive yet, so is_ed_matches can't see them: folder-bound
+        single-root instances and the misc instance of a single-root
+        server are matched by their folder / langid instead). No instance
+        is CREATED here - this must stay side-effect free. """
+        doc = self.book.get_doc(ed_self)
+        if doc is not None and doc.lang is not None:
+            return [doc.lang]    # authoritative: this doc was didOpen-ed here
+
+        langid = lex2langid(ed_self.get_prop(PROP_LEXER_FILE))
+        if langid is None:
+            return []
+        fn = ed_self.get_filename()
+        norm = os.path.normcase(os.path.normpath(fn)) if fn else None
+
+        out = []
+        seen = []   # ids: one instance can sit under several _langs keys
+        for lang in self._langs.values():
+            if id(lang) in seen:
+                continue
+            seen.append(id(lang))
+            if langid not in getattr(lang, 'langids', ()):
+                continue
+            folder = getattr(lang, '_root_folder', None)
+            if folder is not None:
+                # per-folder instance: only if its folder contains the file
+                if norm and norm.startswith(
+                        os.path.normcase(os.path.normpath(folder)) + os.sep):
+                    out.append(lang)
+            else:
+                # multi-root instance, or the misc instance of a
+                # single-root server (serves files under no folder)
+                out.append(lang)
+        if out and norm:
+            # a folder instance wins over the misc fallback
+            folders = [lang for lang in out
+                       if getattr(lang, '_root_folder', None)]
+            if folders:
+                return folders
+        return out
+
+    def _focused_ed(self):
+        for group_ed in get_visible_eds():
+            if group_ed.get_prop(PROP_FOCUSED):
+                return group_ed
+        return None
+
+    def sync_panels(self, ed_prefer=None):
+        """ Re-derive every LSP panel's context from the FOCUSED editor
+        tab: the panel shows the focused file's server instance (and the
+        focused file's diagnostics). Called on every tab switch (with the
+        switched-to editor as 'ed_prefer') and as a self-heal (a panel
+        whose context went stale notices on the next message of a
+        not-shown store). No server instance is created here - lazy
+        creation belongs to on_open/on_tab_change only. A manual
+        instance-picker selection is respected (the view's _picked flag)
+        until the next tab switch clears it.
+        """
+        ed_focus = None
+        if ed_prefer is not None and ed_prefer.get_prop(PROP_FOCUSED):
+            ed_focus = ed_prefer
+        if ed_focus is None:
+            ed_focus = self._focused_ed()
+        if ed_focus is None:
+            return  # no editor focused: keep the current context
+
+        langs = self._tab_lang_candidates(ed_focus)
+        uri = ed_uri(ed_focus)
+        for panel in PanelLog.panels.values():
+            if panel._picked:
+                continue    # the user browses another instance's log
+            if langs:
+                store_live = panel._store in panel._stores
+                if store_live and any(lang.plog is panel._store
+                                       for lang in langs):
+                    # right store, maybe a stale uri: re-point (no-op
+                    # when unchanged)
+                    panel.set_context(panel._store, uri)
+                else:
+                    # switch to the first LIVE registered candidate (a
+                    # candidate may be a just-shut-down instance which
+                    # is still referenced by _langs)
+                    for lang in langs:
+                        if lang.plog in panel._stores:
+                            panel.set_context(lang.plog, uri)
+                            break
+            else:
+                panel.set_context(None, uri)
+
     def on_tab_change(self, ed_self):
         if SignaturesDialog.is_visible():
             SignaturesDialog.hide()
@@ -546,31 +651,27 @@ class Command:
         # no-op without an opened project
         self._on_project_dirs_change()
 
+        # A manual instance-picker pick dies on the tab switch: the panel
+        # follows the focused tab again
+        for panel in PanelLog.panels.values():
+            panel._picked = False
+
         doc = self.book.get_doc(ed_self)
-        lang = doc.lang  if doc else  None
-
-        if lang is None:
-            # no server yet for this tab - look for a matching server.
-            # This can LAZILY CREATE the server instance (folder-bound
-            # single-root servers, first file of a folder): the instance
-            # then needs a handshake before it can didOpen, doc.lang gets
-            # set later in on_lang_inited() - which also switches the
-            # panel context to it then
+        if not (doc  and  doc.lang):
+            # no server for this tab yet - create one lazily if the file
+            # matches a config (single-root servers: the folder's
+            # instance; the panel follows it via sync_panels below, and
+            # self-heals on the instance's first message if it was still
+            # initializing at that point)
             self.on_open(ed_self)
-            lang = None
-            doc = self.book.get_doc(ed_self)
-            if doc:
-                lang = doc.lang
-            if lang is None:
-                # still no server for this tab: the panel must not keep
-                # showing the previous tab's server content - reset it
-                # (all shared panels; only the focused file's one has any)
-                uri = ed_uri(ed_self)
-                for panel in PanelLog.panels.values():
-                    panel.set_context(None, uri)
-                return
 
-        lang.on_ed_shown(doc)
+        # IMMEDIATE panel reset: the context is derived from the focused
+        # tab, NOT from the server's later analysis completion
+        self.sync_panels(ed_self)
+
+        doc = self.book.get_doc(ed_self)
+        if doc  and  doc.lang:
+            doc.lang.on_ed_shown(doc)
 
 
     def on_lang_inited(self, name):
@@ -578,29 +679,33 @@ class Command:
                 for documents of this server
                 (for visible editors, others - from on_tab_change())
             * if couldn't find - got shutdown before initted
+        NOTE: 'name' is the bare server config name - several instances
+        (per-folder) share it, so this must not try to address ONE
+        instance by it (that was the stale-panel bug: the first-found
+        instance won and the panel showed the WRONG tab's logs). didOpen
+        routing is per-doc and safe; the PANEL is re-derived from the
+        focused tab by sync_panels() (called by the view's self-heal on
+        the instance's first message).
         """
+        matched = False
+        seen = []   # ids: one instance sits under several _langs keys
         for lang in self._langs.values():
-            if lang.name == name:
-                for doc in self.book.get_docs():
-                    if doc.lang is None  and  is_ed_visible(doc.ed):
-                        self.on_open(doc.ed)
-                # a tab switched to this server's file BEFORE the handshake
-                # finished may still have no doc.lang (lazily created
-                # instance, didOpen pending): switch the panel to the
-                # instance anyway - the focused file's messages must render
-                # as they arrive, not after another tab switch
-                for ed in get_visible_eds():
-                    if lex2langid(ed.get_prop(PROP_LEXER_FILE)) not in lang.langids:
-                        continue
-                    doc = self.book.get_doc(ed)
-                    if doc is not None and doc.lang is not None and doc.lang is not lang:
-                        continue  # visible tab is served by another server
-                    if doc is not None and doc.lang is lang:
-                        lang.on_ed_shown(doc)
-                    else:
-                        lang.on_ed_shown_panel_only(ed)
-                    break
-                break # found initted lang
+            if id(lang) in seen:
+                continue
+            seen.append(id(lang))
+            if lang.name != name:
+                continue
+            # re-open the docs of EVERY instance sharing this name:
+            # didOpen is per-doc (doc.lang), instances can't cross-steal
+            for doc in self.book.get_docs():
+                if doc.lang is None  and  is_ed_visible(doc.ed):
+                    self.on_open(doc.ed)
+            matched = True
+        if matched:
+            # a lazily created instance may now serve the focused tab:
+            # re-derive the panels (also fixes contexts that were blank
+            # while the instance was initializing)
+            self.sync_panels()
 
     def on_state(self, ed_self, state):
         if state == APPSTATE_SESSION_LOAD_BEGIN: # started
@@ -613,6 +718,9 @@ class Command:
             self._sesh_eds.clear()
             for editor in eds:
                 self._do_on_open(editor)
+            # the visible tab's server may have been created just now:
+            # point the panel at it
+            self.sync_panels()
 
         elif state == APPSTATE_PROJECT:
             for name,lang in list(self._langs.items()):

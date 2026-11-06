@@ -1,11 +1,11 @@
-2026.11.06
-- fix: LSP panel did not reset when switching to a tab whose server instance is created lazily (folder-bound OmniSharp, first file of a folder): the panel kept the previous tab's content and then SKIPPED the new instance's messages as "not shown", so its analysis filled the panel only after ANOTHER tab switch; the panel context now switches right on the tab switch, and again when the new instance's handshake completes (before any didOpen/analysis message arrives)
-- fix: switching to a tab with NO server kept the previous tab's server content on the panel; the panel resets immediately now
+2026.11.06 (by @badrelmers)
+- fix: the panel still showed the PREVIOUS tab's logs after a lazily created server instance finished its analysis (switching tabs away and back was needed): the "initialized" event is dispatched by the bare server config name, which ALL instances of that config share, so the wrong (first) instance was matched and the panel was pointed at the wrong tab's logs; the panel context is now DERIVED from the focused editor tab (a single sync routine used by every event path) instead of being patched by individual events - it is recomputed on every tab switch, when a server finishes initializing, and as a self-heal whenever a message arrives for a store which is not shown; instances still initializing are matched by folder/langid (their capabilities have not arrived yet), a new instance never steals the panel, and a dead one releases it
+- fix: switching to a tab with NO server kept the previous tab's server content on the panel; the panel resets immediately now (also when the focused doc's server binding changes via lexer change/close)
 - fix: message counters (cell overlays and the sidebar button badge) were updated only for the shown instance and only for enabled categories - the user could not see that a panel "has something" without activating it first; counts now always show the totals: disabled categories keep their count, and the sidebar badge sums the messages of ALL running instances
 - chg: removed the 'File/Server' scope toggle cell added in the previous version - it was redundant: all message kinds of the focused file's server instance are shown anyway, only the Diagnostics blocks are per-file (blocks of other files are hidden); every category therefore receives one kind of related messages, nothing needs splitting
-- chg: the instance cell is now a fixed-width cell with a dropdown menu (click - list of running instances, click an entry - switch to it) instead of a cycling click; its counter shows the number of running instances, like the message counters on other cells
+- chg: the instance cell is now a fixed-width cell with a dropdown menu (click - list of running instances with a close button and a caption, click an entry - switch to it) instead of a cycling click; a manual pick stays until the next tab switch or the instance's death; its counter shows the number of running instances, like the message counters on other cells; hovering the cell shows the full instance identity: server name, complete folder path, and the server command
 
-2026.11.05
+2026.11.05 (by @badrelmers)
 + add: LSP panel redesigned for per-file / per-server-instance log isolation (how VS Code and Zed handle it): the bottom panel now FOLLOWS THE FOCUSED TAB - switching editors switches the panel to the diagnostics/logs/spy of the focused file and its server instance, nothing is mixed anymore; every server instance (per-folder OmniSharp instances included) has its own log store, one shared panel view renders whichever one the focused file belongs to; an instance cell shows the current instance ('name (folder)') and switches between instances; all message kinds follow the context: diagnostics, Messages/Logs, OmniSharp events, Spy traffic, stderr; the category/severity filters and word wrap are view-level state, saved per server config (not per folder instance)
 - fix: single-root servers (OmniSharp): a file was opened on ANOTHER folder's instance when its own folder had no instance yet - the server's dynamically registered documentSelector pattern ('**/*.cs') matches ANY suitable file, so the first matching instance wrongly won (the file then landed on the wrong OmniSharp as a 'miscellaneous file' with syntax-only diagnostics, and its own folder's server was never started: exactly ONE server was running); files are now routed strictly: the instance of the folder containing the file, created on demand - never a wrong folder's instance; files under no project folder share the one 'misc' instance
 - fix: diagnostics panel did not follow the focused tab in both directions - switching back to a tab whose diagnostics arrived while it was visible kept the OTHER file's diagnostic block on the panel (only 'dirty' docs - diagnostics received while hidden - were refreshed); the panel now always re-shows the focused document's diagnostics, or clears the block when it has none
@@ -22,11 +22,11 @@
 * change: 'workspace/workspaceFolders' replies and initialize now name folders by their basename (was the fixed name 'Root'), like other LSP clients do
 * change: removed the unused sansio_lsp_client/events.py from the package (dead file left over from the pydantic->lsprotocol migration; nothing imports it)
 
-2026.10.30
+2026.10.30 (by @badrelmers)
 + add: OmniSharp didClose asymmetry workaround (harmless server-side "'X' is not open" exception on file close): OmniSharp (<= 1.39.x) 'opens' only documents it already knows from a loaded project - for out-of-project files didOpen silently does nothing, while a full-text didChange/didSave registers the file as a 'miscellaneous' document in closed state, and didClose on that never-opened document throws System.ArgumentException inside OmniSharp (logged as an error notification but without any client-visible failure); such a didClose is now NOT sent while no didOpen followed the misc registration (nothing is lost: the server has nothing open to close, and reopening the file makes the next didOpen open the document properly, didClose then works again); one explanatory panel line per file in the 'OmniSharp' category
 + add: OmniSharp's "Failed to handle request textDocument/didClose ... 'X' is not open" logMessage is now recognized and rendered as ONE compact panel line instead of the raw multi-kilobyte stack trace (deduped per file; the full JSON stays visible in the 'Spy' category) - safety net for setups the tracking above cannot cover, e.g. "resync_after_open": false where the misc registration is triggered by the very didChange sent right before didClose
 
-2026.10.29
+2026.10.29 (by @badrelmers)
 + add: full-text re-sync after 'textDocument/didOpen' (single range-less 'textDocument/didChange', config key "resync_after_open", default on): OmniSharp up to v1.39.x discards the didOpen buffer for files not in a loaded project, so no diagnostics appeared until the first edit/save; the re-sync makes the server register such "miscellaneous" files immediately and publish diagnostics on open
 + add: OmniSharp's "Miscellaneous file: X added to workspace" logMessage is now detected and explained in the LSP panel ('OmniSharp' category, once per file): X is outside every loaded project, so it only gets syntax diagnostics; full diagnostics need the file inside a project (set "work_dir" or open a CudaText project)
 + add: one-time guidance note (console + LSP panel) when a server starts without "work_dir"/CudaText project: rootUri is not sent and the server picks its own location for project discovery - the usual cause of "missing" project-scoped diagnostics
@@ -35,7 +35,7 @@
 - fix: dynamic registrations (client/registerCapability) now supersede the pseudo-registrations guessed from the static initialize capabilities: OmniSharp announces no textDocumentSync statically, so the stale pseudo 'textDocument/didChange' entry with syncKind=None kept winning in method_opts() - no didChange was EVER sent to OmniSharp (neither edits nor the new re-sync); now the real dynamically registered options are used
 - fix: DiagnosticsMan.set_diagnostics() for-else quirk: documents were always added to the 'dirty' set even when diagnostics were just applied to a visible editor, causing a needless re-application on next show
 
-2026.10.27
+2026.10.27 (by @badrelmers)
 + add: OmniSharp's custom 'o#/...' notifications are now handled by dedicated handlers (new module omnisharp.py) instead of appearing as 'Unhandled': project added/changed/removed, MSBuild project load diagnostics (.csproj errors/warnings - the signal when IntelliSense is broken by a failed project load), background analysis progress (status bar) with a panel entry on completion, project configuration (compact line, no hash-id dumping), NuGet package restore started/finished, unresolved dependencies, and fatal 'o#/error' events (0-based line/column converted to 1-based for display); discrete events are logged to the LSP panel under a new 'OmniSharp' filter category, progress-type events only update the status bar; all payloads are parsed defensively (malformed/evolved payloads can never kill the session) and unknown future 'o#/...' methods still appear as 'Unhandled' so they can be implemented
 + add: debug spy of request/response JSON-RPC messages in the LSP log panel ('Spy' filter category): shows every message in both directions with timestamp, direction arrow, type (request/notification/response), method name (responses are correlated to their method) and the raw JSON body (truncated at 3000 chars); enabled by DEBUG_DEV=True in language.py; high-volume traffic is batched and capped at the last 500 entries
 + add: 'Unhandled' filter category in the LSP log panel + status bar message + console print for server messages which have no handler yet (unknown custom methods like Roslyn's 'workspace/projectInitializationComplete', but also spec methods not implemented in the client like 'workspace/applyEdit'): reports the method name, whether an lsprotocol type exists, and whether a MethodNotFound reply was sent - so missing support is easy to discover and implement
@@ -50,14 +50,14 @@
 - fix: diagnostics without 'severity' field no longer break the diagnostics panel
 - fix: unknown server methods / unknown response ids no longer kill the receive batch (raw passthrough), they are reported in the 'Unhandled' panel category instead
 
-2026.07.08
+2026.07.08 (by @badrelmers)
 - fix: avoid deprecated API: PROP_SCROLL_HORZ (by Alexey T.)
 * change: migrated Pydantic module to version 2 (change by @badrelmers)
 * change: on non-Windows OS you must install these Python modules system-wide: "pydantic" and "wcmatch"; use terminal commands like:
   $ pip install pydantic
   $ pip install wcmatch
 
-2025.11.19
+2025.11.19 (by @badrelmers)
 - fix: avoid deprecated API: MARKERS_GET (by Alexey T.)
 
 2025.11.09 (by @badrelmers)

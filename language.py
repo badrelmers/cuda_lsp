@@ -218,11 +218,18 @@ class Language:
         # sharing one bottom panel (the view follows the focused tab)
         state_cfg = state or {}
         panel_key = self.name
+        # picker cell text (fixed width) and its hover hint: the FULL
+        # instance identity - server name, complete folder path (per-folder
+        # instances), and the OS command which runs the server
+        cmd_str = ' '.join(self._server_cmd)  if isinstance(self._server_cmd, (list, tuple)) else  str(self._server_cmd)
         if self._root_folder:
             disp = f'{self.name} ({os.path.basename(self._root_folder)})'
+            full = f'{self.name}\nfolder: {self._root_folder}\ncmd: {cmd_str}'
         else:
             disp = self.name
-        self.plog = PanelLog.make_store(panel_key, disp, state=state_cfg)
+            full = f'{self.name}\ncmd: {cmd_str}'
+        self.plog = PanelLog.make_store(panel_key, disp, state=state_cfg,
+                                        full_name=full)
         self.plog.view.register_store(self.plog)
         self._treeman = None
         # weakref needs a strong reference for a method-ref to work
@@ -936,10 +943,12 @@ class Language:
         """ The doc's editor became the visible one (tab switched to it):
         refresh its diagnostics AND switch the LSP panel to THIS server
         instance, scoped to THIS document - the panel follows the focused
-        tab, like Zed's language-server logs pane. """
+        tab, like Zed's language-server logs pane. A manual instance-picker
+        pick is dropped: the tab switch is the stronger intent. """
         self.diagnostics_man.on_doc_shown(eddoc)
         view = self.plog.view
         if view is not None:
+            view._picked = False
             view.set_context(self.plog, eddoc.uri)
 
     def on_ed_shown_panel_only(self, ed):

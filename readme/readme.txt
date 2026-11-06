@@ -223,11 +223,17 @@ the tab you switch to, immediately (like Zed's language-server logs; VS Code has
 one output channel per server instead, which must be picked by hand).
 Every server instance has its own set of messages; single-root servers with one
 instance per project folder (OmniSharp) show 'name (folder)' per instance.
+The panel's context is always re-derived from the focused tab (also
+self-correcting when a server instance finishes initializing and starts
+sending its analysis) - it can never get stuck on another tab's messages.
 
 Cells in the panel's top bar:
 - instance cell - name of the shown server instance (fixed width); click for
-  a dropdown of all running instances of the server, click an entry to switch
-  to it; the counter on the cell shows the number of running instances;
+  a dropdown of all running instances of the server (with a close button),
+  click an entry to switch to it; the counter on the cell shows the number of
+  running instances; hovering the cell shows the full instance identity:
+  server name, complete folder path, and the server command;
+  a manual pick stays until the next tab switch;
 - category cells (Messages, Logs, Diagnostics, Spy, OmniSharp, server
   stderr...) and severity icons - toggle filters; counters on the cells show
   the message totals of the shown instance ALWAYS (also for disabled

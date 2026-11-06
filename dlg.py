@@ -405,13 +405,14 @@ class LogStore:
     to (DiagnosticsMan and omnisharp.py hold a store as their 'logger').
 
     'uri' tagging: messages which belong to one document (diagnostic
-    blocks, per-document spy traffic) carry its uri - the view's 'File'
-    scope filters by it; server-level messages (uri None) show only in
-    the 'Server' scope.
+    blocks, per-document spy traffic) carry its uri - the view filters
+    diagnostics by it (only the focused file's diag block is shown);
+    server-level messages (uri None) always show.
     """
 
-    def __init__(self, display_name, view):
+    def __init__(self, display_name, view, full_name=None):
         self.display_name = display_name
+        self.full_name = full_name or display_name  # hover hint: server + full folder path
         self.view = view
         self.msgs = []              # LogMsg
         self._spy_count = 0         # for the PanelLog.SPY_BACKLOG cap
@@ -531,14 +532,24 @@ class PanelLog:
     # 'server (project-folder)' must not resize the bar on every switch
     INSTANCE_CELL_W = 180
 
+    # Command.sync_panels: re-derives every panel's context from the
+    # focused editor tab. Registered once by Command.__init__; the view
+    # calls it to self-heal a stale context (message of a not-shown
+    # store arrives, an instance registers/forgets). None when no
+    # Command runs (unit tests of Language alone).
+    sync_hook = None
+
     def register_store(self, store):
         """ Attach a server instance's store to this view (called by
-        Language.__init__). The first one becomes the shown context. """
+        Language.__init__). A new instance never GRABS the panel: the
+        context is derived from the focused editor tab (Command.
+        sync_panels) - if the focused file belongs to this instance, the
+        sync hook points the panel here right away. """
         if store not in self._stores:
             self._stores.append(store)
             self._update_sidebar()  # instance count / total messages grew
-        if self._store is None:
-            self.set_context(store, None)
+            if PanelLog.sync_hook:
+                PanelLog.sync_hook()
 
     def forget_store(self, store):
         """ Instance shut down (folder removed / server restarted): drop it
@@ -550,8 +561,16 @@ class PanelLog:
             self._uri = None
             self.render()
             self._update_sb()
+        if self._picked:
+            # the user's picker selection died with the instance:
+            # follow the focused tab again
+            self._picked = False
         self._update_counts()
         self._update_sidebar()
+        if PanelLog.sync_hook:
+            # the focused tab may belong to a remaining instance of the
+            # same server config - re-derive instead of staying blank
+            PanelLog.sync_hook()
 
     def set_context(self, store, uri=None):
         """ Show this server instance's store, scoped to this document uri
@@ -575,20 +594,42 @@ class PanelLog:
     # -- store -> view notifications --
 
     def on_store_msg(self, store, scroll=False, render=True):
-        if self._store is store:
-            if render:
-                self._memo_dirty = False
-                self.render()
-            else:
-                # batched: rendered later by flush() - fast for high-volume traffic
-                self._memo_dirty = True
-
+        if self._store is not store:
+            # not shown: either the panel rightly follows another tab, or
+            # the context is STALE - e.g. this store's instance was
+            # created for the focused tab but nothing has synced the
+            # panel to it yet. Re-derive the context from the focused
+            # tab: if this store owns the focus, set_context() just
+            # rendered everything (incl. this new message); otherwise
+            # only the totals change. A manual instance-picker pick is
+            # respected - never overridden by a sync.
+            if not self._picked and PanelLog.sync_hook:
+                PanelLog.sync_hook()
+            if self._store is not store:
+                # totals must update for ANY instance's messages - shown
+                # or not: the counters and the sidebar overlay tell the
+                # user "there is something in the panel" without
+                # activating it first
+                timer_proc(TIMER_START_ONE, self._update_counts, 500)
+                self._update_sidebar()
+                return
+            # context switched to this store just now - everything is
+            # rendered already by set_context()
             if scroll:
-                # let the memo render first, then scroll it to the last entry
                 timer_proc(TIMER_START_ONE, self._scroll_to_end, 50, tag='')
-        # totals must update for ANY instance's messages - shown or not:
-        # the counters and the sidebar overlay tell the user "there is
-        # something in the panel" without activating it first
+            return
+
+        if render:
+            self._memo_dirty = False
+            self.render()
+        else:
+            # batched: rendered later by flush() - fast for high-volume traffic
+            self._memo_dirty = True
+
+        if scroll:
+            # let the memo render first, then scroll it to the last entry
+            timer_proc(TIMER_START_ONE, self._scroll_to_end, 50, tag='')
+
         timer_proc(TIMER_START_ONE, self._update_counts, 500)
         self._update_sidebar()
 
@@ -617,6 +658,10 @@ class PanelLog:
 
         self._extra_types = set() # server stderr, etc
         self._memo_dirty = False # msgs added without memo update (spy batching)
+        # the context follows the focused tab (Command.sync_panels), EXCEPT
+        # after a manual instance-picker pick: that sticks until the next
+        # tab switch
+        self._picked = False
         # filter panel: disabled "categories"
         self._disabled_items = set(state.get('log_panel_filter') or ())  if isinstance(state, dict) else  set()
         self._is_wrap = state.get('is_wrap')  if isinstance(state, dict) else  True
@@ -788,7 +833,7 @@ class PanelLog:
         _callback = callbac_fstr.format(self.CELL_INSTANCE)
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_CALLBACK, index=cellind, value=_callback)
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_HINT, index=cellind,
-                       value=_('Server instance (click to pick)'))
+                       value=self._store.full_name  if self._store else  _('Server instance (click to pick)'))
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_ALIGN, index=cellind, value='C')
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_LINE2, index=cellind,
                                                                 value=line_enabled_color)
@@ -1031,12 +1076,19 @@ class PanelLog:
         if info == self.CELL_INSTANCE:
             # dropdown: pick which instance of this server config to show.
             # The panel follows the focused tab - this is for looking into
-            # another instance's log without switching tabs
+            # another instance's log without switching tabs. A pick STICKS
+            # (no tab-derived sync overrides it) until the next tab switch
+            # or the instance's death.
             names = [store.display_name for store in self._stores]
             if names:
                 focused = self._stores.index(self._store)  if self._store in self._stores else  0
-                ind = dlg_menu(DMENU_LIST, names, focused=focused)
+                # DMENU_LIST_ALT: menu with a CLOSE button (Esc/click-out
+                # cancel) - DMENU_LIST opens a borderless popup instead
+                ind = dlg_menu(DMENU_LIST_ALT, names,
+                               caption=_('Server instances'),
+                               focused=focused)
                 if ind is not None and 0 <= ind < len(self._stores):
+                    self._picked = (self._stores[ind] is not self._store)
                     self.set_context(self._stores[ind], None)
             return
 
@@ -1082,13 +1134,14 @@ class PanelLog:
         return cls.panels[panel_name]
 
     @classmethod
-    def make_store(cls, panel_name, display_name, state=None):
+    def make_store(cls, panel_name, display_name, state=None, full_name=None):
         """ Create the per-instance log model shown in the shared view of
         'panel_name' (the server config name). 'display_name' tells
         instances apart in the view's picker cell: the bare config name,
-        or 'name (folder)' for per-folder instances. """
+        or 'name (folder)' for per-folder instances. 'full_name' is the
+        cell's hover hint (server name + full folder path + command). """
         view = cls.get_logger(panel_name, state)
-        return LogStore(display_name, view)
+        return LogStore(display_name, view, full_name=full_name)
 
 class SignaturesDialog:
     
