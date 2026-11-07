@@ -22,9 +22,13 @@ VIEW (LspPanel) - a single bottom-panel page "LSP" (one icon), created lazily
   "focused tab -> server instance" resolution, nobody else touches panel
   internals. The visible messages are the focused file's diagnostics + spy
   traffic + the server-level messages of the focused file's server instance.
-  A manual instance-picker pick PINS the panel to that ONE instance: it then
-  shows only that instance (its server-level messages and ALL its files -
-  logs of other servers are never mixed in) until the next tab switch.
+  The instance picker lists every server instance with its files NESTED
+  under it (indented tree - they visibly belong to their server): a manual
+  pick of a SERVER pins the panel to that ONE instance (its server-level
+  messages and ALL its files - logs of other servers are never mixed in)
+  until the next tab switch; a pick of one FILE pins it to that file ONLY
+  (that file's spy traffic + diagnostics block + its server's own
+  messages); '(follow focused tab)' cancels any pin immediately.
 
 Rendering is COALESCED: every model change schedules one UI tick
   (TICK_MS); the tick appends only the NEW visible messages (fast path) or
@@ -52,6 +56,8 @@ import cudax_lib as apx
 import cudatext_cmd as cmds
 
 from lsprotocol import types as lsp
+
+from .util import uri_to_path
 
 _ = apx.get_translation(__file__)  # I18N
 
@@ -245,6 +251,23 @@ class LogStore:
             return
         if self.file_spy.pop(uri, None) is not None:
             _notify_change(self, uri)
+
+    def log_files(self):
+        """ Documents of this instance which have any log messages (per-file
+        spy traffic or a diagnostics block), most recently active first -
+        the instance picker lists them nested under their server.
+        """
+        latest = {}
+        for uri, lst in self.file_spy.items():
+            if lst:
+                latest[uri] = lst[-1].seq
+        for uri, lst in self.file_diags.items():
+            if lst:
+                seq = lst[-1].seq
+                if seq > latest.get(uri, -1):
+                    latest[uri] = seq
+        return [uri for uri, _ in sorted(latest.items(),
+                                         key=lambda kv: kv[1], reverse=True)]
 
     def clear(self):
         """ User 'Clear': drop everything of this instance. """
@@ -715,10 +738,16 @@ class LspPanel:
         callbac_fstr = 'module=cuda_lsp.panel;func=_on_sb_click;info="{}";'
 
         # instance picker (fixed width); a trailing '*' marks a manual pick
-        # (pinned: ONLY this instance is shown, all its files, until the
-        # next tab switch)
+        # (pinned: ONLY the picked target is shown - a server pick shows that
+        # server and all its files, a file pick shows that file alone -
+        # until the next tab switch)
         inst_caption = self.store.display_name if self.store else '-'
         if self.store is not None and self._picked:
+            if self.uri is not None:
+                # pinned to ONE file: name it (fixed width truncates the rest)
+                path = uri_to_path(self.uri)
+                inst_caption += ' / ' + (os.path.basename(path)
+                                         if path else self.uri)
             inst_caption += ' *'
         cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
         self._sb_cellind_map[CELL_INSTANCE] = cellind
@@ -728,7 +757,10 @@ class LspPanel:
         if self.store:
             inst_hint = self.store.full_name
             if self._picked:
-                inst_hint += '\n' + _('Pinned: only this server is shown (all its files); switching a tab follows the focused file again')
+                if self.uri is None:
+                    inst_hint += '\n' + _('Pinned: only this server is shown (all its files); switching a tab follows the focused file again')
+                else:
+                    inst_hint += '\n' + _("Pinned: only this file is shown (its traffic, its diagnostics, its server's own messages); switching a tab follows the focused file again")
         else:
             inst_hint = _('Server instance (click to pick)')
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_HINT, index=cellind,
@@ -836,32 +868,63 @@ class LspPanel:
         self._update_sb()
         self._schedule()
 
+    def _file_captions(self, uris):
+        """ Picker captions of one instance's files: the basename, with the
+        parent dir prefixed when the instance has two files with the same
+        basename (they must stay distinguishable). """
+        paths = [uri_to_path(u) for u in uris]
+        caps = [os.path.basename(p) if p else u for u, p in zip(uris, paths)]
+        cnt = {}
+        for c in caps:
+            cnt[c] = cnt.get(c, 0) + 1
+        out = []
+        for p, cap in zip(paths, caps):
+            if cnt[cap] > 1 and p:
+                out.append(os.path.basename(os.path.dirname(p)) + os.sep + cap)
+            else:
+                out.append(cap)
+        return out
+
     def _pick_instance(self):
-        """ Dropdown of ALL running instances (all servers). Picking one PINS
-        the panel to that instance: ONLY its logs are shown - its
-        server-level messages plus all its files (logs of other servers are
-        never mixed in) - until the next tab switch; '(follow focused tab)'
-        cancels the pin immediately. """
+        """ Dropdown of ALL running instances (all servers), their files
+        NESTED under them (indented - they visibly belong to their server).
+        Picking a SERVER pins the panel to that ONE instance: ONLY its logs
+        are shown - its server-level messages plus all its files; logs of
+        other servers are never mixed in. Picking a FILE pins it to that
+        file ONLY: its spy traffic + diagnostics block + its server's own
+        messages. Any pin dies on the next tab switch; '(follow focused
+        tab)' cancels it immediately. """
         if not self.stores:
             return
-        names = ['(' + _('follow focused tab') + ')'] + \
-                [store.display_name for store in self.stores]
+
+        names = ['(' + _('follow focused tab') + ')']
+        entries = [None]                 # menu index -> (store, uri) | None
         focused = 0
-        if self.store in self.stores:
-            focused = self.stores.index(self.store) + 1
+        for store in self.stores:
+            if store is self.store:
+                focused = len(names)     # the shown instance's server row
+            names.append(store.display_name)
+            entries.append((store, None))
+            uris = store.log_files()
+            for uri, cap in zip(uris, self._file_captions(uris)):
+                names.append('    ' + cap)
+                entries.append((store, uri))
+
         ind = dlg_menu(DMENU_LIST_ALT, names,
                        caption=_('Server instances'), focused=focused)
         if ind is None:
             return
-        if ind == 0:
+        if entries[ind] is None:
             self._picked = False
-            self._request_heal()
+            self._request_heal()   # re-derive the context from the focused tab
             return
-        store = self.stores[ind - 1]
-        # picking the same store still changes the mode (per-file -> whole
-        # instance): it must stick like any other pick
-        self._picked = (store is not self.store) or self.uri is not None
-        self.set_context(store, None)   # pinned: whole instance, all files
+
+        store, uri = entries[ind]
+        # picking the target already shown still pins it (per-file follow
+        # -> a pick of the same server must stick like any other pick)
+        self._picked = True
+        self.set_context(store, uri)   # uri None: whole instance; else file
+        self._update_sb()   # the '*' pin marker also when the context is unchanged
 
     def memo_on_click_dbl(self, id_dlg, id_ctl, data='', info=''):
         """ Double-click a 'Line N: ...' diagnostics entry: jump to the file
