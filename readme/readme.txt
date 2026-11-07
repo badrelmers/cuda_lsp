@@ -300,7 +300,12 @@ Every server instance has its own message store; nothing is ever mixed.
 The panel's context is always re-derived from the focused tab (also
 self-correcting when a server instance finishes initializing and starts
 sending its analysis) - it can never get stuck on another tab's messages.
-Double-click a 'Line N: ...' diagnostic to jump to it.
+Diagnostics entries show the exact column range of the problem - the raw
+characters the server reported, e.g. 'Line 131: [csharp,Hint:IDE0055]: Fix
+formatting (21-22)' (LSP's Diagnostic.range is required for every server);
+'(21)' marks a zero-width range (insertion point), '(21-...)' a range
+spanning several lines. Double-click a 'Line N: ... (x-y)' diagnostic to
+jump to the file with the caret at the range's start column x.
 The category filters and word wrap are remembered globally (one panel).
 The 'Messages' category receives 'window/showMessage' - one-shot messages
 with a severity which the server wants to SHOW to the user (e.g. "project

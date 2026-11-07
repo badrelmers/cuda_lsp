@@ -2191,6 +2191,27 @@ class DiagnosticsMan:
 
     _diag_text = staticmethod(_diag_text)
 
+    def _diag_pos_suffix(d):
+        """ Column range suffix for the panel's 'Line N:' entries: the RAW
+        zero-based characters exactly as the server sent them, e.g.
+        '... Fix formatting (21-22)'. Diagnostic.range is REQUIRED by the
+        LSP spec (zero-based start/end positions), so this shows for every
+        server, not only OmniSharp. Zero-width range (an insertion point)
+        -> '(21)'; multi-line range -> '(21-...)': the end character belongs
+        to a later line, printing it alone would mislead. '' only for a
+        malformed range (then the panel's double-click falls back to
+        column 0). Parsed back by panel.memo_on_click_dbl (_RE_DIAG_RANGE). """
+        try:
+            x0, y0 = d.range.start.character, d.range.start.line
+            x1, y1 = d.range.end.character, d.range.end.line
+        except AttributeError:
+            return ''
+        if y0 == y1:
+            return f' ({x0})' if x0 == x1 else f' ({x0}-{x1})'
+        return f' ({x0}-...)'
+
+    _diag_pos_suffix = staticmethod(_diag_pos_suffix)
+
     def _format_diag_block(self, uri, diag_list):
         """ Panel lines of one document's diagnostics: the 'File:' header
         (severity icon of the most severe entry) + one 'Line N: ...' per
@@ -2202,7 +2223,8 @@ class DiagnosticsMan:
                   SEVERITY_MAP.get(top.severity, SEVERITY_NA))]
         for d in sorted(diag_list, key=lambda d: (d.range.start.line,
                                                   d.range.start.character)):
-            lines.append((f'Line {d.range.start.line+1}: {self._diag_text(d)}',
+            lines.append((f'Line {d.range.start.line+1}: '
+                          f'{self._diag_text(d)}{self._diag_pos_suffix(d)}',
                           SEVERITY_MAP.get(d.severity, SEVERITY_NA)))
         return lines
 

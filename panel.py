@@ -46,6 +46,7 @@ UI-thread only: stores are fed from process_queues()/DiagnosticsMan/
 """
 
 import os
+import re
 import heapq
 from collections import namedtuple
 from itertools import count
@@ -125,6 +126,13 @@ PLACEHOLDER_NO_SERVER   = _('No LSP server for this file')
 PLACEHOLDER_NO_SERVER_2 = _('Open a file with a lexer served by a configured server')
 PLACEHOLDER_NO_MSGS     = _('(no log messages for this file)')
 PLACEHOLDER_NO_MSGS_ALL = _('(no log messages)')
+
+# trailing column range of a diagnostics entry, e.g. 'Fix formatting (21-22)'
+# - the suffix appended by DiagnosticsMan._diag_pos_suffix (language.py):
+# '(21-22)' normal range, '(21)' zero-width, '(21-...)' multi-line.
+# Anchored at end-of-line: the suffix is always appended last, so even a
+# message that itself ends in '(9)' cannot shadow the real range.
+_RE_DIAG_RANGE = re.compile(r'\((\d+)(?:-(\d+|\.\.\.))?\)$')
 
 
 # ---------------------------------------------------------------------------
@@ -927,9 +935,11 @@ class LspPanel:
         self._update_sb()   # the '*' pin marker also when the context is unchanged
 
     def memo_on_click_dbl(self, id_dlg, id_ctl, data='', info=''):
-        """ Double-click a 'Line N: ...' diagnostics entry: jump to the file
-        and line. The filename comes from the store's cache, with a fallback
-        scan of the shown text ('File: ' lines). """
+        """ Double-click a 'Line N: ... (x-y)' diagnostics entry: jump to the
+        file and put the caret at the range START column (x) of that line -
+        column 0 for entries without a column suffix. The filename comes
+        from the store's cache, with a fallback scan of the shown text
+        ('File: ' lines). """
         y = self._memo.get_carets()[0][1]
 
         fn = None
@@ -955,8 +965,10 @@ class LspPanel:
             line = int(text[5:n]) - 1
         except ValueError:
             return
+        m = _RE_DIAG_RANGE.search(text)
+        col = int(m.group(1)) if m else 0
         file_open(fn)
-        ed.set_caret(0, line)
+        ed.set_caret(col, line)
         ed.focus()
 
     def toggle_wrap(self):
