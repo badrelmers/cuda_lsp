@@ -9,10 +9,25 @@
   JSON-RPC message of every server (both directions, all servers) is appended to that
   file as one line with the complete untruncated JSON body (via a persistent
   append-mode handle, flushed per batch - fast even with heavy traffic). The LSP
-  panel's 'Spy' category shows the same traffic but truncates bodies at 1200 chars;
-  this file loses nothing. Debug aid: set the path, repeat the problem, inspect or
-  send the file.
+  panel's 'Spy' category shows the same traffic but truncates bodies at
+  'log_spy_msg_limit' chars (default 3000); this file loses nothing. Debug aid: set
+  the path, repeat the problem, inspect or send the file.
   Example: "spy_file": "C:\\temp\\lsp_spy.log"
+
+* log_cap_server_msgs - LSP panel ring-buffer size: how many server-level messages
+  (stderr/stdout, OmniSharp events, Messages/Logs, unhandled methods, response
+  errors, server-level spy traffic) are kept per server instance. Default 10000.
+  0 or negative = unlimited.
+
+* log_cap_file_spy - LSP panel ring-buffer size: how many Spy (JSON-RPC traffic)
+  messages are kept per document (per file). Default 5000. 0 or negative = unlimited.
+  A file's spy history is freed when the document closes anyway.
+
+* log_spy_msg_limit - max chars of one Spy message body shown in the LSP panel;
+  longer bodies get a '[TRUNCATED... total: N]' tail. Default 3000.
+  0 or negative = never truncate (spy_file always keeps the full text anyway).
+  Note: diagnostics are NEVER capped or truncated - they are the current state of
+  the document, the panel always shows all of them.
 
 * send_change_on_request - how to send editor's changes to server:
     * false - changes are sent to server after editing and a short delay (default).

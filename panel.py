@@ -9,7 +9,10 @@ MODEL (LogStore) - one per server INSTANCE (Language):
                  didChange, completion requests/responses...). Ring buffer,
                  cap FILE_SPY_CAP per file. Dropped when the document closes.
   * file_diags - {uri: [LogMsg]}: per-document diagnostics block, REPLACED
-                 atomically on every publishDiagnostics. Cap FILE_DIAGS_CAP.
+                 atomically on every publishDiagnostics. NO cap: diagnostics
+                 are the CURRENT STATE of the document, not a history stream
+                 (a file has exactly as many as the server reports - hiding
+                 or dropping them would lie about the file's errors).
   Chronological order across all lists is kept by a per-store sequence
   number; the view merges by it (heapq.merge of pre-sorted lists).
 
@@ -19,16 +22,19 @@ VIEW (LspPanel) - a single bottom-panel page "LSP" (one icon), created lazily
   "focused tab -> server instance" resolution, nobody else touches panel
   internals. The visible messages are the focused file's diagnostics + spy
   traffic + the server-level messages of the focused file's server instance.
-  A manual instance-picker pick switches to browse mode (the whole instance,
-  all files) and sticks until the next tab switch.
+  A manual instance-picker pick PINS the panel to that ONE instance: it then
+  shows only that instance (its server-level messages and ALL its files -
+  logs of other servers are never mixed in) until the next tab switch.
 
 Rendering is COALESCED: every model change schedules one UI tick
   (TICK_MS); the tick appends only the NEW visible messages (fast path) or
   fully re-renders (context switch, filter change, diagnostics replacement,
   ring-buffer eviction). When the panel page is not the active bottom-panel
   page, UI work is skipped (button badge only) and redone when it is shown
-  (on_show). Scrolling auto-follows the end while the memo is at its bottom
-  (terminal behaviour); scrolling up pauses it.
+  (on_show). Auto-follow scrolling: the panel scrolls to the end ONLY while
+  the memo is at its bottom (terminal behaviour) or right after a context
+  switch; scrolling up pauses auto-scrolling - re-renders (diagnostics
+  replacement, ring eviction, page re-show) NEVER force the scroll.
 
 UI-thread only: stores are fed from process_queues()/DiagnosticsMan/
   omnisharp handlers, which all run in the app thread. The reader/writer
@@ -101,10 +107,13 @@ PANEL_CAPTIONS = {
 # message: 'seq' keeps chronological order across the store's lists
 LogMsg = namedtuple('LogMsg', 'seq text type severity')
 
-# ring-buffer caps: hard bounds on the memory one server instance's logs use
-SRV_MSGS_CAP   = 600   # server-level messages
-FILE_SPY_CAP   = 250   # spy traffic per document
-FILE_DIAGS_CAP = 400   # diagnostics block per document
+# ring-buffer caps: hard bounds on the memory one server instance's logs
+# use. These are the DEFAULTS - overridden at plugin start by the cuda_lsp.json
+# options 'log_cap_server_msgs' / 'log_cap_file_spy' (see lsp.py); a value
+# <= 0 disables the cap. Diagnostics have NO cap at all: they are the
+# current state of the document, not a history stream.
+SRV_MSGS_CAP = 10000  # server-level messages per instance
+FILE_SPY_CAP = 5000   # spy traffic per document
 
 PLACEHOLDER_NO_SERVER   = _('No LSP server for this file')
 PLACEHOLDER_NO_SERVER_2 = _('Open a file with a lexer served by a configured server')
@@ -175,7 +184,7 @@ class LogStore:
             cap = FILE_SPY_CAP
 
         evicted = False
-        if len(lst) >= cap:
+        if cap > 0 and len(lst) >= cap:   # cap<=0: unlimited
             del lst[:len(lst) - cap + 1]
             evicted = True
         lst.append(msg)
@@ -195,7 +204,8 @@ class LogStore:
         """ Replace the whole diagnostics block of one document (atomic).
         'lines': list of (text, severity) already formatted for display; an
         empty list clears the block. Independent of gutter/lint options -
-        the panel always shows diagnostics.
+        the panel always shows diagnostics. NO cap: every diagnostic the
+        server published is kept and shown.
         """
         if not self.live:
             return
@@ -210,7 +220,7 @@ class LogStore:
         msgs = [LogMsg(next(self._seq),
                        text if text.endswith('\n') else text + '\n',
                        TYPE_DIAG, severity)
-                for text, severity in lines[:FILE_DIAGS_CAP]]
+                for text, severity in lines]
         self.file_diags[uri] = msgs
         self._note_type(TYPE_DIAG)
         _notify_change(self, uri)
@@ -258,7 +268,6 @@ class LogStore:
 
 # statusbar cells which are not category/severity filters
 CELL_INSTANCE = '__instance__'
-CELL_FILE = '__file__'
 
 # fixed width of the instance cell (pixels): 'server (project-folder)'
 # names must not resize the bar on every switch
@@ -294,8 +303,9 @@ class LspPanel:
     def __init__(self, state=None):
         self.stores = []       # registered LogStores (all servers, in order)
         self.store = None      # shown store (context)
-        self.uri = None        # focused document uri (None = browse mode)
+        self.uri = None        # focused document uri (None = pinned instance)
         self._picked = False   # a manual instance-picker pick sticks
+        self._ctx_follow = True  # context switch: next render shows the end
 
         state = state if isinstance(state, dict) else {}
         self._disabled_items = set(state.get('log_panel_filter') or ())
@@ -423,8 +433,9 @@ class LspPanel:
 
     def set_context(self, store, uri):
         """ Show this server instance, scoped to this document uri (the
-        focused editor tab). uri=None = browse mode (all files of the
-        store; the instance picker uses it). store=None blanks the panel.
+        focused editor tab). uri=None = PINNED instance (a manual picker
+        pick: the whole instance - its server-level messages and all its
+        files; no other server is shown). store=None blanks the panel.
         No-op when unchanged. Only Command.sync_panel() calls this.
         """
         if store is not None and store not in self.stores:
@@ -433,9 +444,10 @@ class LspPanel:
             return
         self.store = store
         self.uri = uri
+        self._ctx_follow = True   # fresh context: its end = the latest logs
         self._pending.clear()
         self._need_full = True
-        self._update_sb()   # instance/file cells + the store's type cells
+        self._update_sb()   # instance cell + the store's type cells
         self._schedule()
 
     def clear_picked(self):
@@ -453,7 +465,7 @@ class LspPanel:
         if store is self.store:
             # visible in this context: server-level messages (uri None -
             # they belong to the focused server) and the focused file's
-            # per-file messages; browse mode shows everything
+            # per-file messages; a pinned instance shows everything
             if uri is None or self.uri is None or uri == self.uri:
                 if self._placeholder:
                     # placeholder shown: the memo no longer mirrors the
@@ -561,7 +573,7 @@ class LspPanel:
         if st is None:
             return []
         if self.uri is None:
-            # browse mode (manual pick): everything of the instance
+            # pinned instance (manual pick): everything of this ONE instance
             return [st.srv_msgs, *st.file_spy.values(), *st.file_diags.values()]
         return [st.srv_msgs,
                 st.file_spy.get(self.uri, ()),
@@ -582,6 +594,14 @@ class LspPanel:
     def _render_full(self):
         self._need_full = False
         self._evictions = 0
+
+        # terminal behaviour: scroll to the end only if the memo WAS at its
+        # bottom before the re-render (the user scrolled up to read history -
+        # keep the position!), or right after a context switch (a different
+        # file's log: its end = the latest messages). Queried BEFORE any
+        # memo mutation.
+        follow = self._ctx_follow or self._at_bottom()
+        self._ctx_follow = False
 
         counts = {}
         visible = []
@@ -606,7 +626,8 @@ class LspPanel:
             self._render_placeholder()
 
         self._fix_memo_after_render()
-        self._goto_end()
+        if follow:
+            self._goto_end()
 
     def _render_placeholder(self):
         self._placeholder = True
@@ -676,7 +697,7 @@ class LspPanel:
     # -- top bar (statusbar) -------------------------------------------------------
 
     def _update_sb(self):
-        """ Rebuild the filter bar: [instance] [file] [type cells...] [spacer]
+        """ Rebuild the filter bar: [instance] [type cells...] [spacer]
         [severity icons]. Called on context change / theme change / when the
         shown store learns a new message type. """
         h_sb = self._h_sb
@@ -693,16 +714,25 @@ class LspPanel:
 
         callbac_fstr = 'module=cuda_lsp.panel;func=_on_sb_click;info="{}";'
 
-        # instance picker (fixed width)
+        # instance picker (fixed width); a trailing '*' marks a manual pick
+        # (pinned: ONLY this instance is shown, all its files, until the
+        # next tab switch)
         inst_caption = self.store.display_name if self.store else '-'
+        if self.store is not None and self._picked:
+            inst_caption += ' *'
         cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
         self._sb_cellind_map[CELL_INSTANCE] = cellind
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_TEXT, index=cellind, value=inst_caption)
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_CALLBACK, index=cellind,
                        value=callbac_fstr.format(CELL_INSTANCE))
+        if self.store:
+            inst_hint = self.store.full_name
+            if self._picked:
+                inst_hint += '\n' + _('Pinned: only this server is shown (all its files); switching a tab follows the focused file again')
+        else:
+            inst_hint = _('Server instance (click to pick)')
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_HINT, index=cellind,
-                       value=(self.store.full_name if self.store
-                              else _('Server instance (click to pick)')))
+                       value=inst_hint)
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_ALIGN, index=cellind, value='C')
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_LINE2, index=cellind,
                        value=line_enabled_color)
@@ -711,25 +741,6 @@ class LspPanel:
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind, value=bg_color)
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_FONT, index=cellind,
                        value=font_enabled_color)
-
-        # focused file (info only, not clickable)
-        if self.uri:
-            from .util import uri_to_path
-            path = uri_to_path(self.uri)
-            file_caption = os.path.basename(path) if path else self.uri
-            file_hint = path or self.uri
-        else:
-            file_caption = _('(all files)') if self.store else '-'
-            file_hint = _('Browse mode: all files of this server instance')
-        cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
-        self._sb_cellind_map[CELL_FILE] = cellind
-        statusbar_proc(h_sb, STATUSBAR_SET_CELL_TEXT, index=cellind, value=file_caption)
-        statusbar_proc(h_sb, STATUSBAR_SET_CELL_HINT, index=cellind, value=file_hint)
-        statusbar_proc(h_sb, STATUSBAR_SET_CELL_ALIGN, index=cellind, value='C')
-        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind, value=bg_color)
-        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_FONT, index=cellind,
-                       value=font_enabled_color)
-        statusbar_proc(h_sb, STATUSBAR_SET_CELL_AUTOSIZE, index=cellind, value=True)
 
         # category cells of the shown store
         extra = self.store.extra_types if self.store else set()
@@ -803,7 +814,8 @@ class LspPanel:
 
     def on_show(self, *args, **vargs):
         # the page became visible: catch up deferred renders (hidden periods
-        # skip UI work) and follow the log end
+        # skip UI work). Does NOT force-scroll: if the user had scrolled up
+        # before hiding the page, the position survives the catch-up.
         self._need_full = True
         self._pending.clear()
         self._schedule()
@@ -825,9 +837,11 @@ class LspPanel:
         self._schedule()
 
     def _pick_instance(self):
-        """ Dropdown of ALL running instances (all servers). Picking one
-        switches to browse mode (whole instance, all files) and STICKS until
-        the next tab switch; '(follow focused tab)' cancels a pick. """
+        """ Dropdown of ALL running instances (all servers). Picking one PINS
+        the panel to that instance: ONLY its logs are shown - its
+        server-level messages plus all its files (logs of other servers are
+        never mixed in) - until the next tab switch; '(follow focused tab)'
+        cancels the pin immediately. """
         if not self.stores:
             return
         names = ['(' + _('follow focused tab') + ')'] + \
@@ -844,10 +858,10 @@ class LspPanel:
             self._request_heal()
             return
         store = self.stores[ind - 1]
-        # picking the same store still changes the mode (per-file -> browse):
-        # it must stick like any other pick
+        # picking the same store still changes the mode (per-file -> whole
+        # instance): it must stick like any other pick
         self._picked = (store is not self.store) or self.uri is not None
-        self.set_context(store, None)   # browse mode
+        self.set_context(store, None)   # pinned: whole instance, all files
 
     def memo_on_click_dbl(self, id_dlg, id_ctl, data='', info=''):
         """ Double-click a 'Line N: ...' diagnostics entry: jump to the file

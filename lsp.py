@@ -15,6 +15,7 @@ _ = get_translation(__file__)  # I18N
 
 from . import dlg
 from .dlg import Hint, SignaturesDialog
+from . import panel
 from .panel import LspPanel, PANEL_NAME, set_pending_state
 from . import language
 from .util import (
@@ -61,6 +62,13 @@ LINT_STYLE_MAP = {0:1, 1:4, 2: 2, 3:6}
 STATE = {} # like log-panel's filter state
 
 opt_spy_file = ''
+
+# LSP log panel limits (see readme/options_description.md):
+# ring-buffer sizes in messages; 'log_spy_msg_limit' in chars per spy body.
+# <= 0 disables a cap (unlimited). Diagnostics are NEVER capped.
+opt_log_cap_server_msgs = 10000
+opt_log_cap_file_spy    = 5000
+opt_log_spy_msg_limit   = 3000
 
 opt_enable_mouse_hover = True
 opt_root_dir_source = [0]
@@ -622,7 +630,7 @@ class Command:
         if panel is None:
             return  # no server ever started: no panel
         if panel.picked:
-            return  # the user browses another instance's log
+            return  # the panel is pinned to another instance's log
 
         ed_focus = None
         if ed_prefer is not None and ed_prefer.get_prop(PROP_FOCUSED):
@@ -1290,6 +1298,9 @@ class Command:
         global opt_complete_from_text
         global opt_diagnostics_in_a_corner
         global opt_spy_file
+        global opt_log_cap_server_msgs
+        global opt_log_cap_file_spy
+        global opt_log_spy_msg_limit
 
         # general cfg
         if os.path.exists(fn_config):
@@ -1343,7 +1354,19 @@ class Command:
             # language.SPY_FILE
             opt_spy_file = j.get('spy_file', '')
             language.SPY_FILE = opt_spy_file
-            
+
+            # LSP log panel limits (module globals are read at log time, so
+            # runtime updates propagate to running instances immediately)
+            opt_log_cap_server_msgs = self._get_int_opt(
+                j, 'log_cap_server_msgs', opt_log_cap_server_msgs)
+            opt_log_cap_file_spy = self._get_int_opt(
+                j, 'log_cap_file_spy', opt_log_cap_file_spy)
+            opt_log_spy_msg_limit = self._get_int_opt(
+                j, 'log_spy_msg_limit', opt_log_spy_msg_limit)
+            panel.SRV_MSGS_CAP = opt_log_cap_server_msgs
+            panel.FILE_SPY_CAP = opt_log_cap_file_spy
+            language.SPY_MSG_LIMIT = opt_log_spy_msg_limit
+
             opt_enable_code_tree = j.get('enable_code_tree', opt_enable_code_tree)
             opt_tree_types_show = j.get('tree_types_show', opt_tree_types_show)
 
@@ -1415,6 +1438,17 @@ class Command:
             print(f'NOTE: {LOG_NAME}: no server configs loaded from "{_dir_settings}"')
 
 
+    @staticmethod
+    def _get_int_opt(j, name, default):
+        """ Int option from cuda_lsp.json with a fallback on junk values. """
+        val = j.get(name, default)
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            print(f'NOTE: {LOG_NAME}: invalid value of option "{name}"'
+                  f' in {fn_config}, using {default}')
+            return default
+
     def _save_config(self):
         import json
 
@@ -1443,6 +1477,9 @@ class Command:
             'use_markers':               opt_use_markers,
             'diagnostics_in_a_corner':   opt_diagnostics_in_a_corner,
             'spy_file':                  opt_spy_file,
+            'log_cap_server_msgs':       opt_log_cap_server_msgs,
+            'log_cap_file_spy':          opt_log_cap_file_spy,
+            'log_spy_msg_limit':         opt_log_spy_msg_limit,
         }
         if opt_manual_didopen is not None:
             j['manual_didopen'] = opt_manual_didopen

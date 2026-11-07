@@ -227,26 +227,33 @@ server instance. Switching a tab refreshes the panel immediately - like
 Zed's contextual logs pane; messages of other files/servers are not mixed
 in (they appear when their file gets the focus).
 Empty states are explained in place ("No LSP server for this file"...).
-Per-file Spy history is freed when the document closes; all log lists are
-ring buffers (600 server-level / 250-per-file spy / 400-per-file
-diagnostics entries per server instance) - memory stays bounded.
+Memory stays bounded: per-file Spy history is freed when the document
+closes, and the history lists are ring buffers - 10000 server-level
+messages per instance and 5000 Spy messages per file by default
+(options "log_cap_server_msgs" / "log_cap_file_spy", 0 = unlimited).
+DIAGNOSTICS ARE NEVER CAPPED: they are the current state of the document,
+not a history stream - the panel always shows every diagnostic the server
+published for the focused file.
 Rendering is coalesced (~120 ms): bursts of messages cost one append, not
 one full re-render per message. While the panel page is not the active
 bottom-panel page, rendering is skipped (the button badge still counts).
-Scrolling auto-follows the end while the memo is at its bottom (terminal
-behaviour); scroll up to read old messages - auto-follow pauses.
+Scrolling auto-follows the end ONLY while the memo is at its bottom
+(terminal behaviour); scroll up to read old messages - auto-follow pauses
+and NO later re-render (diagnostics replacement, message bursts, hiding/
+showing the page) forces the scroll back down. Switching the context
+(another file) shows the end of the new file's log.
 
 Cells in the panel's top bar:
 - instance cell - name of the shown server instance (fixed width; 'name
   (folder)' for per-folder instances of single-root servers like OmniSharp);
-  click for a dropdown of ALL running instances of ALL servers (with a
-  close button), click an entry to browse its whole log (all files); the
-  first entry '(follow focused tab)' returns to the automatic behaviour;
-  the counter on the cell shows the number of running instances; hovering
-  shows the full instance identity: server name, complete folder path, and
-  the server command; a manual pick stays until the next tab switch;
-- file cell - name of the focused file the log is scoped to ('(all
-  files)' in browse mode);
+  click for a dropdown of ALL running instances of ALL servers, click an
+  entry to PIN the panel to that ONE server instance: only its logs are
+  shown - its server-level messages plus all its files (logs of other
+  servers are never mixed in) - until the next tab switch; the first entry
+  '(follow focused tab)' cancels the pin immediately; a pinned instance is
+  marked with a trailing ' *' in the cell; the counter on the cell shows
+  the number of running instances; hovering shows the full instance
+  identity: server name, complete folder path, and the server command;
 - category cells (Messages, Logs, Diagnostics, Spy, OmniSharp, server
   stderr...) and severity icons - toggle filters; counters on the cells
   show the message totals of the context ALWAYS (also for disabled

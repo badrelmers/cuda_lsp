@@ -95,7 +95,10 @@ DBG = LOG
 LOG_NAME = 'LSP'
 
 DEBUG_DEV = True # enable spying of request/response messages in LSP panel ('Spy' category)
-SPY_MSG_LIMIT = 1200 # spy: max chars of a message body, longer bodies get truncated
+# spy: max chars of a message body, longer bodies get truncated in the panel.
+# DEFAULT - overridden by the cuda_lsp.json option 'log_spy_msg_limit'
+# (set by lsp.py at plugin start; <= 0 = never truncate)
+SPY_MSG_LIMIT = 3000
 # Full spy log file (set from cuda_lsp.json 'spy_file' by lsp.py): when set,
 # EVERY JSON-RPC message of every server (both directions) is appended there
 # as one line with FULL text - the panel 'Spy' category truncates bodies at
@@ -892,7 +895,7 @@ class Language:
             if SPY_FILE:
                 self._spy_file_write(way, kind, name, body)
 
-            if len(body) > SPY_MSG_LIMIT:
+            if SPY_MSG_LIMIT > 0 and len(body) > SPY_MSG_LIMIT:
                 body = body[:SPY_MSG_LIMIT] + f' [TRUNCATED... total: {len(body)}]'
 
             # 4. Log it (the panel batches the rendering by itself)
