@@ -70,7 +70,7 @@ import re
 
 from cudatext import msg_status
 
-from .dlg import TYPE_OMNISHARP, SEVERITY_ERR, SEVERITY_INFO, SEVERITY_WRN
+from .panel import TYPE_OMNISHARP, SEVERITY_ERR, SEVERITY_INFO, SEVERITY_WRN
 from .util import collapse_path, uri_to_path
 
 
@@ -117,7 +117,7 @@ def _log(session, text, severity):
     """ One entry in the LSP panel's 'OmniSharp' category. """
     session.plog.log_str(
         f'OmniSharp: {text}',
-        type_=TYPE_OMNISHARP, severity=severity, scroll=True)
+        type_=TYPE_OMNISHARP, severity=severity)
 
 
 def _status(session, text):

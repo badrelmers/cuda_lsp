@@ -14,7 +14,9 @@ from cudax_lib import get_translation
 _ = get_translation(__file__)  # I18N
 
 from . import dlg
-from .dlg import Hint, SignaturesDialog, PanelLog
+from .dlg import Hint, SignaturesDialog
+from .panel import LspPanel, PANEL_NAME, set_pending_state
+from . import language
 from .util import (
         lex2langid,
         update_lexmap,
@@ -292,12 +294,10 @@ class Command:
 
         self._load_config()
 
-        # give the LSP panel views a self-heal hook: they re-derive their
-        # context from the focused editor tab (sync_panels) whenever a
-        # message arrives for a store which is not shown, or an instance
-        # registers/forgets - no event-ordering assumptions left
-        from .dlg import PanelLog
-        PanelLog.sync_hook = self.sync_panels
+        # give the LSP panel a self-heal hook: it re-derives its context
+        # from the focused editor tab (sync_panel) when a store registers/
+        # dies/logs while not shown - no event-ordering assumptions left
+        LspPanel.sync_hook = self.sync_panel
 
         # hover dlg calls these with "caret" named param, caret is tuple(caretx, carety)
         self._hint_cmds = {
@@ -363,6 +363,16 @@ class Command:
                 file_open(os.path.join(dir_settings, _lsp_fns[ind]))
         else:
             msg_status(_('No server configs exist'))
+
+    @command
+    def show_panel(self):
+        """ Activate the LSP bottom-panel page (the single log panel of all
+        servers; it follows the focused editor tab). """
+        panel = LspPanel.get(create=False)
+        if panel is not None:
+            app_proc(PROC_BOTTOMPANEL_ACTIVATE, PANEL_NAME)
+        else:
+            msg_status(_('LSP: no server has been started yet'))
 
     #NOTE also gets called for unsaved from session
     def on_open(self, ed_self):
@@ -451,7 +461,7 @@ class Command:
             self.book.on_close(ed_self) # deletes doc
             # the tab lost its server binding: if it was the focused one,
             # the panel must not keep showing that server's content
-            self.sync_panels()
+            self.sync_panel()
 
     #NOTE: also gets called when document first activated
     def on_lexer(self, ed_self):
@@ -467,7 +477,7 @@ class Command:
                 self.on_open(ed_self) # changes/removes lang server of doc
                 # server binding may have changed (lexer switched to/from
                 # a server-supported one): the panel follows the new state
-                self.sync_panels()
+                self.sync_panel()
         else:    # create doc if new lexer is supported by lsp server
             self.on_open(ed_self)
 
@@ -597,17 +607,23 @@ class Command:
                 return group_ed
         return None
 
-    def sync_panels(self, ed_prefer=None):
-        """ Re-derive every LSP panel's context from the FOCUSED editor
-        tab: the panel shows the focused file's server instance (and the
-        focused file's diagnostics). Called on every tab switch (with the
-        switched-to editor as 'ed_prefer') and as a self-heal (a panel
-        whose context went stale notices on the next message of a
-        not-shown store). No server instance is created here - lazy
-        creation belongs to on_open/on_tab_change only. A manual
-        instance-picker selection is respected (the view's _picked flag)
-        until the next tab switch clears it.
+    def sync_panel(self, ed_prefer=None):
+        """ Point the SINGLE LSP panel at the FOCUSED editor tab: it shows
+        the focused file's diagnostics + spy traffic + the server-level
+        messages of the focused file's server instance. Called on every tab
+        switch (with the switched-to editor as 'ed_prefer') and as a
+        self-heal (a store which registered / died / logged while not
+        shown). No server instance is created here - lazy creation belongs
+        to on_open/on_tab_change only. A manual instance-picker selection
+        is respected (the panel's 'picked' flag) until the next tab switch
+        clears it.
         """
+        panel = LspPanel.get(create=False)
+        if panel is None:
+            return  # no server ever started: no panel
+        if panel.picked:
+            return  # the user browses another instance's log
+
         ed_focus = None
         if ed_prefer is not None and ed_prefer.get_prop(PROP_FOCUSED):
             ed_focus = ed_prefer
@@ -617,27 +633,12 @@ class Command:
             return  # no editor focused: keep the current context
 
         langs = self._tab_lang_candidates(ed_focus)
-        uri = ed_uri(ed_focus)
-        for panel in PanelLog.panels.values():
-            if panel._picked:
-                continue    # the user browses another instance's log
-            if langs:
-                store_live = panel._store in panel._stores
-                if store_live and any(lang.plog is panel._store
-                                       for lang in langs):
-                    # right store, maybe a stale uri: re-point (no-op
-                    # when unchanged)
-                    panel.set_context(panel._store, uri)
-                else:
-                    # switch to the first LIVE registered candidate (a
-                    # candidate may be a just-shut-down instance which
-                    # is still referenced by _langs)
-                    for lang in langs:
-                        if lang.plog in panel._stores:
-                            panel.set_context(lang.plog, uri)
-                            break
-            else:
-                panel.set_context(None, uri)
+        store = None
+        for lang in langs:
+            if lang.plog.live:
+                store = lang.plog
+                break
+        panel.set_context(store, ed_uri(ed_focus))
 
     def on_tab_change(self, ed_self):
         if SignaturesDialog.is_visible():
@@ -653,21 +654,22 @@ class Command:
 
         # A manual instance-picker pick dies on the tab switch: the panel
         # follows the focused tab again
-        for panel in PanelLog.panels.values():
-            panel._picked = False
+        panel = LspPanel.get(create=False)
+        if panel is not None:
+            panel.clear_picked()
 
         doc = self.book.get_doc(ed_self)
         if not (doc  and  doc.lang):
             # no server for this tab yet - create one lazily if the file
             # matches a config (single-root servers: the folder's
-            # instance; the panel follows it via sync_panels below, and
+            # instance; the panel follows it via sync_panel below, and
             # self-heals on the instance's first message if it was still
             # initializing at that point)
             self.on_open(ed_self)
 
         # IMMEDIATE panel reset: the context is derived from the focused
         # tab, NOT from the server's later analysis completion
-        self.sync_panels(ed_self)
+        self.sync_panel(ed_self)
 
         doc = self.book.get_doc(ed_self)
         if doc  and  doc.lang:
@@ -684,7 +686,7 @@ class Command:
         instance by it (that was the stale-panel bug: the first-found
         instance won and the panel showed the WRONG tab's logs). didOpen
         routing is per-doc and safe; the PANEL is re-derived from the
-        focused tab by sync_panels() (called by the view's self-heal on
+        focused tab by sync_panel() (called by the panel's self-heal on
         the instance's first message).
         """
         matched = False
@@ -703,9 +705,9 @@ class Command:
             matched = True
         if matched:
             # a lazily created instance may now serve the focused tab:
-            # re-derive the panels (also fixes contexts that were blank
+            # re-derive the panel (also fixes a context that was blank
             # while the instance was initializing)
-            self.sync_panels()
+            self.sync_panel()
 
     def on_state(self, ed_self, state):
         if state == APPSTATE_SESSION_LOAD_BEGIN: # started
@@ -720,7 +722,7 @@ class Command:
                 self._do_on_open(editor)
             # the visible tab's server may have been created just now:
             # point the panel at it
-            self.sync_panels()
+            self.sync_panel()
 
         elif state == APPSTATE_PROJECT:
             for name,lang in list(self._langs.items()):
@@ -738,9 +740,7 @@ class Command:
             self._on_project_dirs_change()
 
         elif state == APPSTATE_THEME_UI:
-            from .dlg import PanelLog
-
-            PanelLog.on_theme_change()
+            LspPanel.on_theme_change()
             SignaturesDialog.on_theme_change()
             
             for edt in get_visible_eds():
@@ -855,28 +855,20 @@ class Command:
                 SignaturesDialog.hide()
 
     def on_exit(self, *args, **vargs):
+        import json
+
         #### save state before exiting
-        state_changed = False
-        # _langs holds several keys per instance (langids + name/instance
-        # key) - save every Language exactly once
-        seen = set()
-        for lang in self._langs.values():
-            if id(lang) in seen:
-                continue
-            seen.add(id(lang))
-            key,state = lang.get_state_pair()
-            if state:
-                STATE[key] = state
-            elif STATE.pop(key, None):
-                state_changed = True
-        ## if something was removed or state not empty - save
-        if state_changed or STATE:
-            # if started lang server - json will be imported;  otherwise no need to save server state
+        # the panel view state (filter/wrap toggles) is global - one entry
+        panel = LspPanel.get(create=False)
+        if panel is not None:
+            STATE['panel'] = panel.get_state()
+
+        if STATE:
             try:
                 js = json.dumps(STATE, indent=2)
                 with open(fn_state, 'w', encoding='utf-8') as f:
                     f.write(js)
-            except NameError: # for missing json
+            except Exception:
                 pass
 
 
@@ -920,10 +912,6 @@ class Command:
         instance of the file's folder when one exists (multi-instance
         fallback), else a fresh instance is created with the best root.
         """
-        # to not import json from on_exit
-        global json
-        import json
-
         proj_root, proj_dirs = get_workspace_roots(ed_self.get_filename())
 
         # existing instances which match this document BY CAPABILITY. That
@@ -1050,7 +1038,6 @@ class Command:
                     cmds=self._hint_cmds,
                     lintstr=opt_lint_type,
                     underline_style=LINT_STYLE_MAP[opt_lint_underline_style],
-                    state=STATE.get(cfg.get('name'))
             )
         except ValidationError:
             if cfg in servers_cfgs:
@@ -1355,8 +1342,7 @@ class Command:
             # every server, both directions, untruncated - see
             # language.SPY_FILE
             opt_spy_file = j.get('spy_file', '')
-            language_mod_spy = __import__('cuda_lsp.language', fromlist=['language'])
-            language_mod_spy.SPY_FILE = opt_spy_file
+            language.SPY_FILE = opt_spy_file
             
             opt_enable_code_tree = j.get('enable_code_tree', opt_enable_code_tree)
             opt_tree_types_show = j.get('tree_types_show', opt_tree_types_show)
@@ -1377,6 +1363,10 @@ class Command:
                 js = f.read()
             j = _json_loads(js)
             STATE.update(j)
+
+        # the single LSP panel's view state (filter/wrap) - consumed when
+        # the panel gets created (first server start)
+        set_pending_state(STATE.pop('panel', None))
 
         # servers
         _lsp_fns = get_server_cfg_fns()

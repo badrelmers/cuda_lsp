@@ -7,9 +7,11 @@
 
 * spy_file - full LSP message log file path (default is empty = off). When set, EVERY
   JSON-RPC message of every server (both directions, all servers) is appended to that
-  file as one line with the complete untruncated JSON body. The LSP panel's 'Spy'
-  category shows the same traffic but truncates bodies at 3000 chars; this file loses
-  nothing. Debug aid: set the path, repeat the problem, inspect or send the file.
+  file as one line with the complete untruncated JSON body (via a persistent
+  append-mode handle, flushed per batch - fast even with heavy traffic). The LSP
+  panel's 'Spy' category shows the same traffic but truncates bodies at 1200 chars;
+  this file loses nothing. Debug aid: set the path, repeat the problem, inspect or
+  send the file.
   Example: "spy_file": "C:\\temp\\lsp_spy.log"
 
 * send_change_on_request - how to send editor's changes to server:

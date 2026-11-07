@@ -83,6 +83,12 @@ method=config_server
 ;method=dbg_call_hierarchy_in
 
 
+[item37]
+section=commands
+caption=LSP Client\Show LSP panel
+method=show_panel
+
+
 [item70]
 section=commands
 caption=LSP Client\-

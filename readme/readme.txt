@@ -216,36 +216,48 @@ To enable and configure this, call "LSP Client / Config" command and see the fol
 - "semantic_colors_dark"
 
 
-LSP panel (bottom panel "LSP: <server name>")
---------------------------------------------
-The panel shows messages of the LSP server of the FOCUSED EDITOR TAB - it follows
-the tab you switch to, immediately (like Zed's language-server logs; VS Code has
-one output channel per server instead, which must be picked by hand).
-Every server instance has its own set of messages; single-root servers with one
-instance per project folder (OmniSharp) show 'name (folder)' per instance.
+LSP panel (bottom panel "LSP", one icon for ALL servers)
+---------------------------------------------------------
+There is a SINGLE LSP panel. It shows the logs of the FOCUSED EDITOR TAB
+and nothing else: the focused file's diagnostics block, the focused file's
+Spy traffic (JSON-RPC messages which mention that file), and the
+server-level messages (server stderr/stdout, OmniSharp 'o#/...' events,
+Messages/Logs, unhandled methods, response errors) of the focused file's
+server instance. Switching a tab refreshes the panel immediately - like
+Zed's contextual logs pane; messages of other files/servers are not mixed
+in (they appear when their file gets the focus).
+Empty states are explained in place ("No LSP server for this file"...).
+Per-file Spy history is freed when the document closes; all log lists are
+ring buffers (600 server-level / 250-per-file spy / 400-per-file
+diagnostics entries per server instance) - memory stays bounded.
+Rendering is coalesced (~120 ms): bursts of messages cost one append, not
+one full re-render per message. While the panel page is not the active
+bottom-panel page, rendering is skipped (the button badge still counts).
+Scrolling auto-follows the end while the memo is at its bottom (terminal
+behaviour); scroll up to read old messages - auto-follow pauses.
+
+Cells in the panel's top bar:
+- instance cell - name of the shown server instance (fixed width; 'name
+  (folder)' for per-folder instances of single-root servers like OmniSharp);
+  click for a dropdown of ALL running instances of ALL servers (with a
+  close button), click an entry to browse its whole log (all files); the
+  first entry '(follow focused tab)' returns to the automatic behaviour;
+  the counter on the cell shows the number of running instances; hovering
+  shows the full instance identity: server name, complete folder path, and
+  the server command; a manual pick stays until the next tab switch;
+- file cell - name of the focused file the log is scoped to ('(all
+  files)' in browse mode);
+- category cells (Messages, Logs, Diagnostics, Spy, OmniSharp, server
+  stderr...) and severity icons - toggle filters; counters on the cells
+  show the message totals of the context ALWAYS (also for disabled
+  categories), so you see there is something without enabling the category.
+
+Every server instance has its own message store; nothing is ever mixed.
 The panel's context is always re-derived from the focused tab (also
 self-correcting when a server instance finishes initializing and starts
 sending its analysis) - it can never get stuck on another tab's messages.
-
-Cells in the panel's top bar:
-- instance cell - name of the shown server instance (fixed width); click for
-  a dropdown of all running instances of the server (with a close button),
-  click an entry to switch to it; the counter on the cell shows the number of
-  running instances; hovering the cell shows the full instance identity:
-  server name, complete folder path, and the server command;
-  a manual pick stays until the next tab switch;
-- category cells (Messages, Logs, Diagnostics, Spy, OmniSharp, server
-  stderr...) and severity icons - toggle filters; counters on the cells show
-  the message totals of the shown instance ALWAYS (also for disabled
-  categories), so you see there is something without enabling the category.
-
-All message kinds of the focused file's server instance are shown:
-server Messages/Logs, OmniSharp 'o#/...' events, Spy (JSON-RPC traffic),
-server stderr. Only the Diagnostics blocks are per-file: the panel shows
-the diagnostics of the focused file, blocks of other files are hidden
-(the focused file's server re-sends them when they change).
 Double-click a 'Line N: ...' diagnostic to jump to it.
-The category filters and word wrap are remembered per server.
+The category filters and word wrap are remembered globally (one panel).
 The 'Messages' category receives 'window/showMessage' - one-shot messages
 with a severity which the server wants to SHOW to the user (e.g. "project
 loaded", or an error banner); most servers send none, that is why the

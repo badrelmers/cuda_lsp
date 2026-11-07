@@ -24,7 +24,6 @@ _ = get_translation(__file__)  # I18N
 from .util import (
         get_first,
         ed_uri,
-        ed_uri as doc_uri,
         get_visible_eds,
         get_word,
         get_nonwords_chars,
@@ -40,9 +39,12 @@ from .util import (
 
         ValidationError,
     )
-from .dlg import Hint, SEVERITY_MAP, SignaturesDialog, TYPE_DIAG
-from .dlg import PanelLog, SEVERITY_ERR, SEVERITY_LOG, SEVERITY_NA, SEVERITY_WRN
-from .dlg import TYPE_SPY, TYPE_UNHANDLED, TYPE_LOG
+from .dlg import Hint, SignaturesDialog
+from .panel import (
+        make_store,
+        SEVERITY_MAP, SEVERITY_ERR, SEVERITY_LOG, SEVERITY_NA, SEVERITY_WRN,
+        TYPE_SPY, TYPE_UNHANDLED, TYPE_LOG,
+    )
 from . import omnisharp
 from .book import EditorDoc
 #from .tree import TreeMan  # imported on access
@@ -93,12 +95,13 @@ DBG = LOG
 LOG_NAME = 'LSP'
 
 DEBUG_DEV = True # enable spying of request/response messages in LSP panel ('Spy' category)
-SPY_MSG_LIMIT = 3000 # spy: max chars of a message body, longer bodies get truncated
+SPY_MSG_LIMIT = 1200 # spy: max chars of a message body, longer bodies get truncated
 # Full spy log file (set from cuda_lsp.json 'spy_file' by lsp.py): when set,
 # EVERY JSON-RPC message of every server (both directions) is appended there
 # as one line with FULL text - the panel 'Spy' category truncates bodies at
 # SPY_MSG_LIMIT chars, this file loses nothing. Debug aid: set it, repeat
-# the problem, send the file.
+# the problem, send the file. Written via a per-instance persistent handle
+# (see Language._spy_file_write), NOT with open() per message.
 SPY_FILE = ''
 
 api_ver = app_api_version()
@@ -153,7 +156,7 @@ class Language:
     disabled_contexts = None
     complete_from_text = None
     
-    def __init__(self, cfg, cmds=None, lintstr='', underline_style=None, state=None):
+    def __init__(self, cfg, cmds=None, lintstr='', underline_style=None):
         self._shutting_down = None  # scheduled shutdown when not yet initialized
         self.shutdown_start_time = None
         if DEBUG_DEV: print(">>> DEBUG_DEV cfg:",cfg)
@@ -211,13 +214,13 @@ class Language:
 
 
         self._client = None
-        # per-instance log model ('plog' API kept: log/log_str/flush/clear/
-        # set_lex/get_state/diag_filename_info), rendered by the shared
-        # PanelLog view of the server config name - so per-folder instances
-        # of one single-root server each get their OWN messages while
-        # sharing one bottom panel (the view follows the focused tab)
-        state_cfg = state or {}
-        panel_key = self.name
+        # per-instance log model ('plog' API: log/log_str/set_file_diags/
+        # clear/...), rendered by the SINGLE shared LSP panel (bottom panel
+        # "LSP", one icon for all servers): the panel follows the focused
+        # editor tab (Command.sync_panel) and shows this instance's messages
+        # whenever one of its documents is focused - so per-folder instances
+        # of one single-root server never mix their logs
+        #
         # picker cell text (fixed width) and its hover hint: the FULL
         # instance identity - server name, complete folder path (per-folder
         # instances), and the OS command which runs the server
@@ -228,9 +231,9 @@ class Language:
         else:
             disp = self.name
             full = f'{self.name}\ncmd: {cmd_str}'
-        self.plog = PanelLog.make_store(panel_key, disp, state=state_cfg,
-                                        full_name=full)
-        self.plog.view.register_store(self.plog)
+        self.plog = make_store(disp, full_name=full)
+        # persistent handle for SPY_FILE (None = not opened, False = failed)
+        self._spy_fh = None
         self._treeman = None
         # weakref needs a strong reference for a method-ref to work
         self._timer_callback = self.process_queues
@@ -255,15 +258,15 @@ class Language:
 
         self._read_q = queue.Queue()
         self._send_q = queue.Queue()
-        self._err_q = queue.Queue()
+        # server stdout/stderr lines from the reader threads: (type, text)
+        # tuples - logging them happens in process_queues() (UI thread),
+        # NEVER from the reader threads themselves
+        self._console_q = queue.Queue()
 
         self._dbg_msgs = []
         self._dbg_bmsgs = []
         
         self.metadata_goto_requests = {}
-
-        if DBG:
-            self.plog.set_lex(ed.get_prop(PROP_LEXER_FILE))
 
 
     def __str__(self):
@@ -342,8 +345,7 @@ class Language:
                       "config (or open a CudaText project) for project-aware servers "
                       "like OmniSharp").format(LOG_NAME, self.lang_str))
             print(note)
-            self.plog.log_str(note, type_=TYPE_LOG, severity=SEVERITY_WRN,
-                              scroll=True)
+            self.plog.log_str(note, type_=TYPE_LOG, severity=SEVERITY_WRN)
 
         def connect_via_tcp():
             print(_('{}: {} - connecting via TCP, port: {}').format(
@@ -431,9 +433,9 @@ class Language:
                     #print(f'ServerError: {LOG_NAME}: {self.lang_str} - {line}') # bytes
                     try:
                         s = line.decode('utf-8')
-                    except:
-                        s = str(line)
-                    self._err_q.put(s)
+                    except UnicodeDecodeError:
+                        s = line.decode('utf-8', errors='replace')
+                    self._console_q.put(('stderr', s))
         except Exception as ex:
             print(f'ErrReadException: {LOG_NAME}: {self.lang_str} - {ex}')
         pass;       LOG and print(f'NOTE: err reader exited')
@@ -455,8 +457,12 @@ class Language:
                 pass;       LOG and print(f'{LOG_NAME}: receive time: {time.time():.3f}')
                 
                 if not_headers:
+                    # junk before a header: server stdout chatter - queue it
+                    # for the UI thread (calling log_str here would touch the
+                    # panel UI from this reader thread)
                     for s in not_headers:
-                        self.plog.log_str(s.decode(), type_='stdout')
+                        self._console_q.put(
+                            ('stdout', s.decode('utf-8', errors='replace')))
 
                 if header_bytes == b'':
                     pass;       LOG and print('NOTE: reader stopping')
@@ -538,7 +544,7 @@ class Language:
                         if DEBUG_DEV:
                             # make parsing errors visible in the spy stream too
                             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-                            self.plog.log_str(f'[{timestamp}] \u2588\u2588\u2588 RECV ERROR unsupported: {err}', type_=TYPE_SPY, severity=SEVERITY_ERR, scroll=True)
+                            self.plog.log_str(f'[{timestamp}] \u2588\u2588\u2588 RECV ERROR unsupported: {err}', type_=TYPE_SPY, severity=SEVERITY_ERR)
                         
                         if DEBUG_MESSAGES:
                             if err and hasattr(err, 'args') and err.args:
@@ -569,14 +575,11 @@ class Language:
                 self._send_q.put(send_buf)
                 self._timer.restart()
 
-            # stderr Queue
-            while not self._err_q.empty():
-                s = self._err_q.get()
-                self.plog.log_str(s, type_='stderr')
-
-            # render spy messages logged in this batch (log_str with
-            # update_memo=False is much faster for high-volume traffic)
-            self.plog.flush()
+            # server stdout/stderr Queue (drained in the UI thread; the
+            # panel re-renders coalesced - no flush() needed)
+            while not self._console_q.empty():
+                type_, s = self._console_q.get()
+                self.plog.log_str(s, type_=type_)
 
         except Exception as ex:
             print(f'ERROR: QueuesProcessingError: {LOG_NAME}: {self.lang_str} - {ex}')
@@ -832,7 +835,7 @@ class Language:
             text += ' - replied MethodNotFound'
         print(f'{LOG_NAME}: {self.lang_str} - {text}')
         msg_status(f'{LOG_NAME}: {self.lang_str}: {text}')
-        self.plog.log_str(text, type_=TYPE_UNHANDLED, severity=SEVERITY_WRN, scroll=True)
+        self.plog.log_str(text, type_=TYPE_UNHANDLED, severity=SEVERITY_WRN)
 
 
     @staticmethod
@@ -855,9 +858,10 @@ class Language:
 
     def _on_spy_message(self, direction, content, method=None):
         """ DEBUG_DEV message spy: log every JSON-RPC message (raw JSON, both
-        directions) to the LSP panel's 'Spy' category. Registered on the
+        directions) to the LSP panel's 'Spy' category, tagged with the
+        document uri it belongs to (per-file scope). Registered on the
         sansio client via Client(spy=...), which calls it for every complete
-        message - before/independently of message parsing.
+        message - before/independently of message parsing. Never raises.
         """
         try:
             # 1. Determine type and direction
@@ -881,36 +885,43 @@ class Language:
             else:
                 name = method or '?'
 
-            # 3. Format and truncate the content: valid JSON,
-            # limited to SPY_MSG_LIMIT chars with a marker if truncated
+            # 3. Serialize ONCE; the panel gets the truncated body, the
+            # optional SPY_FILE gets the full one (persistent handle)
             body = json.dumps(content, ensure_ascii=False)
+
+            if SPY_FILE:
+                self._spy_file_write(way, kind, name, body)
+
             if len(body) > SPY_MSG_LIMIT:
                 body = body[:SPY_MSG_LIMIT] + f' [TRUNCATED... total: {len(body)}]'
 
-            # 3b. Full-text copy to SPY_FILE (option 'spy_file'): the panel
-            # truncates at SPY_MSG_LIMIT, this loses NOTHING. Line-buffered
-            # plain text, so a hung/crashed CudaText
-            # still leaves everything received so far on disk
-            if SPY_FILE:
-                try:
-                    with open(SPY_FILE, 'a', encoding='utf-8') as f:
-                        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        f.write(f'[{self.name}] [{ts}] {way} {kind:<12}: '
-                                f'{name} _ {json.dumps(content, ensure_ascii=False)}\n')
-                except Exception:
-                    pass  # logging must never break message processing
-
-            # 4. Log it (update_memo=False: batched render by flush(),
-            # fast enough for high-volume traffic); uri-tagged so the
-            # panel's 'File' scope shows only the focused document's traffic
+            # 4. Log it (the panel batches the rendering by itself)
             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
             self.plog.log_str(
-                f'[{timestamp}] {arrow} {way} {kind:<12}: {name} _ {body}',
-                type_=TYPE_SPY, severity=SEVERITY_LOG, uri=self._spy_msg_uri(content),
-                update_memo=False)
+                f'[{timestamp}] {arrow} {way} {kind:<12}: {name} _ {body}\n',
+                type_=TYPE_SPY, severity=SEVERITY_LOG,
+                uri=self._spy_msg_uri(content))
         except Exception:
             # spying must never break message processing
             pass
+
+    def _spy_file_write(self, way, kind, name, body):
+        """ One full-text line into SPY_FILE via a persistent append-mode
+        handle (flushed per call): far faster than open()/close() per
+        message, and a hung/crashed CudaText still leaves everything
+        received so far on disk. After a write error (bad path, disk full)
+        the handle is disabled - logging must never break messages. """
+        if self._spy_fh is False:
+            return
+        try:
+            if self._spy_fh is None:
+                self._spy_fh = open(SPY_FILE, 'a', encoding='utf-8')
+            ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self._spy_fh.write(
+                f'[{self.name}] [{ts}] {way} {kind:<12}: {name} _ {body}\n')
+            self._spy_fh.flush()
+        except Exception:
+            self._spy_fh = False   # stop trying
 
 
     def send_changes(self, eddoc):
@@ -941,25 +952,13 @@ class Language:
 
     def on_ed_shown(self, eddoc):
         """ The doc's editor became the visible one (tab switched to it):
-        refresh its diagnostics AND switch the LSP panel to THIS server
-        instance, scoped to THIS document - the panel follows the focused
-        tab, like Zed's language-server logs pane. A manual instance-picker
-        pick is dropped: the tab switch is the stronger intent. """
+        re-apply its stored diagnostics to the editor (gutter/underlines) -
+        they may have changed while it was not visible. The LSP panel needs
+        nothing here: its context is re-derived from the focused tab by
+        Command.sync_panel(), and the diagnostics block lives in the log
+        model (LogStore.file_diags), not in the rendered log.
+        """
         self.diagnostics_man.on_doc_shown(eddoc)
-        view = self.plog.view
-        if view is not None:
-            view._picked = False
-            view.set_context(self.plog, eddoc.uri)
-
-    def on_ed_shown_panel_only(self, ed):
-        """ Panel-context switch only (no diagnostics refresh): the editor
-        became visible while its server is still initializing - doc.lang
-        is not set yet, so on_ed_shown(eddoc) cannot be used, but the
-        panel must already follow this tab (its messages render as the
-        server starts talking). """
-        view = self.plog.view
-        if view is not None:
-            view.set_context(self.plog, ed_uri(ed))
 
     def on_open(self, eddoc):
         if self.client.is_initialized:
@@ -1010,6 +1009,10 @@ class Language:
         # clean up diagnostics img dictionary
         h_ed = eddoc.ed.get_prop(PROP_HANDLE_SELF)
         self.diagnostics_man._decor_serverity_ims.pop(h_ed, None)
+
+        # the tab is gone: its per-file spy traffic is unreachable - free it
+        # (the small diagnostics block stays: last known state)
+        self.plog.drop_file(eddoc.uri)
 
         if self.client.is_initialized:
             opts = self.scfg.method_opts(METHOD_DID_CLOSE, eddoc)
@@ -1092,7 +1095,7 @@ class Language:
                           'server, one instance per workspace folder is used '
                           '(its workspaceFolders capability advertisement '
                           'cannot be trusted)').format(LOG_NAME, info.name),
-                        type_=TYPE_LOG, severity=SEVERITY_WRN, scroll=True)
+                        type_=TYPE_LOG, severity=SEVERITY_WRN)
         except Exception:
             pass  # detection must never break message handling
 
@@ -1610,14 +1613,6 @@ class Language:
         self.client.workspace_symbol(query='')
 
 
-    def get_state_pair(self):
-        # the state is VIEW-level (panel filter/wrap/scope toggles) and
-        # shared by all instances of one server config: saved under the
-        # bare config name, per-folder instances don't overwrite each other
-        state = self.plog.get_state()
-
-        return self.name, state
-
     def shutdown(self, *args, **vargs):
         pass;       LOG and print('-- lang - shutting down')
         if self.client.is_initialized:
@@ -1636,7 +1631,15 @@ class Language:
             if self.sock:
                 self.sock.close()
 
-            # forget this instance's log store in the shared panel view
+            # close the optional spy file handle
+            if self._spy_fh:
+                try:
+                    self._spy_fh.close()
+                except Exception:
+                    pass
+            self._spy_fh = False
+
+            # forget this instance's log store in the shared panel
             # (its messages must not appear as another instance's context)
             try:
                 self.plog.detach()
@@ -1764,10 +1767,15 @@ def _severity_short_name(severity):
 class DiagnosticsMan:
     """ * Command.on_tab_change() ->
             <lang>.on_ed_shown(<new visible editor = eddoc>) ->
-                this.on_doc_shown(<eddoc>) -- clear,reaply diags if visible
+                this.on_doc_shown(<eddoc>) -- re-apply stored diags to editor
         * this.set_diagnostics() ->
-            - set dirt if not visible
-            - clear,reaply diags if visible
+            - ALWAYS: store list + replace the panel's diagnostics block
+              in the log model (LogStore.set_file_diags)
+            - when the doc is visible: apply gutter/underline visuals
+            - else: mark dirty, applied by on_doc_shown()
+        The log model is independent of the gutter/lint options: the panel
+        shows diagnostics even with lint_type 'none'/'c' (which only turn
+        off the editor visuals).
     """
 
     LINT_NONE = 100
@@ -1778,8 +1786,6 @@ class DiagnosticsMan:
 
     def __init__(self, lintstr=None, underline_style=2, logger=None):
         self.logger = logger
-        if self.logger is not None:
-            self.logger.diag_filename_info = {}
         self.uri_diags = {} # uri -> diag?
         self.dirtys = set() # uri
 
@@ -1795,38 +1801,78 @@ class DiagnosticsMan:
 
         self._setup_bookmark_gutter()
 
-    def on_doc_shown(self, eddoc):
-        """ The doc's editor became the visible one (tab switched to it).
-        The panel must show THIS doc's diagnostics - it may hold another
-        doc's block: diags are logged to the panel when they arrive (doc
-        visible), and nothing replaced them when focus moved away.
+    def _visuals_on(self):
+        """ Gutter icons / underlines enabled (independent of the log model:
+        the panel always shows diagnostics). """
+        return bool(self._linttype or self._highlight_text or self._highlight_bg)
 
-        So ALWAYS re-apply the doc's stored diagnostics (or none - then
-        the panel's diag block is cleared). Idempotent: gutter
-        marks/underlines are cleared then re-set, panel diag messages are
-        cleared (logger.clear_diagnostics) then re-added with the same
-        content. """
-        if not self._linttype:
+    def on_doc_shown(self, eddoc):
+        """ The doc's editor became the visible one (tab switched to it):
+        re-apply its STORED diagnostics to the editor (gutter/underlines) -
+        they may have changed while it was not visible. The LSP panel needs
+        nothing here: its context follows the focused tab
+        (Command.sync_panel), and the diagnostics block lives in the log
+        model (LogStore.file_diags) - no re-logging on every tab switch.
+        """
+        if not self._visuals_on():
             return
 
         self.dirtys.discard(eddoc.uri)
         self._apply_diagnostics(eddoc.ed, self.uri_diags.get(eddoc.uri, []))
 
     def set_diagnostics(self, uri, diag_list):
-        if not self._linttype:
-            return
-        if len(diag_list) > 0  or  self.uri_diags.get(uri):
+        """ publishDiagnostics arrived: store the list, ALWAYS update the
+        panel's diagnostics block in the log model (it is independent of
+        the gutter options), and apply the gutter/underline visuals when
+        the document is visible (else mark dirty - on_doc_shown applies
+        them when the tab becomes visible again). """
+        if len(diag_list) > 0  or  self.uri_diags.get(uri) is not None:
             self.uri_diags[uri] = diag_list
-            applied = False
-            for ed in get_visible_eds():
-                if uri_to_path(uri) == uri_to_path(ed_uri(ed)):
-                    self._apply_diagnostics(ed, diag_list)
-                    applied = True
-            if not applied: # not visible, update when visible
-                self.dirtys.add(uri)
+
+            self.logger.set_file_diags(
+                uri, self._format_diag_block(uri, diag_list),
+                filename=uri_to_path(uri))
+
+            if self._visuals_on():
+                applied = False
+                for ed in get_visible_eds():
+                    if uri_to_path(uri) == uri_to_path(ed_uri(ed)):
+                        self._apply_diagnostics(ed, diag_list)
+                        applied = True
+                if not applied: # not visible, update when visible
+                    self.dirtys.add(uri)
+
+    def _diag_text(d):
+        """ One diagnostic as '[source,Err:code] message' - used for the
+        bookmark/decor hover text and for the panel's 'Line N:' entries. """
+        pre,post = ('[',']: ') if (d.severity is not None  or  d.code) else  ('','')
+        mid = ':' if (d.severity is not None  and  d.code) else ''
+        code = str(d.code)  if d.code is not None else  ''
+        source = str(d.source)  if d.source is not None else  ''
+        return ''.join([pre, source, ',', _severity_short_name(d.severity), mid, code, post, d.message])
+
+    _diag_text = staticmethod(_diag_text)
+
+    def _format_diag_block(self, uri, diag_list):
+        """ Panel lines of one document's diagnostics: the 'File:' header
+        (severity icon of the most severe entry) + one 'Line N: ...' per
+        entry, sorted by position. Returns [(text, severity_str)]. """
+        if not diag_list:
+            return []
+        top = min(diag_list, key=lambda d: d.severity or 9)
+        lines = [(f'File: {uri_to_path(uri)}',
+                  SEVERITY_MAP.get(top.severity, SEVERITY_NA))]
+        for d in sorted(diag_list, key=lambda d: (d.range.start.line,
+                                                  d.range.start.character)):
+            lines.append((f'Line {d.range.start.line+1}: {self._diag_text(d)}',
+                          SEVERITY_MAP.get(d.severity, SEVERITY_NA)))
+        return lines
 
     def _apply_diagnostics(self, ed: Editor, diag_list):
-        self.logger.clear_diagnostics(doc_uri(ed))
+        """ Apply the visuals (gutter icons / underlines / corner text) of
+        one document's diagnostics to ONE editor. Pure editor-side: the
+        panel's diagnostics block is updated by set_diagnostics() via the
+        log model, NEVER here. """
         if self._linttype  or  self._highlight_bg:
             self._clear_old(ed)
 
@@ -1840,7 +1886,6 @@ class DiagnosticsMan:
             # get dict of lines for gutter
             line_diags = self._get_gutter_data(diag_list)
 
-            filename_added = False
             ed_line_count = ed.get_line_count()
 
             err_ranges = []  # tuple(x,y,len)
@@ -1854,35 +1899,12 @@ class DiagnosticsMan:
                 else:
                     diags.sort(key=severity_la) # important first, None - last
 
-                # get msg-lines for bookmark hover
+                # get msg-lines for bookmark/decor hover
+                # (the panel's 'Line N:' lines come from _format_diag_block)
                 msg_lines = []
                 for d in diags:
                     kind = DIAG_BM_KINDS.get(d.severity, DIAG_DEFAULT_SEVERITY)
-                    #TODO fix ugly... (.severity and .code -- can be None)
-                    pre,post = ('[',']: ') if (d.severity is not None  or  d.code) else  ('','')
-                    mid = ':' if (d.severity is not None  and  d.code) else ''
-
-                    severity_short = _severity_short_name(d.severity)
-                    # "[severity:code] message"
-                    code = str(d.code)  if d.code is not None else  ''
-                    source = str(d.source)  if d.source is not None else  ''
-                    text = ''.join([pre, source, ',',severity_short, mid, code, post, d.message])
-                    msg_lines.append(text)
-
-                    if not filename_added:
-                        filename_added = True
-                        fn = ed.get_filename()
-                        self.logger.log_str(f"File: {fn}",
-                            type_=TYPE_DIAG, severity=SEVERITY_MAP.get(d.severity, SEVERITY_NA),
-                            uri=doc_uri(ed), # per-file: panel 'File' scope
-                            update_memo=False # _update_memo() will be called after the loop
-                        )
-                        self.logger.diag_filename_info[doc_uri(ed)] = fn
-                    self.logger.log_str(f"Line {d.range.start.line+1}: {text}",
-                        type_=TYPE_DIAG, severity=SEVERITY_MAP.get(d.severity, SEVERITY_NA),
-                        uri=doc_uri(ed), # per-file: panel 'File' scope
-                        update_memo=False # _update_memo() will be called after the loop
-                    )
+                    msg_lines.append(self._diag_text(d))
 
                 # gather err ranges
                 for d in diags:
@@ -1909,8 +1931,6 @@ class DiagnosticsMan:
                     ed.decor(DECOR_SET, line=nline, image=decor_im_map[decor_severity], text=tooltip, tag=DIAG_BM_TAG)
                 else:
                     ed.bookmark(BOOKMARK_SET, nline=nline, nkind=kind, text=text, tag=DIAG_BM_TAG)
-            self.logger._update_memo() # make msgs now appear in memo
-            self.logger._scroll_to_end()
             #end for line_diags
 
             # underline error text ranges
