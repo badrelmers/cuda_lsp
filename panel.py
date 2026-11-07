@@ -127,12 +127,14 @@ PLACEHOLDER_NO_SERVER_2 = _('Open a file with a lexer served by a configured ser
 PLACEHOLDER_NO_MSGS     = _('(no log messages for this file)')
 PLACEHOLDER_NO_MSGS_ALL = _('(no log messages)')
 
-# trailing column range of a diagnostics entry, e.g. 'Fix formatting (21-22)'
-# - the suffix appended by DiagnosticsMan._diag_pos_suffix (language.py):
-# '(21-22)' normal range, '(21)' zero-width, '(21-...)' multi-line.
-# Anchored at end-of-line: the suffix is always appended last, so even a
-# message that itself ends in '(9)' cannot shadow the real range.
-_RE_DIAG_RANGE = re.compile(r'\((\d+)(?:-(\d+|\.\.\.))?\)$')
+# trailing column range of a diagnostics entry, appended by
+# DiagnosticsMan._diag_pos_suffix (language.py): '(21-22)' normal single-line
+# range, '(21)' zero-width insertion point, '(130:21-144:34)' range spanning
+# several lines (both positions carry their line). Anchored at end-of-line:
+# the suffix is always appended last, so even a message that itself ends in
+# '(9)' cannot shadow the real range. group(1): start char, or start LINE
+# when the suffix is multi-line; group(2): start char of a multi-line range.
+_RE_DIAG_RANGE = re.compile(r'\((\d+)(?::(\d+))?(?:-\d+(?::\d+)?)?\)$')
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +238,8 @@ class LogStore:
                        TYPE_DIAG, severity)
                 for text, severity in lines]
         self.file_diags[uri] = msgs
-        self._note_type(TYPE_DIAG)
+        # no _note_type: the Diagnostics cell is a PERMANENT cell of the bar
+        # (always shown), so a diagnostics block can never grow the bar
         _notify_change(self, uri)
 
     def clear_diagnostics(self, uri=None):
@@ -304,6 +307,14 @@ CELL_INSTANCE = '__instance__'
 # names must not resize the bar on every switch
 INSTANCE_CELL_W = 180
 
+# the Diagnostics cell is separated from the other filter cells by this
+# margin (pixels): it is the heart of the panel, the eye must find it first
+MARGIN_CELL_W = 16
+
+# state line color of the Diagnostics cell (BGR): amber - every other
+# filter cell uses the green 'line_enabled_color'
+DIAG_LINE_COLOR = 0x14A2E0
+
 PANEL_NAME = 'LSP'   # the single bottom-panel page caption
 
 
@@ -351,7 +362,10 @@ class LspPanel:
         self._placeholder = True # memo currently shows a placeholder line
         self._evictions = 0     # ring evictions since the last full render
 
-        self._counts = {}        # cell name -> count overlay (context)
+        self._counts = {}        # cell name -> count of the context (text suffix)
+        self._diag_sevs = {}     # severity str -> count of TYPE_DIAG messages
+        self._inst_caption = '-' # instance cell caption (count/pin appended live)
+        self._inst_pin = ''      # ' *' while a manual picker pick is pinned
         self._severity_ims = {}  # severity str -> imagelist index
         self._sb_cellind_map = {}  # cell name -> statusbar cell index
         self._h_btn_sidebar = None
@@ -412,6 +426,8 @@ class LspPanel:
         self._memo.set_prop(PROP_LAST_LINE_ON_TOP, False)
         self._memo.set_prop(PROP_HILITE_CUR_LINE,  False)
 
+        self._set_log_lexer()
+
         dlg_proc(self.h_dlg, DLG_SCALE)
 
         app_proc(PROC_BOTTOMPANEL_ADD_DIALOG, (PANEL_NAME, self.h_dlg, self.fn_icon))
@@ -419,6 +435,22 @@ class LspPanel:
             if props['cap'] == PANEL_NAME:
                 self._h_btn_sidebar = props['btn_h']
                 break
+
+    def _set_log_lexer(self):
+        """ Color the log view with a log lexer. Preference: the
+        user-installable 'Logfiles' lexer, else CudaText's built-in lite
+        lexer 'Log files ^' (lite lexer names carry the ' ^' suffix - CudaText
+        wiki, 'Lite lexers'); 'Log files' without the suffix is also probed
+        defensively. lexer_proc(LEXER_GET_PROP) returns None for a missing
+        lexer, so nothing is set (plain text, as before) when none exists. """
+        try:
+            for name in ('Logfiles', 'Log files ^', 'Log files'):
+                if lexer_proc(LEXER_GET_PROP, name):
+                    self._memo.set_prop(PROP_LEXER_FILE, name)
+                    return name
+        except Exception:
+            pass
+        return None
 
     def _setup_severity_icons(self):
         h_im = self._memo.decor(DECOR_GET_IMAGELIST)
@@ -529,12 +561,17 @@ class LspPanel:
     def _on_store_change(self, store, uri):
         """ The visible history changed SHAPE (diagnostics block replaced /
         cleared, file dropped, store cleared) - full re-render when it
-        affects the context. uri=None means 'everything changed'. """
+        affects the context. uri=None means 'everything changed'.
+        NOTE: no _sb_dirty here - the bar's cell set only ever GROWS via a
+        NEW message type, which _on_store_msg already dirties (log_str's
+        _note_type); the Diagnostics cell is permanent, so a diagnostics
+        replace (the most frequent event - every publishDiagnostics) must
+        NOT rebuild the whole bar (new cell indices would churn on every
+        server analysis). """
         if store is self.store:
             if self.uri is None or uri is None or uri == self.uri:
                 self._need_full = True
                 self._pending.clear()
-            self._sb_dirty = True   # the store's type set may have grown
         self._schedule()
 
     # -- coalesced UI tick ----------------------------------------------------
@@ -635,13 +672,17 @@ class LspPanel:
         self._ctx_follow = False
 
         counts = {}
+        diag_sevs = {}   # severity str -> count, TYPE_DIAG messages only
         visible = []
         for m in self._context_msgs():
             counts[m.type] = counts.get(m.type, 0) + 1
             counts[m.severity] = counts.get(m.severity, 0) + 1
+            if m.type == TYPE_DIAG:
+                diag_sevs[m.severity] = diag_sevs.get(m.severity, 0) + 1
             if self._filter_ok(m):
                 visible.append(m)
         self._counts = counts
+        self._diag_sevs = diag_sevs
 
         if visible:
             self._placeholder = False
@@ -675,7 +716,9 @@ class LspPanel:
         """ Fast path: append only the messages logged since the last render.
         Chronologically correct: every pending message has a higher seq than
         anything already shown (per-store counter), so appending to the memo
-        end keeps the order. """
+        end keeps the order. TYPE_DIAG never arrives here (a diagnostics
+        block is REPLACED atomically -> always a full re-render), so
+        _diag_sevs needs no update in this path. """
         msgs = self._pending
         follow = self._at_bottom()
 
@@ -727,13 +770,34 @@ class LspPanel:
 
     # -- top bar (statusbar) -------------------------------------------------------
 
+    def _theme_color(self, key, fallback):
+        """ Color of a UI theme part, with a fallback for exotic themes. """
+        try:
+            return self.colors[key]['color']
+        except (KeyError, TypeError):
+            return fallback
+
     def _update_sb(self):
-        """ Rebuild the filter bar: [instance] [type cells...] [spacer]
-        [severity icons]. Called on context change / theme change / when the
-        shown store learns a new message type. """
+        """ Rebuild the filter bar (left to right):
+            [instance picker] [Diagnostics] [margin] [other category cells]
+            [stretch] [severity icons]
+        THREE designs, one per kind of cell:
+        * instance cell - not a panel but a PICKER: distinct background,
+          no state underline (it has no on/off state), fixed width;
+        * Diagnostics cell - the heart of the plugin: ALWAYS present (even
+          with 0 entries), directly after the picker, separated from the
+          other cells by a margin so the eye finds the errors first; amber
+          state line + the worst-severity icon of the context (its count is
+          always shown, even 'Diagnostics 0');
+        * every other category cell - one shared look (green state line
+          when enabled).
+        Cell texts carry their counts as a trailing number (_update_counts)
+        - an overlay used to cover the caption. Called on context change /
+        theme change / when the shown store learns a new message type. """
         h_sb = self._h_sb
 
         bg_color = self.colors['TabActive']['color']
+        inst_bg_color = self._theme_color('TabInactive', bg_color)
         font_enabled_color = self.colors['TabFontActive']['color']
         font_disabled_color = self.colors['TabFontMod']['color']
         line_enabled_color = 0x7cc87c
@@ -750,16 +814,18 @@ class LspPanel:
         # server and all its files, a file pick shows that file alone -
         # until the next tab switch)
         inst_caption = self.store.display_name if self.store else '-'
+        inst_pin = ''
         if self.store is not None and self._picked:
             if self.uri is not None:
                 # pinned to ONE file: name it (fixed width truncates the rest)
                 path = uri_to_path(self.uri)
                 inst_caption += ' / ' + (os.path.basename(path)
                                          if path else self.uri)
-            inst_caption += ' *'
+            inst_pin = ' *'
+        self._inst_caption = inst_caption
+        self._inst_pin = inst_pin
         cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
         self._sb_cellind_map[CELL_INSTANCE] = cellind
-        statusbar_proc(h_sb, STATUSBAR_SET_CELL_TEXT, index=cellind, value=inst_caption)
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_CALLBACK, index=cellind,
                        value=callbac_fstr.format(CELL_INSTANCE))
         if self.store:
@@ -774,35 +840,60 @@ class LspPanel:
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_HINT, index=cellind,
                        value=inst_hint)
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_ALIGN, index=cellind, value='C')
-        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_LINE2, index=cellind,
-                       value=line_enabled_color)
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_SIZE, index=cellind,
                        value=INSTANCE_CELL_W)
-        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind, value=bg_color)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind,
+                       value=inst_bg_color)
         statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_FONT, index=cellind,
                        value=font_enabled_color)
 
-        # category cells of the shown store
+        # Diagnostics cell: the heart of the panel - ALWAYS present (even
+        # before the server published anything), its own design: amber state
+        # line + the context's worst-severity icon (_update_counts); its
+        # count is ALWAYS shown ('Diagnostics 0' = no problems known)
+        cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
+        self._sb_cellind_map[TYPE_DIAG] = cellind
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_CALLBACK, index=cellind,
+                       value=callbac_fstr.format(TYPE_DIAG))
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_HINT, index=cellind,
+                       value=_('Diagnostics of the focused file (click to show/hide them)'))
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_AUTOSIZE, index=cellind, value=True)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind,
+                       value=bg_color)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_FONT, index=cellind,
+                       value=font_disabled_color if TYPE_DIAG in self._disabled_items
+                       else font_enabled_color)
+        if TYPE_DIAG not in self._disabled_items:
+            statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_LINE2, index=cellind,
+                           value=DIAG_LINE_COLOR)
+
+        # margin: separates the Diagnostics cell from the SECONDARY panels -
+        # not a filter, not in _sb_cellind_map (inert, just background)
+        cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_SIZE, index=cellind,
+                       value=MARGIN_CELL_W)
+        statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind,
+                       value=bg_color)
+
+        # other category cells of the shown store (one shared design);
+        # their texts (with the trailing counts) are set by _update_counts
         extra = self.store.extra_types if self.store else set()
-        for name in [TYPE_MSG, TYPE_LOG, *sorted(extra - {TYPE_MSG, TYPE_LOG})]:
+        for name in [TYPE_MSG, TYPE_LOG, *sorted(extra - {TYPE_MSG, TYPE_LOG, TYPE_DIAG})]:
             cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
             self._sb_cellind_map[name] = cellind
 
-            statusbar_proc(h_sb, STATUSBAR_SET_CELL_TEXT, index=cellind,
-                           value=PANEL_CAPTIONS.get(name, name))
             statusbar_proc(h_sb, STATUSBAR_SET_CELL_CALLBACK, index=cellind,
                            value=callbac_fstr.format(name))
 
-            font_col = font_disabled_color
             if name not in self._disabled_items:
-                font_col = font_enabled_color
                 statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_LINE2, index=cellind,
                                value=line_enabled_color)
             statusbar_proc(h_sb, STATUSBAR_SET_CELL_AUTOSIZE, index=cellind, value=True)
             statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_BACK, index=cellind,
                            value=bg_color)
             statusbar_proc(h_sb, STATUSBAR_SET_CELL_COLOR_FONT, index=cellind,
-                           value=font_col)
+                           value=font_disabled_color if name in self._disabled_items
+                           else font_enabled_color)
 
         # spacer
         cellind = statusbar_proc(h_sb, STATUSBAR_ADD_CELL, index=-1)
@@ -831,16 +922,53 @@ class LspPanel:
         self._update_counts()
 
     def _update_counts(self):
-        """ Count overlays on the cells. Counts come from the last render
-        pass (context messages, NOT category-filtered: a disabled category
-        still shows its total). The instance cell shows the number of live
-        instances. """
+        """ Counts on the cells - appended to the END of the cell text (an
+        overlay used to cover the caption when the number grew long).
+        Counts come from the last render pass (context messages, NOT
+        category-filtered: a disabled category still shows its total).
+        * Diagnostics cell: ALWAYS numbered, even 'Diagnostics 0', and its
+          icon shows the worst diagnostic severity of the context
+          (error > warning > info > log; grey = none);
+        * other category cells: 'name N' while N > 0, plain caption else;
+        * severity icon cells: icon-only, the number stays an overlay
+          (nothing to cover there);
+        * instance cell: its caption + ' [N]' only when several instances
+          run (the number carries no information otherwise). """
         counts = self._counts
-        counts[CELL_INSTANCE] = len(self.stores)
         for name, cellind in self._sb_cellind_map.items():
-            value = counts.get(name, '')
-            statusbar_proc(self._h_sb, STATUSBAR_SET_CELL_OVERLAY,
-                           index=cellind, value=str(value))
+            n = counts.get(name, 0)
+            if name == CELL_INSTANCE:
+                continue
+            if name in SEVERITYS:
+                statusbar_proc(self._h_sb, STATUSBAR_SET_CELL_OVERLAY,
+                               index=cellind, value=str(n) if n else '')
+            elif name == TYPE_DIAG:
+                statusbar_proc(self._h_sb, STATUSBAR_SET_CELL_TEXT,
+                               index=cellind,
+                               value=f"{PANEL_CAPTIONS.get(name, name)} {n}")
+                worst = next((s for s in (SEVERITY_ERR, SEVERITY_WRN,
+                                          SEVERITY_INFO, SEVERITY_LOG)
+                              if self._diag_sevs.get(s)), None)
+                statusbar_proc(self._h_sb, STATUSBAR_SET_CELL_IMAGEINDEX,
+                               index=cellind,
+                               value=self._severity_ims.get(worst,
+                                   self._severity_ims[SEVERITY_NA]))
+            else:
+                cap = PANEL_CAPTIONS.get(name, name)
+                statusbar_proc(self._h_sb, STATUSBAR_SET_CELL_TEXT,
+                               index=cellind,
+                               value=f"{cap} {n}" if n else cap)
+
+        # instance cell: caption (set by _update_sb) + live ' [N]' + pin '*'
+        cellind = self._sb_cellind_map.get(CELL_INSTANCE)
+        if cellind is not None:
+            n = len(self.stores)
+            value = self._inst_caption
+            if n > 1:
+                value += f" [{n}]"
+            value += self._inst_pin
+            statusbar_proc(self._h_sb, STATUSBAR_SET_CELL_TEXT,
+                           index=cellind, value=value)
 
     def _update_badge(self):
         """ Overlay on the bottom-panel button: total messages of ALL
@@ -966,7 +1094,14 @@ class LspPanel:
         except ValueError:
             return
         m = _RE_DIAG_RANGE.search(text)
-        col = int(m.group(1)) if m else 0
+        if m is not None:
+            if m.group(2) is not None:   # multi-line '(130:21-144:34)':
+                line = int(m.group(1))   # the start LINE is in the suffix too
+                col = int(m.group(2))
+            else:                       # '(21)' / '(21-22)': char only
+                col = int(m.group(1))
+        else:
+            col = 0
         file_open(fn)
         ed.set_caret(col, line)
         ed.focus()

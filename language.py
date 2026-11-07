@@ -2193,14 +2193,15 @@ class DiagnosticsMan:
 
     def _diag_pos_suffix(d):
         """ Column range suffix for the panel's 'Line N:' entries: the RAW
-        zero-based characters exactly as the server sent them, e.g.
+        zero-based positions exactly as the server sent them, e.g.
         '... Fix formatting (21-22)'. Diagnostic.range is REQUIRED by the
         LSP spec (zero-based start/end positions), so this shows for every
         server, not only OmniSharp. Zero-width range (an insertion point)
-        -> '(21)'; multi-line range -> '(21-...)': the end character belongs
-        to a later line, printing it alone would mislead. '' only for a
-        malformed range (then the panel's double-click falls back to
-        column 0). Parsed back by panel.memo_on_click_dbl (_RE_DIAG_RANGE). """
+        -> '(21)'; a range spanning several lines carries BOTH lines, as
+        the end character alone would belong to another line:
+        '(130:21-144:34)'. '' only for a malformed range (then the panel's
+        double-click falls back to column 0). Parsed back by
+        panel.memo_on_click_dbl (_RE_DIAG_RANGE). """
         try:
             x0, y0 = d.range.start.character, d.range.start.line
             x1, y1 = d.range.end.character, d.range.end.line
@@ -2208,7 +2209,7 @@ class DiagnosticsMan:
             return ''
         if y0 == y1:
             return f' ({x0})' if x0 == x1 else f' ({x0}-{x1})'
-        return f' ({x0}-...)'
+        return f' ({y0}:{x0}-{y1}:{x1})'
 
     _diag_pos_suffix = staticmethod(_diag_pos_suffix)
 

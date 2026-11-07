@@ -280,7 +280,7 @@ and NO later re-render (diagnostics replacement, message bursts, hiding/
 showing the page) forces the scroll back down. Switching the context
 (another file) shows the end of the new file's log.
 
-Cells in the panel's top bar:
+Cells in the panel's top bar (left to right):
 - instance cell - name of the shown server instance (fixed width; 'name
   (folder)' for per-folder instances of single-root servers like OmniSharp);
   click for a dropdown of ALL running instances of ALL servers, click an
@@ -288,24 +288,43 @@ Cells in the panel's top bar:
   shown - its server-level messages plus all its files (logs of other
   servers are never mixed in) - until the next tab switch; the first entry
   '(follow focused tab)' cancels the pin immediately; a pinned instance is
-  marked with a trailing ' *' in the cell; the counter on the cell shows
-  the number of running instances; hovering shows the full instance
-  identity: server name, complete folder path, and the server command;
-- category cells (Messages, Logs, Diagnostics, Spy, OmniSharp, server
-  stderr...) and severity icons - toggle filters; counters on the cells
-  show the message totals of the context ALWAYS (also for disabled
-  categories), so you see there is something without enabling the category.
+  marked with a trailing ' *' in the cell; ' [N]' at the end of the text
+  (shown while several instances run) is the number of running instances;
+  hovering shows the full instance identity: server name, complete folder
+  path, and the server command. It is NOT a filter panel but a picker, so
+  it has its own look: distinct background, no state underline;
+- Diagnostics cell - ALWAYS present (even with 0 entries: it is the heart
+  of the plugin, where you see the errors of the focused file), first
+  panel right after the instance cell, and separated from the other panels
+  by a margin so the eye finds the errors first. Its own design: amber
+  state line + an icon with the WORST diagnostic severity of the context
+  (error / warning / info / log; grey = none) - red icon = your file has
+  errors. Its count is always shown, even 'Diagnostics 0' (= no problems
+  known);
+- other category cells (Messages, Logs, Spy, OmniSharp, server stderr...)
+  - toggle filters, one shared look (green state line when enabled). Every
+  category cell shows its message total at the END of its caption ('Spy
+  214'), ALWAYS (also for disabled categories), so you see there is
+  something without enabling the category - the count never covers the
+  caption (it used to be an overlay on top of the text);
+- severity icon cells (right) - toggle severity filters; their totals stay
+  as a small overlay (icon-only cells - nothing to cover).
+
+The log view is an editor and gets a log lexer for colors: the
+user-installable 'Logfiles' lexer when present, else CudaText's built-in
+lite lexer 'Log files ^'.
 
 Every server instance has its own message store; nothing is ever mixed.
 The panel's context is always re-derived from the focused tab (also
 self-correcting when a server instance finishes initializing and starts
 sending its analysis) - it can never get stuck on another tab's messages.
 Diagnostics entries show the exact column range of the problem - the raw
-characters the server reported, e.g. 'Line 131: [csharp,Hint:IDE0055]: Fix
-formatting (21-22)' (LSP's Diagnostic.range is required for every server);
-'(21)' marks a zero-width range (insertion point), '(21-...)' a range
-spanning several lines. Double-click a 'Line N: ... (x-y)' diagnostic to
-jump to the file with the caret at the range's start column x.
+zero-based positions the server reported, e.g. 'Line 131:
+[csharp,Hint:IDE0055]: Fix formatting (21-22)' (LSP's Diagnostic.range is
+required for every server); '(21)' marks a zero-width range (insertion
+point), and a range spanning several lines shows both 'line:char' ends:
+'(130:21-144:34)'. Double-click a 'Line N: ... (x-y)' diagnostic to jump
+to the file with the caret at the range's start column x.
 The category filters and word wrap are remembered globally (one panel).
 The 'Messages' category receives 'window/showMessage' - one-shot messages
 with a severity which the server wants to SHOW to the user (e.g. "project
