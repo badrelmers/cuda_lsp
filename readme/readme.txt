@@ -147,6 +147,32 @@ redundant full-text didChange anymore (it made them re-analyze the just
 opened file - a "double analysis" of every file); true restores the old
 always-immediately behavior (for other servers with the same bug), false
 disables it.
+A document with UNSAVED changes at open time is synced immediately (no
+delay): OmniSharp discards the didOpen buffer for every document, so the
+server would keep analyzing the DISK copy while the editor diffs from its
+own modified baseline - and for a never-registered "misc" file the first
+full-text change only registers it (from disk), the buffer itself arrives
+with the second one (both sent by the plugin in that case).
+
+Force fresh diagnostics when the server is behind (VS Code's model):
+  "force_diag_on_focus": "auto"   (default)
+  "force_diag_on_focus": true     (every server)
+  "force_diag_on_focus": false    (never)
+VS Code's C# extension re-sends the FULL BUFFER on every active editor
+switch ("O# does not recompute all diagnostics ... we want to at least
+provide up to date diagnostics for the active document") and re-validates
+everything when a project changes, a NuGet restore finishes or the
+background analysis finishes. The LSP translation: one full-text
+didChange - but EVIDENCE-gated, so nothing is ever re-analyzed twice: the
+kick is sent only when the server is provably behind (it never published
+diagnostics for the document, or published for an older version than the
+last one sent - publishDiagnostics carries the analyzed version), at most
+once per document version, and only for didOpen-dropper servers in "auto"
+mode (OmniSharp; true = every server, false = never). Triggers: switching
+the focused tab to a document, the editor window regaining focus, and the
+OmniSharp events "project changed" / "package restore finished" /
+"background analysis finished" (gated while packages are restoring, like
+VS Code's Advisor).
 
 How to disable auto-completion in "comments" and "strings". Overrides the same global option.
 If "c" in value - disable in "comments"; if "s" in value - disable in "strings".

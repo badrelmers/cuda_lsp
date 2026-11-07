@@ -126,11 +126,30 @@ Per-server options (in the server's config block, not global - see readme.txt
     * "auto" (default) - only for servers which discard the didOpen buffer for unknown
       documents (OmniSharp <= 1.39.x: out-of-project "misc" files), and only when the
       server did not prove it processed the didOpen (no publishDiagnostics for the file,
-      no didChange/didSave-with-text) within "resync_after_open_delay_ms". Well-behaved
-      servers never see the redundant full-text didChange (it made them re-analyze the
-      just opened file - a "double analysis" of every file).
+      no whole-document didChange/didSave-with-text) within "resync_after_open_delay_ms".
+      Well-behaved servers never see the redundant full-text didChange (it made them
+      re-analyze the just opened file - a "double analysis" of every file).
+      A document with unsaved changes at open time is synced immediately instead of
+      waiting: OmniSharp discards the didOpen buffer, so the server would analyze the
+      DISK copy while the editor diffs from its own modified baseline.
     * true - always, immediately (old blind behavior; for other servers with the same bug)
     * false - never
 * resync_after_open_delay_ms - how long (milliseconds) "auto" waits after didOpen for
   evidence that the server processed it before sending the re-sync. Default 1500.
   0 = send it as soon as the timer fires.
+* force_diag_on_focus - force fresh diagnostics with one full-text didChange when the
+  server is provably BEHIND a document (VS Code's model: its C# extension re-sends the
+  full buffer on every active-editor switch and re-validates everything on project
+  changed / package restore finished / background analysis finished).
+    * "auto" (default) - only for didOpen-dropper servers (OmniSharp). The kick is
+      evidence-gated: it fires only when the server never published diagnostics for
+      the document, or published for an older version than the last one sent
+      (publishDiagnostics carries the analyzed version); at most once per document
+      version, so a server which never publishes is not re-kicked on every switch,
+      and well-behaved servers which push diagnostics are never re-analyzed.
+    * true - every server
+    * false - never
+  Triggers: switching the focused tab to a document, the editor window regaining
+  focus, and the OmniSharp events "o#/projectchanged", "o#/packagerestorefinished"
+  and "o#/backgrounddiagnosticstatus" finished with 0 files remaining (suppressed
+  while NuGet packages are restoring, like VS Code's Advisor).

@@ -228,6 +228,21 @@ class Language:
         self._resync_delay_ms = (_resync_ms
             if isinstance(_resync_ms, int) and not isinstance(_resync_ms, bool)
             and _resync_ms >= 0 else RESYNC_DELAY_MS)
+        # VS Code's model (vscode-csharp fileOpenCloseProvider): switching
+        # the active editor re-sends the FULL BUFFER (updateBuffer) because
+        # OmniSharp "does not recompute all diagnostics ... We want to at
+        # least provide up to date diagnostics for the active document".
+        # The LSP equivalent is one range-less full-text didChange - sent
+        # here only when the server is provably BEHIND (evidence-gated, see
+        # _kick_stale_doc), so well-behaved servers never re-analyze
+        # identical content (the 'double analysis').
+        # 'auto' (default): only for didOpen-dropper servers (OmniSharp);
+        # True: every server; False: never.
+        _kick = cfg.get('force_diag_on_focus', 'auto')
+        self._force_diag_on_focus = (_kick.strip().lower()
+                                     if isinstance(_kick, str) else _kick)
+        if self._force_diag_on_focus != 'auto':
+            self._force_diag_on_focus = bool(self._force_diag_on_focus)
 
         self._validate_config()
 
@@ -280,12 +295,38 @@ class Language:
         # 'auto' resync state: uri -> (eddoc, due_at_ms). Populated by
         # _schedule_resync() after didOpen; emptied by evidence that the
         # server has the buffer (publishDiagnostics for the uri, a sent
-        # didChange/didSave-with-text) or by doc close; _on_resync_timer
-        # sends the full-text resync for what is still due.
+        # whole-document didChange/didSave-with-text) or by doc close;
+        # _on_resync_timer sends the full-text resync for what is still due.
         self._resync_pending = {}
         self._resync_timer_armed = False
         # strong ref: the timer must not hold the only reference
         self._resync_timer_cb = self._on_resync_timer
+
+        # --- diagnostics-freshness evidence (VS Code's diagnosticsProvider
+        # needs none - it PULLS codeCheck; an LSP client must infer). The
+        # server's publishDiagnostics params carry the document version it
+        # analyzed (OmniSharp: DocumentVersions, reset by didOpen, updated
+        # by every didChange) - _diag_seen maps uri -> that version (None
+        # when the server omits it). A document is STALE when the server
+        # never published for it, or published for an older version than
+        # the last one the client sent: that is exactly when VS Code would
+        # re-send the buffer, and _kick_stale_doc() does the same here.
+        self._diag_seen = {}    # uri -> analyzed version | None (unknown)
+        # uri -> doc version at the last force kick: at most ONE kick per
+        # version (a server which never publishes would otherwise be kicked
+        # on every focus switch - VS Code does re-pull every switch, the
+        # evidence model makes that unnecessary)
+        self._kick_sent = {}    # uri -> version
+        # OmniSharp NuGet restore in flight (o#/packagerestorestarted -
+        # finished): VS Code's Advisor suppresses validation while packages
+        # are restoring - kick_all is skipped then too
+        self._omnisharp_restoring = 0
+        # this instance's open documents - kick_stale_docs() walks them on
+        # OmniSharp workspace events. A plain set on the instance: docs enter
+        # in on_open(), leave in on_close() / lexer-change, and the whole set
+        # dies with the instance (exit() clears it; a doc detached by an
+        # instance shutdown is skipped by the 'eddoc.lang is self' gate)
+        self._open_docs = set()
 
         self.sock = None
         self.process: subprocess.Popen = None
@@ -762,6 +803,12 @@ class Language:
             # buffer - a pending 'auto' full-text resync would only make it
             # re-analyze the identical content (the 'double analysis')
             self._resync_forget(msg.params.uri)
+            # evidence for _kick_stale_doc: the version the server analyzed
+            # (OmniSharp's publishDiagnostics always carries it; None when
+            # a server omits it - then nothing is knowable and the document
+            # counts as fresh, which stops the kicking)
+            _ver = getattr(msg.params, 'version', None)
+            self._diag_seen[msg.params.uri] = _ver if isinstance(_ver, int) else None
             self.diagnostics_man.set_diagnostics(uri=msg.params.uri, diag_list=msg.params.diagnostics)
 
         elif msgtype is lsp.ConfigurationRequest:
@@ -994,8 +1041,15 @@ class Language:
         _verdoc = eddoc.get_verdoc()
         self.client.did_change(text_document=_verdoc, content_changes=_changes)
         # the server receives the document content now - a pending 'auto'
-        # full-text resync for it is pointless (and would re-analyze)
-        self._resync_forget(eddoc.uri)
+        # full-text resync for it is pointless (and would re-analyze) - but
+        # ONLY when this change actually carries the whole text: OmniSharp
+        # SILENTLY DROPS incremental (ranged) changes for documents it never
+        # registered (verified in its source - see _is_didopen_dropper), so
+        # a ranged change proves the doc is known only when the server
+        # already published diagnostics for it once
+        if (isinstance(_changes[0], lsp.TextDocumentContentChangeWholeDocument)
+                or eddoc.uri in self._diag_seen):
+            self._resync_forget(eddoc.uri)
         self._timer.restart()
 
 
@@ -1006,8 +1060,14 @@ class Language:
         nothing here: its context is re-derived from the focused tab by
         Command.sync_panel(), and the diagnostics block lives in the log
         model (LogStore.file_diags), not in the rendered log.
+
+        VS Code model: also force fresh diagnostics when the server is
+        provably behind (fileOpenCloseProvider._onActiveTextEditorChange
+        re-sends the full buffer on every editor switch) - evidence-gated,
+        see _kick_stale_doc().
         """
         self.diagnostics_man.on_doc_shown(eddoc)
+        self._kick_stale_doc(eddoc, 'focus')
 
     def on_open(self, eddoc):
         if self.client.is_initialized:
@@ -1015,8 +1075,13 @@ class Language:
             if opts is not None  and  eddoc.lang is None:
                 pass;       LOG and print('  ----- starting [didOpen] '+eddoc.uri)
                 eddoc.on_open(lang=self)
+                self._open_docs.add(eddoc)
                 doc = eddoc.get_textdoc()
                 self.client.did_open(doc)
+                # the server resets its per-document version tracking on
+                # didOpen - previous publishDiagnostics evidence is void
+                self._diag_seen.pop(eddoc.uri, None)
+                self._kick_sent.pop(eddoc.uri, None)
                 self._schedule_resync(eddoc)
                 # the server-side doc (if any) is open from now on, so a
                 # later didClose is safe (OmniSharp misc-file tracking)
@@ -1032,7 +1097,27 @@ class Language:
         command mentioning 'omnisharp'. Well-behaved servers are NEVER
         resynced in 'auto' mode: their didOpen already carries the full
         text, a second full-text didChange only made them re-analyze the
-        identical content. """
+        identical content.
+
+        VERIFIED in the OmniSharp 1.39.15 source (the exact build from the
+        user's log; sha 83fd615):
+        * FileOpenService.Handle calls _workspace.GetDocuments(file) and
+          opens whatever it finds - for files in NO loaded project the
+          enumeration is EMPTY and the didOpen buffer text is DISCARDED
+          entirely (not even stored).
+        * BufferManager.UpdateBufferAsync: a range-less (full-text)
+          didChange for an unknown file calls TryAddTransientDocument ->
+          TryAddMiscellaneousDocument, which registers the file in the misc
+          project with a DISK TextLoader - the buffer text of that FIRST
+          registering change is ignored; only a SECOND change applies the
+          client's buffer (handled by _force_diag_change).
+        * Incremental (ranged) didChange for an unknown file lands in the
+          'changes' path where buffer is null - SILENTLY DROPPED. So an
+          unregistered misc file gets nothing at all from typing until one
+          full-text change registers it.
+        * didSave-with-text also goes through UpdateBuffer (registers misc
+          files from disk; on save the editor content == disk, so correct).
+        """
         if self.single_root:
             return True
         cmd = self._server_cmd
@@ -1052,21 +1137,33 @@ class Language:
                      evidence arrives that the server processed the didOpen:
                      a publishDiagnostics for the file (any content, even 0
                      entries - OmniSharp publishes after every analysis
-                     pass) cancels it, and so does any didChange/didSave-
-                     with-text sent for the doc (the user typed/saved). If
-                     nothing arrives within the delay, the server silently
-                     dropped the didOpen buffer (OmniSharp 'misc' files
-                     publish NOTHING for it) - the timer sends the resync
-                     then, which is what registers such files server-side.
+                     pass) cancels it, and so does any whole-document
+                     didChange or didSave-with-text sent for the doc (the
+                     user typed/saved; a RANGED change proves nothing -
+                     OmniSharp silently drops those for documents it never
+                     registered). If nothing arrives within the delay, the
+                     server silently dropped the didOpen buffer (OmniSharp
+                     'misc' files publish NOTHING for it) - the timer sends
+                     the resync then, which is what registers such files
+                     server-side.
         """
         if self._resync_after_open is True:
-            self._send_resync(eddoc)
+            self._force_diag_change(eddoc)
             return
         if self._resync_after_open != 'auto':
             return
         if not self._is_didopen_dropper():
             return
         if self._did_change_off(eddoc):
+            return
+        if self._is_ed_modified(eddoc):
+            # unsaved changes at open: the didOpen buffer was discarded
+            # server-side (verified - see _is_didopen_dropper), the server
+            # works from the DISK copy while the editor diffs from its own
+            # baseline - every later incremental change would diverge.
+            # Sync the true buffer NOW (VS Code's updateBuffer-on-open),
+            # the evidence delay would leave the server wrong meanwhile.
+            self._force_diag_change(eddoc)
             return
         self._resync_pending[eddoc.uri] = (eddoc,
                                             _monotonic_ms() + self._resync_delay_ms)
@@ -1116,18 +1213,115 @@ class Language:
             # this is just belt-and-braces)
             if eddoc.lang is self and not self._did_change_off(eddoc):
                 pass;   LOG and print('  ----- resync after open: ' + uri)
-                self._send_resync(eddoc)
+                self._force_diag_change(eddoc)
         self._resync_arm_timer()
 
     def _send_resync(self, eddoc):
         """ The actual full-text didChange (one range-less change, bumps the
-        document version). """
+        document version). Returns the new version, or None when it could
+        not be sent (didChange disabled for the document server-side). """
         if self._did_change_off(eddoc):
-            return
+            return None
         _changes = eddoc.get_fulltext_change()    # bumps the doc version
         _verdoc = eddoc.get_verdoc()              # so take the version AFTER it
         self.client.did_change(text_document=_verdoc, content_changes=_changes)
         self._timer.restart()
+        return _verdoc.version
+
+    @staticmethod
+    def _is_ed_modified(eddoc):
+        """ The doc's editor has unsaved changes (CudaText PROP_MODIFIED).
+        Defensive: any failure counts as unmodified (the consequence of a
+        missed double-send is only diagnostics computed from the disk copy
+        until the next change). """
+        try:
+            return bool(eddoc.ed.get_prop(PROP_MODIFIED))
+        except Exception:
+            return False
+
+    def _force_diag_change(self, eddoc):
+        """ One range-less full-text didChange - the LSP equivalent of VS
+        Code's updateBuffer(full text). Returns the last-sent version, or
+        None when nothing could be sent.
+
+        OmniSharp misc-file nuance (verified in its source): the FIRST
+        full-text change only REGISTERS an unknown file - its own text is
+        ignored, the server-side misc project loads the DISK copy; the
+        client's buffer reaches the server with the SECOND change. So a
+        document with unsaved changes and NO diagnostics evidence yet
+        (nothing proved the server ever saw the editor's text) is sent
+        twice - LSP messages are processed strictly in order. """
+        ver = self._send_resync(eddoc)
+        if (ver is not None
+                and eddoc.uri not in self._diag_seen
+                and self._is_ed_modified(eddoc)):
+            ver = self._send_resync(eddoc)
+        if ver is not None:
+            self._kick_sent[eddoc.uri] = ver
+        return ver
+
+    def _diag_stale(self, eddoc):
+        """ Is the server provably BEHIND this document: it never published
+        diagnostics for it, or published for an older version than the last
+        one the client sent (publishDiagnostics carries the analyzed
+        version - OmniSharp does; a version-less publish counts as FRESH:
+        nothing better is knowable, and well-behaved servers push reliably). """
+        if eddoc.uri not in self._diag_seen:
+            return True         # never analyzed
+        seen = self._diag_seen[eddoc.uri]
+        if seen is None:
+            return False        # analyzed, version unknown: trust it
+        return eddoc.ver > seen
+
+    def _kick_stale_doc(self, eddoc, why=''):
+        """ VS Code's model, translated to LSP: vscode-csharp's
+        fileOpenCloseProvider re-sends the FULL BUFFER on every active
+        editor change ("O# does not recompute all diagnostics for the
+        projects affected when code files are changed. We want to at least
+        provide up to date diagnostics for the active document") - the LSP
+        equivalent is one range-less full-text didChange.
+
+        Sent only when EVIDENCE says the server is behind (never analyzed
+        the document / analyzed an older version): well-behaved servers
+        which push diagnostics are never kicked ('no double analysis'), and
+        at most ONE kick per document version (a server which never
+        publishes would otherwise be re-kicked on every focus switch - VS
+        Code re-pulls every switch, the evidence model makes that waste
+        unnecessary). Gated per server by 'force_diag_on_focus'.
+        """
+        if self._force_diag_on_focus is False:
+            return False
+        if self._force_diag_on_focus == 'auto' and not self._is_didopen_dropper():
+            return False
+        if self._closed or self._client is None or not self._client.is_initialized:
+            return False
+        if eddoc.lang is not self:
+            return False
+        if eddoc.uri in self._resync_pending:
+            return False        # the pending open-resync will handle it
+        if not self._diag_stale(eddoc):
+            return False
+        if self._kick_sent.get(eddoc.uri) == eddoc.ver:
+            return False        # this version was already kicked
+        pass;   LOG and print(f'  ----- force diagnostics ({why}): ' + eddoc.uri)
+        return self._force_diag_change(eddoc) is not None
+
+    def kick_stale_docs(self, reason=''):
+        """ Re-kick every open STALE document of this instance. VS Code's
+        diagnosticsProvider re-validates everything on 'project changed' /
+        'package restore finished' / 'background analysis finished'
+        (its _validateAllPipe); in LSP the server pushes fresh diagnostics
+        for documents it re-analyzed itself, so only the documents WITHOUT
+        evidence (dropped didOpen, never-registered 'misc' files) need the
+        kick. Skipped while OmniSharp is restoring NuGet packages (VS
+        Code's Advisor.shouldValidateFiles gates the same way). """
+        if self._omnisharp_restoring > 0:
+            return
+        for eddoc in list(self._open_docs):
+            try:
+                self._kick_stale_doc(eddoc, reason)
+            except Exception:
+                pass    # one broken doc must not stop the others
 
 
     def on_close(self, eddoc):
@@ -1139,13 +1333,20 @@ class Language:
         # (the small diagnostics block stays: last known state)
         self.plog.drop_file(eddoc.uri)
         self._resync_forget(eddoc.uri)   # no doc left to resync
+        self._diag_seen.pop(eddoc.uri, None)   # ...and no doc to kick
+        self._kick_sent.pop(eddoc.uri, None)
+        self._open_docs.discard(eddoc)
 
         if self.client.is_initialized:
             opts = self.scfg.method_opts(METHOD_DID_CLOSE, eddoc)
             if opts is not None  and  eddoc.lang is not None: # lang check -- is opened
                 pass;       LOG and print(' --- closing '+eddoc.uri)
 
-                self.send_changes(eddoc) # for later: server can give edits on save
+                # NOTE: no send_changes() here (it was here once) - a
+                # didChange right before didClose is pure waste, and for
+                # OmniSharp it is what registered never-opened 'misc'
+                # documents just in time to make didClose throw
+                # "'X' is not open" (VS Code sends nothing but didClose)
 
                 if omnisharp.skip_did_close(self, eddoc):
                     # OmniSharp asymmetry: the server-side document exists
@@ -1780,6 +1981,10 @@ class Language:
             self._timer.stop()
             # no pending 'auto' resyncs may fire after the instance died
             self._resync_pending.clear()
+            # ...and no evidence/kick state is meaningful anymore
+            self._diag_seen.clear()
+            self._kick_sent.clear()
+            self._open_docs.clear()
             timer_proc(TIMER_STOP, self._resync_timer_cb, 0)
 
 

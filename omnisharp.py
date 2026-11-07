@@ -42,6 +42,15 @@ Progress-type events (status) only touch the status bar; discrete events
 panel's 'Spy' category regardless. Unknown future ``o#/...`` methods (none of
 the above) still go through the loud 'Unhandled' notification path.
 
+VS Code's diagnosticsProvider re-validates the workspace on three OmniSharp
+events - 'project changed', 'NuGet package restore finished' and
+'background analysis finished with 0 files remaining' (its _validateAllPipe,
+debounced 3s, gated by the Advisor: never while packages are restoring).
+The LSP equivalent lives here as session.kick_stale_docs() - one
+evidence-gated full-text didChange per open STALE document (see
+Language._kick_stale_doc); these three handlers are its triggers, and
+o#/packagerestorestarted/-finished maintain the Advisor's restoring counter.
+
 Besides ``o#/...`` events, OmniSharp-specific ``window/logMessage`` texts are
 recognized: 'Miscellaneous file: X added to workspace' (explained to the
 user + recorded for the didClose tracking below) and the harmless
@@ -120,6 +129,31 @@ def _log(session, text, severity):
         type_=TYPE_OMNISHARP, severity=severity)
 
 
+def _kick_all(session, reason):
+    """ VS Code's diagnosticsProvider._validateAllPipe equivalent: re-kick
+    every open STALE document of the session (Language.kick_stale_docs -
+    evidence-gated full-text didChange; no-op for documents the server
+    already analyzed). Defensive: the session is not required to have the
+    method (tests / other Language-like objects). """
+    kick = getattr(session, 'kick_stale_docs', None)
+    if kick is not None:
+        try:
+            kick(reason)
+        except Exception:
+            pass
+
+
+def _restoring_delta(session, delta):
+    """ Maintain the NuGet-restoring counter (VS Code Advisor: validation is
+    suppressed while > 0). Returns the new value; never raises. """
+    try:
+        session._omnisharp_restoring = max(
+            0, int(getattr(session, '_omnisharp_restoring', 0)) + delta)
+        return session._omnisharp_restoring
+    except Exception:
+        return 0
+
+
 def _status(session, text):
     """ Transient progress info - status bar only. """
     msg_status(f'{LOG_NAME}: OmniSharp: {text}')
@@ -174,6 +208,11 @@ def on_project_changed(session, params):
     if _is_dict(info) and info.get('Path'):
         _track_project(session, info)
     _project_event(session, params, 'changed')
+    # VS Code: server.onProjectChange -> _validateAllPipe - the project's
+    # compilation context changed, open documents need fresh diagnostics
+    # (the server re-pushes what it re-analyzed itself; the kick covers the
+    # documents it provably never analyzed)
+    _kick_all(session, 'project changed')
 
 
 def on_project_removed(session, params):
@@ -285,6 +324,11 @@ def on_background_diagnostic_status(session, params):
              f'background analysis finished: {_fmt_count(total, "file")} in '
              f'{_fmt_count(projects, "project")} [{summary}]',
              SEVERITY_INFO)
+        # VS Code: _onBackgroundAnalysis (Finished && NumberFilesRemaining
+        # === 0) -> _validateAllPipe - after the background pass anything
+        # still without diagnostics evidence was dropped/never registered
+        if remaining == 0:
+            _kick_all(session, 'background analysis finished')
     elif status == 0:  # Started
         _status(session, f'analysis started: {total} file(s) in {projects} project(s)')
     else:              # 1 = Progress (updates are high-volume: status bar only)
@@ -339,10 +383,12 @@ def on_error(session, params):
 
 
 def on_package_restore_started(session, params):
+    _restoring_delta(session, +1)   # VS Code Advisor: block validation
     _status(session, f'restoring NuGet packages: {_basename(params.get("FileName"))}')
 
 
 def on_package_restore_finished(session, params):
+    restoring = _restoring_delta(session, -1)
     fname = _basename(params.get('FileName'))
     if params.get('Succeeded'):
         _log(session, f'NuGet packages restored: {fname}', SEVERITY_INFO)
@@ -350,6 +396,10 @@ def on_package_restore_finished(session, params):
     else:
         _log(session, f'NuGet package restore FAILED for {fname}', SEVERITY_ERR)
         _status(session, f'NuGet restore FAILED: {fname}')
+    # VS Code: server.onPackageRestore -> _validateAllPipe (the counter is
+    # back to 0: kick_stale_docs is unblocked again)
+    if restoring == 0:
+        _kick_all(session, 'package restore finished')
 
 
 def on_unresolved_dependencies(session, params):

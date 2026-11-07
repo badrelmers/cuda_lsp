@@ -557,6 +557,15 @@ class Command:
     def on_app_activate(self, ed_self):
         dlg.app_active = True
 
+        # VS Code model (diagnosticsProvider._OnDidChangeWindowState): when
+        # the window regains focus, re-validate the ACTIVE document - here
+        # one evidence-gated full-text didChange when the server is behind
+        # (OmniSharp 'misc' files: nothing else refreshes them)
+        _ed = self._focused_ed() or ed
+        doc = self.book.get_doc(_ed)
+        if doc and doc.lang:
+            doc.lang._kick_stale_doc(doc, 'app activate')
+
     def on_app_deactivate(self, ed_self):
         dlg.app_active = False
 
