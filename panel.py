@@ -33,7 +33,9 @@ VIEW (LspPanel) - a single bottom-panel page "LSP" (one icon), created lazily
 Rendering is COALESCED: every model change schedules one UI tick
   (TICK_MS); the tick appends only the NEW visible messages (fast path) or
   fully re-renders (context switch, filter change, diagnostics replacement,
-  ring-buffer eviction). When the panel page is not the active bottom-panel
+  ring-buffer eviction). The append path CONSUMES its queue - every message
+  is rendered exactly once - and filters disabled categories exactly like
+  the full render, so the view always mirrors the model. When the panel page is not the active bottom-panel
   page, UI work is skipped (button badge only) and redone when it is shown
   (on_show). Auto-follow scrolling: the panel scrolls to the end ONLY while
   the memo is at its bottom (terminal behaviour) or right after a context
@@ -532,18 +534,23 @@ class LspPanel:
             if uri is None or self.uri is None or uri == self.uri:
                 if self._placeholder:
                     # placeholder shown: the memo no longer mirrors the
-                    # model - rebuild it
+                    # model - rebuild it (the message is in the model)
                     self._need_full = True
                     self._pending.clear()
                 elif evicted:
                     # oldest entry dropped from a FULL ring: tolerate a few
                     # stale top lines, rebuild in bulk (steady streams would
-                    # otherwise pay a full render per message)
+                    # otherwise pay a full render per message). The message
+                    # itself still queues below - dropping it here made it
+                    # INVISIBLE until the bulk rebuild (a steady stream at
+                    # the cap showed only every 64th message!)
                     self._evictions += 1
                     if self._evictions >= self.FULL_ON_EVICTIONS:
                         self._need_full = True
                         self._pending.clear()
-                else:
+                if not self._need_full:
+                    # queue for the append path; the tick CONSUMES the
+                    # queue, so every message is rendered exactly once
                     self._pending.append(msg)
                     if len(self._pending) > self.PENDING_CAP:
                         self._need_full = True
@@ -662,6 +669,9 @@ class LspPanel:
     def _render_full(self):
         self._need_full = False
         self._evictions = 0
+        # the whole model is rendered now - a queued remainder is included
+        # in it; anything still pending would be appended TWICE
+        self._pending.clear()
 
         # terminal behaviour: scroll to the end only if the memo WAS at its
         # bottom before the re-render (the user scrolled up to read history -
@@ -718,30 +728,53 @@ class LspPanel:
         anything already shown (per-store counter), so appending to the memo
         end keeps the order. TYPE_DIAG never arrives here (a diagnostics
         block is REPLACED atomically -> always a full re-render), so
-        _diag_sevs needs no update in this path. """
+        _diag_sevs needs no update in this path.
+
+        The pending queue is CONSUMED here (self._pending = []): every
+        message is rendered exactly ONCE. (Regression: the queue used to
+        survive the tick, so every following tick re-appended EVERYTHING
+        still queued - with real-app timing, one message batch per tick,
+        the view and the cell counts grew QUADRATICALLY between two full
+        renders: 'Spy 6000' after a burst of activity, back to the true
+        number on every publishDiagnostics, growing again - forever.)
+        DISABLED categories are filtered here exactly like in _render_full.
+        (Regression: they used to leak back in through this path within one
+        tick after the user disabled them.) """
+        if self._placeholder:
+            # the memo shows a placeholder: it does not mirror the model
+            self._render_full()
+            return
+
         msgs = self._pending
+        self._pending = []
         follow = self._at_bottom()
 
-        # all messages end with '\n' -> the last memo line is empty: the
-        # insertion point is the START of that (last) line == text end
-        y_ins = self._memo.get_line_count() - 1
-        starts = []
-        line = y_ins
-        for m in msgs:
-            starts.append(line)
-            line += m.text.count('\n')
+        visible = [m for m in msgs if self._filter_ok(m)]
+        if visible:
+            # all messages end with '\n' -> the last memo line is empty:
+            # the insertion point is the START of that (last) line == text
+            # end. Decor line starts are computed for the VISIBLE messages
+            # only - filtered ones occupy no lines.
+            y_ins = self._memo.get_line_count() - 1
+            starts = []
+            line = y_ins
+            for m in visible:
+                starts.append(line)
+                line += m.text.count('\n')
 
-        self._memo.insert(0, y_ins, ''.join(m.text for m in msgs))
-        for m, start in zip(msgs, starts):
-            self._memo.decor(DECOR_SET, line=start,
-                             image=self._severity_ims[m.severity],
-                             tag=self._decor_tag)
+            self._memo.insert(0, y_ins, ''.join(m.text for m in visible))
+            for m, start in zip(visible, starts):
+                self._memo.decor(DECOR_SET, line=start,
+                                 image=self._severity_ims[m.severity],
+                                 tag=self._decor_tag)
 
+        # counts are NOT category-filtered (a disabled category still shows
+        # its total): count every consumed message, exactly once
         for m in msgs:
             self._counts[m.type] = self._counts.get(m.type, 0) + 1
             self._counts[m.severity] = self._counts.get(m.severity, 0) + 1
 
-        if follow:
+        if visible and follow:
             self._goto_end()
 
     def _fix_memo_after_render(self):

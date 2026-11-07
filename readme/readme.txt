@@ -272,8 +272,11 @@ DIAGNOSTICS ARE NEVER CAPPED: they are the current state of the document,
 not a history stream - the panel always shows every diagnostic the server
 published for the focused file.
 Rendering is coalesced (~120 ms): bursts of messages cost one append, not
-one full re-render per message. While the panel page is not the active
-bottom-panel page, rendering is skipped (the button badge still counts).
+one full re-render per message; every message is rendered EXACTLY once and
+disabled categories are filtered in the append path too - the view always
+mirrors the log model exactly, and the cell counts are the true totals.
+While the panel page is not the active bottom-panel page, rendering is
+skipped (the button badge still counts).
 Scrolling auto-follows the end ONLY while the memo is at its bottom
 (terminal behaviour); scroll up to read old messages - auto-follow pauses
 and NO later re-render (diagnostics replacement, message bursts, hiding/
