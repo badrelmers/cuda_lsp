@@ -61,6 +61,10 @@ from .sansio_lsp_client.io_handler import unstructure as lsp_unstructure
 from .snippet_engine import Snippet, VS_SNIPPET
 
 
+def _monotonic_ms():
+    return time.monotonic() * 1000
+
+
 def _dbg_asdict(obj):
     """ Debug helper: dump an attrs object (lsprotocol messages etc) into a plain dict. """
     try:
@@ -119,6 +123,11 @@ TCP_CONNECT_TIMEOUT = 5     # sec
 MAX_FORMAT_ON_SAVE_WAIT = 1 # sec
 MIN_TIMER_TIME = 10     # ms
 MAX_TIMER_TIME = 10    # ms
+# 'auto' resync_after_open: how long to wait after didOpen for evidence
+# that the server processed it (a publishDiagnostics for the file - any
+# content, even 0 entries) before sending the full-text didChange; server
+# config 'resync_after_open_delay_ms' overrides (see language.Language)
+RESYNC_DELAY_MS = 1500
 
 GOTO_RESPONSE_TYPES = {
     lsp.DefinitionResponse,
@@ -200,10 +209,25 @@ class Language:
         self._log_stderr = bool(cfg.get('log_stderr'))
         self._format_on_save = bool(cfg.get('format_on_save'))
         self._disabled_contexts_for_server = cfg.get('disabled_contexts')
-        # Re-send the full document text as one didChange right after didOpen
-        # (works around servers which discard the didOpen buffer for unknown
-        # documents - OmniSharp <= 1.39 shows no diagnostics until then)
-        self._resync_after_open = bool(cfg.get('resync_after_open', True))
+        # Re-send the full document text as one didChange after didOpen -
+        # works around servers which DISCARD the didOpen buffer for unknown
+        # documents (OmniSharp <= 1.39.x: out-of-project 'misc' files get no
+        # diagnostics until a full-text didChange/didSave registers them).
+        # 'auto' (default): only for such servers (single_root / OmniSharp
+        # detection) and only when the server did NOT prove it processed the
+        # didOpen (no publishDiagnostics for the file within the delay) - a
+        # blind resync made every well-behaved server re-analyze the just
+        # opened file (the 'double analysis'). True = always (blind, old
+        # behavior); False = never. See Language._schedule_resync.
+        _resync = cfg.get('resync_after_open', 'auto')
+        self._resync_after_open = (_resync.strip().lower()
+                                    if isinstance(_resync, str) else _resync)
+        if self._resync_after_open != 'auto':
+            self._resync_after_open = bool(self._resync_after_open)
+        _resync_ms = cfg.get('resync_after_open_delay_ms', RESYNC_DELAY_MS)
+        self._resync_delay_ms = (_resync_ms
+            if isinstance(_resync_ms, int) and not isinstance(_resync_ms, bool)
+            and _resync_ms >= 0 else RESYNC_DELAY_MS)
 
         self._validate_config()
 
@@ -252,6 +276,17 @@ class Language:
         self.progresses = {} # token -> progress start message
 
         self._closed = False
+
+        # 'auto' resync state: uri -> (eddoc, due_at_ms). Populated by
+        # _schedule_resync() after didOpen; emptied by evidence that the
+        # server has the buffer (publishDiagnostics for the uri, a sent
+        # didChange/didSave-with-text) or by doc close; _on_resync_timer
+        # sends the full-text resync for what is still due.
+        self._resync_pending = {}
+        self._resync_timer_armed = False
+        # strong ref: the timer must not hold the only reference
+        self._resync_timer_cb = self._on_resync_timer
+
         self.sock = None
         self.process: subprocess.Popen = None
         
@@ -720,8 +755,13 @@ class Language:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Document formatting - no info')
 
         elif msgtype is lsp.PublishDiagnosticsNotification:
-            if IS_WIN:
-                msg.params.uri = normalize_drive_letter(msg.params.uri)
+            # canonical uri (server-echoed uris may lower-case the Windows
+            # drive letter - ONE spelling per document, see path_to_uri)
+            msg.params.uri = normalize_drive_letter(msg.params.uri)
+            # the server analyzed this document: it provably has the didOpen
+            # buffer - a pending 'auto' full-text resync would only make it
+            # re-analyze the identical content (the 'double analysis')
+            self._resync_forget(msg.params.uri)
             self.diagnostics_man.set_diagnostics(uri=msg.params.uri, diag_list=msg.params.diagnostics)
 
         elif msgtype is lsp.ConfigurationRequest:
@@ -851,10 +891,13 @@ class Language:
                 return None
             td = params.get('textDocument')
             if isinstance(td, dict) and isinstance(td.get('uri'), str):
-                return td['uri']
+                # canonical form: server-echoed uris may differ in the
+                # Windows drive-letter case from ours - normalize, or the
+                # same file gets TWO per-file keys in the panel
+                return normalize_drive_letter(td['uri'])
             uri = params.get('uri')
             if isinstance(uri, str):
-                return uri
+                return normalize_drive_letter(uri)
         except Exception:
             pass
         return None
@@ -950,6 +993,9 @@ class Language:
 
         _verdoc = eddoc.get_verdoc()
         self.client.did_change(text_document=_verdoc, content_changes=_changes)
+        # the server receives the document content now - a pending 'auto'
+        # full-text resync for it is pointless (and would re-analyze)
+        self._resync_forget(eddoc.uri)
         self._timer.restart()
 
 
@@ -971,37 +1017,113 @@ class Language:
                 eddoc.on_open(lang=self)
                 doc = eddoc.get_textdoc()
                 self.client.did_open(doc)
-                self.resync_after_open(eddoc)
+                self._schedule_resync(eddoc)
                 # the server-side doc (if any) is open from now on, so a
                 # later didClose is safe (OmniSharp misc-file tracking)
                 omnisharp.on_did_open_sent(self, eddoc)
                 return True
 
-    def resync_after_open(self, eddoc):
-        """ Re-send the whole document text as a single didChange right after
-        didOpen (opt-out per server: 'resync_after_open': false).
+    def _is_didopen_dropper(self):
+        """ Is this a server known to DISCARD the didOpen buffer for
+        documents it does not know yet (the only case the full-text resync
+        exists for)? OmniSharp <= 1.39.x - detected by 'single_root' (server
+        config, command line, or the server's own serverInfo after
+        'initialize', which always runs before any didOpen) or by the
+        command mentioning 'omnisharp'. Well-behaved servers are NEVER
+        resynced in 'auto' mode: their didOpen already carries the full
+        text, a second full-text didChange only made them re-analyze the
+        identical content. """
+        if self.single_root:
+            return True
+        cmd = self._server_cmd
+        if not cmd:
+            return False
+        toks = cmd if isinstance(cmd, (list, tuple)) else [cmd]
+        return any('omnisharp' in str(tok).lower() for tok in toks)
 
-        Why: some servers mishandle didOpen for documents they don't know
-        yet. OmniSharp (<= 1.39.x) runs its 'FileOpen' handler, which only
-        'opens' documents already loaded from a project - the buffer text
-        sent with didOpen is *discarded* for out-of-project files, and such
-        'miscellaneous' files are registered (and get diagnostics) only when
-        a full-text didChange or a didSave-with-text arrives. The visible
-        effect was: no diagnostics at all until the first edit or save.
-        One range-less (full-text) didChange right after didOpen registers
-        the buffer immediately, so diagnostics appear on open. Well-behaved
-        servers just see one harmless full-text sync with identical content.
+    def _schedule_resync(self, eddoc):
+        """ didOpen was sent for eddoc - decide about the full-text resync
+        (see the __init__ comment for the modes).
+
+        True      -> send it right now (blind, old behavior - user opt-in
+                     for OTHER servers with the same bug).
+        False     -> never.
+        'auto'    -> only for didOpen-dropper servers, and ONLY if no
+                     evidence arrives that the server processed the didOpen:
+                     a publishDiagnostics for the file (any content, even 0
+                     entries - OmniSharp publishes after every analysis
+                     pass) cancels it, and so does any didChange/didSave-
+                     with-text sent for the doc (the user typed/saved). If
+                     nothing arrives within the delay, the server silently
+                     dropped the didOpen buffer (OmniSharp 'misc' files
+                     publish NOTHING for it) - the timer sends the resync
+                     then, which is what registers such files server-side.
         """
-        if not self._resync_after_open:
+        if self._resync_after_open is True:
+            self._send_resync(eddoc)
             return
+        if self._resync_after_open != 'auto':
+            return
+        if not self._is_didopen_dropper():
+            return
+        if self._did_change_off(eddoc):
+            return
+        self._resync_pending[eddoc.uri] = (eddoc,
+                                            _monotonic_ms() + self._resync_delay_ms)
+        self._resync_arm_timer()
+
+    def _did_change_off(self, eddoc):
+        """ Server-side textDocument/didChange disabled for this document
+        (no matching registration, syncKind NONE) - a resync could not be
+        sent anyway. """
         opts = self.scfg.method_opts(METHOD_DID_CHANGE, eddoc)
         if opts is None:
-            return
-        docsynckind = lsp.TextDocumentSyncKind(
-            opts.get('syncKind', lsp.TextDocumentSyncKind.None_))
-        if docsynckind == lsp.TextDocumentSyncKind.None_:
-            return
+            return True
+        return lsp.TextDocumentSyncKind(
+            opts.get('syncKind', lsp.TextDocumentSyncKind.None_)
+            ) == lsp.TextDocumentSyncKind.None_
 
+    def _resync_arm_timer(self):
+        """ (Re)arm the one-shot resync timer for the earliest due entry. """
+        if self._resync_timer_armed or not self._resync_pending:
+            return
+        wait = max(0, min(due for _eddoc, due in self._resync_pending.values())
+                   - _monotonic_ms())
+        self._resync_timer_armed = True
+        timer_proc(TIMER_START_ONE, self._resync_timer_cb, int(wait) + 20)
+
+    def _resync_forget(self, uri):
+        """ Evidence that the server has this document's content (a
+        publishDiagnostics for the uri, a didChange / didSave-with-text sent
+        for it) or the doc is gone (closed / instance dying): its pending
+        resync is pointless - drop it. """
+        self._resync_pending.pop(uri, None)
+
+    def _on_resync_timer(self, tag='', info=''):
+        """ Delay elapsed for pending resyncs: send the full-text didChange
+        for every DUE entry (the server showed no sign of having the didOpen
+        buffer), re-arm for the rest. """
+        self._resync_timer_armed = False
+        if self._closed:
+            self._resync_pending.clear()
+            return
+        now = _monotonic_ms()
+        for uri, (eddoc, due) in list(self._resync_pending.items()):
+            if due > now:
+                continue
+            del self._resync_pending[uri]
+            # still our open document? (close/lexer-change paths forget it,
+            # this is just belt-and-braces)
+            if eddoc.lang is self and not self._did_change_off(eddoc):
+                pass;   LOG and print('  ----- resync after open: ' + uri)
+                self._send_resync(eddoc)
+        self._resync_arm_timer()
+
+    def _send_resync(self, eddoc):
+        """ The actual full-text didChange (one range-less change, bumps the
+        document version). """
+        if self._did_change_off(eddoc):
+            return
         _changes = eddoc.get_fulltext_change()    # bumps the doc version
         _verdoc = eddoc.get_verdoc()              # so take the version AFTER it
         self.client.did_change(text_document=_verdoc, content_changes=_changes)
@@ -1016,6 +1138,7 @@ class Language:
         # the tab is gone: its per-file spy traffic is unreachable - free it
         # (the small diagnostics block stays: last known state)
         self.plog.drop_file(eddoc.uri)
+        self._resync_forget(eddoc.uri)   # no doc left to resync
 
         if self.client.is_initialized:
             opts = self.scfg.method_opts(METHOD_DID_CLOSE, eddoc)
@@ -1049,6 +1172,10 @@ class Language:
                 docid = eddoc.get_docid()
                 text = eddoc.ed.get_text_all() if  include_text  else None
                 self.client.did_save(text_document=docid, text=text)
+                if include_text:
+                    # didSave-with-text also registers out-of-project docs
+                    # server-side (OmniSharp 'misc' files) - like a resync
+                    self._resync_forget(eddoc.uri)
 
     def on_save_pre(self, eddoc):
         if not self._format_on_save:
@@ -1651,6 +1778,9 @@ class Language:
 
             self._closed = True
             self._timer.stop()
+            # no pending 'auto' resyncs may fire after the instance died
+            self._resync_pending.clear()
+            timer_proc(TIMER_STOP, self._resync_timer_cb, 0)
 
 
     def _on_progress(self, msg):

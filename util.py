@@ -90,7 +90,15 @@ def _isword(s):
 
 
 def path_to_uri(path):
-    return pathlib.Path(path).as_uri()
+    """ Canonical file uri of a path - THE form used everywhere in the
+    plugin (didOpen/didChange params, per-file log keys, editor-doc uris):
+    on Windows the drive letter is upper-cased, because .NET servers
+    (OmniSharp) lower-case it in the uris they echo back (publishDiagnostics
+    etc.) - without ONE canonical spelling the same document would be
+    tracked under two different keys ('file:///F:/...' sent vs 'file:///f:/...'
+    received). Server-echoed uris are normalized through
+    normalize_drive_letter() at the receiving side. """
+    return normalize_drive_letter(pathlib.Path(path).as_uri())
 
 def ed_uri(ed):
     fn = ed.get_filename('*') # '*' get filepath for image/binary tabs too
@@ -115,11 +123,20 @@ def collapse_path(path):
         path = path.replace(USER_DIR, '~', 1)
     return path
     
-def normalize_drive_letter(path):    
-    parts = path.split("file:///")
+def normalize_drive_letter(uri, is_win=None):
+    """ Canonical form of a file uri (see path_to_uri): upper-case the
+    Windows drive letter, because Windows drive letters are case-insensitive
+    and .NET servers (OmniSharp) lower-case them in echoed uris. No-op on
+    other systems (paths are case-sensitive there - '/a:b' must not be
+    touched); 'is_win' overrides the OS check for tests. """
+    if is_win is None:
+        is_win = os.name == 'nt'
+    if not is_win or not isinstance(uri, str):
+        return uri
+    parts = uri.split("file:///")
     if len(parts) == 2 and parts[0] == '' and len(parts[1]) >= 2 and parts[1][1] == ':':
-        path = "file:///" + parts[1][:1].upper() + parts[1][1:]
-    return path
+        uri = "file:///" + parts[1][:1].upper() + parts[1][1:]
+    return uri
 
 def command(f):
     def d(*args, **vargs): #SKIP

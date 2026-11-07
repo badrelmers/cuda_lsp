@@ -116,3 +116,21 @@
 * complete_from_text - include auto-completion results from "Complete From Text" plugin.
 
 * diagnostics_in_a_corner - show diagnostics for current line in the editor's corner.
+
+---
+
+Per-server options (in the server's config block, not global - see readme.txt
+"Server common options" for the full text):
+
+* resync_after_open - re-send the full document text as one didChange after didOpen.
+    * "auto" (default) - only for servers which discard the didOpen buffer for unknown
+      documents (OmniSharp <= 1.39.x: out-of-project "misc" files), and only when the
+      server did not prove it processed the didOpen (no publishDiagnostics for the file,
+      no didChange/didSave-with-text) within "resync_after_open_delay_ms". Well-behaved
+      servers never see the redundant full-text didChange (it made them re-analyze the
+      just opened file - a "double analysis" of every file).
+    * true - always, immediately (old blind behavior; for other servers with the same bug)
+    * false - never
+* resync_after_open_delay_ms - how long (milliseconds) "auto" waits after didOpen for
+  evidence that the server processed it before sending the re-sync. Default 1500.
+  0 = send it as soon as the timer fires.

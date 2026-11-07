@@ -130,12 +130,23 @@ opened from that folder. OmniSharp needs no config: it is auto-detected from
 its command line ('omnisharp' in it) and from its serverInfo after
 initialization.
 
-Re-send the full document text as a single 'textDocument/didChange' right after
-'textDocument/didOpen' (on by default). Needed for servers which discard the
-didOpen buffer for documents they don't know yet (OmniSharp up to v1.39.x shows
-no diagnostics for such files until the first edit or save); well-behaved
-servers just see one harmless full-text sync with identical content:
-  "resync_after_open": false
+Re-send the full document text as a single 'textDocument/didChange' after
+'textDocument/didOpen'. Modes:
+  "resync_after_open": "auto"   (default, new smart behavior)
+  "resync_after_open": true     (always, immediately - old blind behavior)
+  "resync_after_open": false    (never)
+'auto' sends the re-sync only to servers known to DISCARD the didOpen buffer
+for documents they don't know yet (OmniSharp up to v1.39.x: out-of-project
+"misc" files get no diagnostics until a full-text didChange/didSave registers
+them) - and only when the server did NOT prove it processed the didOpen: a
+publishDiagnostics for the file (even with 0 entries) or any didChange/
+didSave-with-text cancels it. Nothing proved within the delay (server config
+"resync_after_open_delay_ms", default 1500) - the server silently dropped the
+didOpen, and the re-sync is sent then. Well-behaved servers NEVER see the
+redundant full-text didChange anymore (it made them re-analyze the just
+opened file - a "double analysis" of every file); true restores the old
+always-immediately behavior (for other servers with the same bug), false
+disables it.
 
 How to disable auto-completion in "comments" and "strings". Overrides the same global option.
 If "c" in value - disable in "comments"; if "s" in value - disable in "strings".
