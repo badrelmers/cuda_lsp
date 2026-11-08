@@ -33,7 +33,7 @@ from .util import (
         path_to_uri,
         langid2lex,
         collapse_path,
-        normalize_drive_letter,
+        canonical_uri,
         replace_unbracketed,
         TimerScheduler,
 
@@ -43,6 +43,7 @@ from .dlg import Hint, SignaturesDialog
 from .panel import (
         make_store,
         SEVERITY_MAP, SEVERITY_ERR, SEVERITY_LOG, SEVERITY_NA, SEVERITY_WRN,
+        SEVERITY_INFO,
         TYPE_SPY, TYPE_UNHANDLED, TYPE_LOG,
     )
 from . import omnisharp
@@ -796,9 +797,12 @@ class Language:
                         msg_status(f'{LOG_NAME}: {self.lang_str}: Document formatting - no info')
 
         elif msgtype is lsp.PublishDiagnosticsNotification:
-            # canonical uri (server-echoed uris may lower-case the Windows
-            # drive letter - ONE spelling per document, see path_to_uri)
-            msg.params.uri = normalize_drive_letter(msg.params.uri)
+            # canonical uri (see util.canonical_uri): server-echoed uris may
+            # lower-case the Windows drive letter AND differ in
+            # percent-encoding from ours (jdt.ls keeps '+' literal, we sent
+            # '%2B') - ONE spelling per document, or the same file gets TWO
+            # per-file keys and its panel shows no diagnostics
+            msg.params.uri = canonical_uri(msg.params.uri)
             # the server analyzed this document: it provably has the didOpen
             # buffer - a pending 'auto' full-text resync would only make it
             # re-analyze the identical content (the 'double analysis')
@@ -866,7 +870,17 @@ class Language:
 
             else:
                 method = msg.get('method')
-                if msg_id is None and method in omnisharp.OMNISHARP_NOTIF:
+                if msg_id is None and method == 'language/status':
+                    # jdt.ls (Eclipse JDT Language Server) reports its
+                    # startup/import progress through this NON-spec method
+                    # (VS Code's vscode-java shows it in the status bar) -
+                    # ~40 reports per server start. Handle it QUIETLY: one
+                    # compact panel log line each, exactly like
+                    # window/logMessage - NOT the loud 'Unhandled' path,
+                    # which also prints to the console (the user's report:
+                    # console spammed on every Java session).
+                    self._on_java_status(msg.get('params'))
+                elif msg_id is None and method in omnisharp.OMNISHARP_NOTIF:
                     # OmniSharp 'o#/...' notifications: dedicated handlers
                     # (project/MSBuild/analysis events) instead of the loud
                     # 'Unhandled' report
@@ -878,6 +892,24 @@ class Language:
         else:
             self._on_unhandled_msg(msg)
 
+
+    def _on_java_status(self, params):
+        """ 'language/status' notification of jdt.ls: params {type, message}
+        where type is one of Starting / Started / ServiceReady /
+        ProjectStatus / StartingLongTerm ('Error' in old servers). Mapped
+        to a normal panel log line (type Log) - the same treatment
+        window/logMessage gets: visible in the panel, filterable, and NO
+        console / status-bar spam. """
+        if self._shutting_down is not None:
+            return
+        if not isinstance(params, dict):
+            params = {}
+        stype = params.get('type') or '?'
+        message = params.get('message') or ''
+        severity = SEVERITY_ERR if stype == 'Error' else SEVERITY_INFO
+        text = (f'Java status ({stype}): {message}' if message
+                else f'Java status ({stype})')
+        self.plog.log_str(text, type_=TYPE_LOG, severity=severity)
 
     def _on_unhandled_msg(self, msg):
         """ Loudly report a server message which has no handler - so missing
@@ -938,13 +970,14 @@ class Language:
                 return None
             td = params.get('textDocument')
             if isinstance(td, dict) and isinstance(td.get('uri'), str):
-                # canonical form: server-echoed uris may differ in the
-                # Windows drive-letter case from ours - normalize, or the
-                # same file gets TWO per-file keys in the panel
-                return normalize_drive_letter(td['uri'])
+                # canonical form: the uri may be ours (didOpen we sent:
+                # over-encoded '%2B') or the server's echo (jdt.ls: literal
+                # '+', .NET: lower-cased drive) - normalize, or the same
+                # file gets TWO per-file keys in the panel
+                return canonical_uri(td['uri'])
             uri = params.get('uri')
             if isinstance(uri, str):
-                return normalize_drive_letter(uri)
+                return canonical_uri(uri)
         except Exception:
             pass
         return None

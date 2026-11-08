@@ -99,7 +99,7 @@ import cudatext_cmd as cmds
 
 from lsprotocol import types as lsp
 
-from .util import uri_to_path
+from .util import uri_to_path, canonical_uri
 
 _ = apx.get_translation(__file__)  # I18N
 
@@ -228,6 +228,12 @@ class LogStore:
         scope); None = server-level. Cheap (one append + cap eviction); the
         panel renders later, coalesced. Never touches the UI here.
 
+        The uri is CANONICALIZED (util.canonical_uri): belt-and-braces -
+        the receiving side already normalizes (language.py), but this is
+        the ONE choke point every per-file key passes through, so no
+        producer (omnisharp.py, future ones) can re-introduce the
+        two-spellings bug. Idempotent, pure string ops.
+
         While a background analysis runs (self.analysis), the two flood
         categories are NOT stored, only counted (VS Code/Neovim model: log
         streams below warning level are dropped by the log level, the user
@@ -244,6 +250,8 @@ class LogStore:
             text += '\n'
         if not isinstance(type_, str):
             type_ = str(type_)
+        if uri is not None:
+            uri = canonical_uri(uri)
 
         if self.analysis is not None and self._hide_in_analysis(type_,
                                                                 severity,
@@ -432,10 +440,11 @@ class LogStore:
         'lines': list of (text, severity) already formatted for display; an
         empty list clears the block. Independent of gutter/lint options -
         the panel always shows diagnostics. NO cap: every diagnostic the
-        server published is kept and shown.
-        """
+        server published is kept and shown. The uri is canonicalized
+        (see log_str). """
         if not self.live:
             return
+        uri = canonical_uri(uri)
         if filename:
             self.diag_filenames[uri] = filename
 
@@ -454,15 +463,18 @@ class LogStore:
         _notify_change(self, uri)
 
     def clear_diagnostics(self, uri=None):
-        """ Drop diagnostic blocks - of one document, or of all (uri=None). """
+        """ Drop diagnostic blocks - of one document, or of all (uri=None).
+        The uri is canonicalized (see log_str), like set_file_diags does. """
         if not self.live:
             return
         if uri is None:
             if self.file_diags:
                 self.file_diags.clear()
                 _notify_change(self, None)
-        elif self.file_diags.pop(uri, None) is not None:
-            _notify_change(self, uri)
+        else:
+            uri = canonical_uri(uri)
+            if self.file_diags.pop(uri, None) is not None:
+                _notify_change(self, uri)
 
     def drop_file(self, uri):
         """ Document closed: its spy traffic is unreachable now (the tab is
@@ -471,6 +483,7 @@ class LogStore:
         """
         if not self.live:
             return
+        uri = canonical_uri(uri)
         if self.file_spy.pop(uri, None) is not None:
             _notify_change(self, uri)
 
@@ -495,7 +508,9 @@ class LogStore:
         """ Messages kept for ONE document (per-file Spy + its diagnostics
         block) - the instance picker shows it next to the file name, so a
         file's activity is visible WITHOUT opening/rendering its log.
-        """
+        The uri is canonicalized (see log_str) - any spelling finds the
+        entry. """
+        uri = canonical_uri(uri)
         return len(self.file_spy.get(uri, ())) + len(self.file_diags.get(uri, ()))
 
     def clear(self):
@@ -739,9 +754,15 @@ class LspPanel:
         pick: the whole instance - its server-level messages and all its
         files; no other server is shown). store=None blanks the panel.
         No-op when unchanged. Only Command.sync_panel() calls this.
+        The uri is canonicalized (util.canonical_uri): the context lookup
+        must find the store's per-file keys whatever spelling the caller
+        produced (ed_uri is canonical since the jdt.ls fix, the picker
+        passes store keys - this is the belt-and-braces third layer).
         """
         if store is not None and store not in self.stores:
             return  # stale focus event of a shut-down instance
+        if uri is not None:
+            uri = canonical_uri(uri)
         if self.store is store and self.uri == uri:
             return
         self.store = store

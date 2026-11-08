@@ -92,13 +92,11 @@ def _isword(s):
 def path_to_uri(path):
     """ Canonical file uri of a path - THE form used everywhere in the
     plugin (didOpen/didChange params, per-file log keys, editor-doc uris):
-    on Windows the drive letter is upper-cased, because .NET servers
-    (OmniSharp) lower-case it in the uris they echo back (publishDiagnostics
-    etc.) - without ONE canonical spelling the same document would be
-    tracked under two different keys ('file:///F:/...' sent vs 'file:///f:/...'
-    received). Server-echoed uris are normalized through
-    normalize_drive_letter() at the receiving side. """
-    return normalize_drive_letter(pathlib.Path(path).as_uri())
+    the minimal-encoding form of canonical_uri() - what VS Code clients
+    send, the de-facto interop standard LSP servers are tested against
+    (pathlib's as_uri over-encodes: '+' as '%2B', ':' as '%3A' - jdt.ls
+    answers those with a DIFFERENTLY spelled uri, see canonical_uri). """
+    return canonical_uri(pathlib.Path(path).as_uri())
 
 def ed_uri(ed):
     fn = ed.get_filename('*') # '*' get filepath for image/binary tabs too
@@ -106,17 +104,22 @@ def ed_uri(ed):
         #return 'file://'+ed.get_filename()
         return path_to_uri(fn)
     else:
-        return 'file:///'+ed.get_prop(ct.PROP_TAB_TITLE).lstrip('*')
+        return canonical_uri(
+            'file:///'+ed.get_prop(ct.PROP_TAB_TITLE).lstrip('*'))
 
 def uri_to_path(uri):
 
     # https://stackoverflow.com/a/61922504
     # ~heavy import
-    from urllib.parse import urlparse, unquote
+    from urllib.parse import urlparse
     from urllib.request import url2pathname
 
+    # NOTE: url2pathname() percent-decodes by itself (on posix it IS
+    # unquote, on nt it unquotes each component) - an extra unquote() here
+    # would decode TWICE and corrupt names with a literal '%' (file
+    # 'a%20b.java' -> uri 'a%2520b.java' -> path 'a b.java').
     path = urlparse(uri).path
-    return url2pathname(unquote(path))
+    return url2pathname(path)
 
 def collapse_path(path):
     if path  and  (path + os.sep).startswith(USER_DIR + os.sep):
@@ -137,6 +140,63 @@ def normalize_drive_letter(uri, is_win=None):
     if len(parts) == 2 and parts[0] == '' and len(parts[1]) >= 2 and parts[1][1] == ':':
         uri = "file:///" + parts[1][:1].upper() + parts[1][1:]
     return uri
+
+# RFC 3986 path characters which never need percent-encoding in the path of
+# a file uri ('pchar' minus '%', plus '/'): unreserved + sub-delims +
+# ':' + '@' - the minimal-encoding set VS Code clients use.
+_URI_PATH_SAFE = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789"
+    "/-._~!$&'()*+,;=:@"
+)
+
+def canonical_uri(uri, is_win=None):
+    """ ONE canonical spelling of a document uri, so the same file NEVER
+    gets two per-file keys in the panel/log model.
+
+    Servers do not agree on how much of a path to percent-encode, and the
+    plugin itself over-encodes (pathlib: '+' -> '%2B', ':' -> '%3A'). A
+    didOpen of '+lexers/__individual files/java.java' goes out as
+    '.../%2Blexers/__individual%20files/java.java' while jdt.ls answers
+    with '.../+lexers/__individual%20files/java.java' (Java keeps '+'
+    literal) - the file's spy traffic is then stored under one key and its
+    publishDiagnostics under ANOTHER: the instance picker lists the file
+    TWICE, and the file's panel shows no diagnostics (the block lives under
+    the other key). .NET servers additionally lower-case the drive letter,
+    older ones send 'file:/' with one slash.
+
+    The canonical form is the minimal-encoding one: percent-escapes of
+    path-safe characters are decoded to the literal char, everything else
+    is (re-)encoded as an uppercase-hex UTF-8 escape, the Windows drive
+    letter is upper-cased, and the slash count after 'file:' is folded to
+    exactly three (a 2-slash uri with a non-drive authority - UNC
+    'file://server/share' - is left untouched, as are non-file uris like
+    jdt.ls's 'jdt:contents://...': they name no file on disk).
+    Idempotent; 'is_win' overrides the OS check for tests. """
+    if not isinstance(uri, str) or not uri:
+        return uri
+    if is_win is None:
+        is_win = os.name == 'nt'
+
+    rest = None
+    if uri.startswith('file:///'):
+        rest = uri[len('file:///'):]
+    elif uri.startswith('file://'):
+        head = uri[len('file://'):]
+        if len(head) >= 2 and head[1] == ':' and head[0].isalpha():
+            rest = head                # 'file://F:/x' - drive read as path
+    elif uri.startswith('file:/'):
+        rest = uri[len('file:/'):]     # 'file:/F:/x', 'file:/home/x'
+    if rest is None:
+        return normalize_drive_letter(uri, is_win=is_win)
+
+    from urllib.parse import unquote_to_bytes, quote
+    text = unquote_to_bytes(rest).decode('utf-8', 'surrogateescape')
+    if is_win and len(text) >= 2 and text[1] == ':' and text[0].isalpha():
+        text = text[0].upper() + text[1:]
+    return 'file:///' + quote(text, safe=_URI_PATH_SAFE,
+                              errors='surrogateescape')
 
 def command(f):
     def d(*args, **vargs): #SKIP

@@ -383,6 +383,19 @@ messages arrive, and when the panel page is re-shown (the
 close-and-reopen recovery, now automatic) - it can never get stuck on
 another tab's messages or on the 'No LSP server for this file'
 placeholder while a server is analyzing the file.
+Every document is tracked under ONE canonical uri spelling. Servers
+disagree on how much of a path to percent-encode (the plugin used to
+over-encode: '+' as '%2B'; Eclipse jdt.ls keeps '+' literal; OmniSharp
+lower-cases the Windows drive letter; some servers send 'file:/' with
+one slash) - without folding, the same file could get two per-file keys:
+listed twice in the instance picker, with its diagnostics invisible in
+the panel (stored under the other spelling). All uris - sent and
+received, store keys and context lookups - go through one canonical
+minimal-encoding form (the form VS Code clients send), so any spelling
+of a file maps to the same entry. Non-spec 'language/status'
+notifications of jdt.ls (its startup/import progress, ~40 lines per
+server start) are handled like 'window/logMessage': one 'Logs' line
+each, nothing printed to the CudaText console.
 Diagnostics entries show the exact column range of the problem - the raw
 zero-based positions the server reported, e.g. 'Line 131:
 [csharp,Hint:IDE0055]: Fix formatting (21-22)' (LSP's Diagnostic.range is
