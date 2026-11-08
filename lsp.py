@@ -437,6 +437,21 @@ class Command:
         if doc and doc.lang and doc.lang.tree_enabled:
             doc.lang.update_tree(doc)
 
+        # PANEL CONTEXT MUST FOLLOW *EVERY* FOCUS CHANGE, not only tab
+        # switches. CudaText fires on_tab_change ONLY from the tab-header
+        # click handler (TATTabs.OnChange, formmain_tab_proc.inc); opening
+        # a file activates its new tab through SetFrame/DoFocusFrame with
+        # NO on_tab_change - but it DOES fire on_focus (EditorOnEnter ->
+        # DoPyEvent(OnFocus), form_frame.pas) right before on_open. Without
+        # the sync here, opening a 2nd file of the SAME server left the
+        # panel pinned to the 1st file's context: the server's messages
+        # for the new file were stored but never rendered (no logs, no
+        # diagnostics, no spy in the panel; the editor still got its
+        # markers) until the user switched a tab away and back. sync_panel
+        # is a no-op when the context is unchanged and respects a manual
+        # instance-picker pin, so refocusing the same tab is free.
+        self.sync_panel(ed_self)
+
     def on_save(self, ed_self):
         """ handles changed uri for LSP doc
             * if was unsaved with LSP lexer: will have a LSP 'doc' -- ok

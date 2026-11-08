@@ -361,12 +361,19 @@ remains available at any time via the "spy_file" option (a dump file).
 Safety valves: if no OmniSharp workspace event arrives for 30 s (load
 phase) / 90 s (confirmed sweep) - an older or hung server - the panel
 resumes the normal log view by itself; any fresh 'o#/...' event re-opens
-the quiet mode. Servers which send no 'o#/...' events (every non-OmniSharp
-server) are never affected: the quiet mode cannot even open for them.
+the quiet mode. The valve also runs while the panel page is not being
+watched (hidden flood messages keep the render tick alive), so a stale
+phase cannot keep hiding messages just because nobody looks. Servers
+which send no 'o#/...' events (every non-OmniSharp server) are never
+affected: the quiet mode cannot even open for them.
 
 Every server instance has its own message store; nothing is ever mixed.
-The panel's context is always re-derived from the focused tab (also
-self-correcting when a server instance finishes initializing and starts
+The panel's context is always re-derived from the focused tab - on EVERY
+focus change: opening a file (a new tab), switching tabs, switching
+editor groups (CudaText fires its on_focus event for all of them;
+on_tab_change fires only for real tab switches - verified in the
+editor's own source), and self-correcting when a server instance finishes
+initializing and starts
 sending its analysis) - it can never get stuck on another tab's messages.
 Diagnostics entries show the exact column range of the problem - the raw
 zero-based positions the server reported, e.g. 'Line 131:

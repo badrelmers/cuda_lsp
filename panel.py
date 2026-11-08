@@ -70,7 +70,10 @@ BACKGROUND-ANALYSIS QUIET MODE (the 'log flood' of big workspaces):
   * Safety: no o#/ workspace event for LOADING_STALE_MS (load phase) /
     ANALYSIS_STALE_MS (confirmed sweep) auto-resumes the normal view (an
     older/hung server must never freeze the panel); any fresh o#/ event
-    re-arms the quiet mode.
+    re-arms the quiet mode. The staleness valve runs in the render tick
+    BOTH while the page is shown and while it is hidden (hidden messages
+    keep the tick alive via analysis_note_hidden -> _notify_tick), so a
+    stale phase cannot keep hiding messages just because nobody watches.
 
 UI-thread only: stores are fed from process_queues()/DiagnosticsMan/
   omnisharp handlers, which all run in the app thread. The reader/writer
@@ -391,6 +394,13 @@ class LogStore:
             return False
         an['hidden'][type_] = an['hidden'].get(type_, 0) + 1
         an['hidden_total'] += 1
+        # keep the panel's coalesced tick ALIVE while the flood is being
+        # hidden: hidden messages schedule no _notify_msg of their own, so
+        # without this a stale analysis phase would never be re-examined
+        # while the panel page is not shown (the staleness valve lives in
+        # the tick) - and the progress page's hidden-totals line would go
+        # stale between status events too.
+        _notify_tick()
         return True
 
     def analysis_hidden_str(self):
@@ -820,6 +830,13 @@ class LspPanel:
             self._need_full = True
             self._pending.clear()
             self._update_badge()
+            # the quiet-mode staleness valve must ALSO run while the page
+            # is hidden: a stale analysis phase (hung/old server, no more
+            # o#/ events) would otherwise keep hiding - counting, not
+            # storing - the instance's messages for as long as the page
+            # stays unopened. Closing it here only flips the model back to
+            # normal collection; the view itself catches up via on_show.
+            self._valve_stale_analysis()
             return
 
         if self._sb_dirty:
@@ -834,42 +851,15 @@ class LspPanel:
             # re-render which analysis_finish() schedules. Re-armed at
             # PROGRESS_TICK_MS so the elapsed time/progress stay live even
             # between status events.
-            st = self.store
-            an = st.analysis
-            stale_ms = st.analysis_stale_ms()
-            # two valves (both refreshed by every o#/ workspace event via
-            # analysis_touch/progress): the loading phase gives up waiting
-            # for the sweep's Started quickly, the confirmed sweep waits
-            # longer (quiet gaps between progress batches are normal)
-            stale_limit = (ANALYSIS_STALE_MS if an.get('sweep')
-                           else LOADING_STALE_MS)
-            if stale_ms > stale_limit:
-                # safety valve: resume the normal view instead of a frozen
-                # 'analysis is running' page forever (hung server, or a
-                # load which finished without any background-analysis
-                # sweep - older OmniSharp)
-                if an.get('sweep'):
-                    st.log_str(
-                        _('background analysis status stopped arriving - '
-                          'resuming the log view (the server may still be '
-                          'busy); messages hidden so far: ') +
-                        (st.analysis_hidden_str() or _('none')),
-                        type_=TYPE_OMNISHARP, severity=SEVERITY_WRN)
-                elif an['hidden_total']:
-                    # silent for small workspaces (nothing was hidden);
-                    # when the load flood WAS hidden, report it once
-                    st.log_str(
-                        _('workspace load finished without a background '
-                          'analysis sweep; hidden while loading: ') +
-                        st.analysis_hidden_str(),
-                        type_=TYPE_OMNISHARP, severity=SEVERITY_INFO)
-                st.analysis_finish()
-            else:
+            if not self._valve_stale_analysis():
                 self._render_progress()
                 self._update_counts()
                 self._update_badge()
                 self._schedule(self.PROGRESS_TICK_MS)
                 return
+            # the valve closed a stale phase: fall through to the normal
+            # path - analysis_finish()'s notification already marked the
+            # full re-render as needed
 
         if self._need_full:
             self._render_full()
@@ -885,6 +875,45 @@ class LspPanel:
         must not blank THIS view.) """
         st = self.store
         return st is not None and st.analysis is not None
+
+    def _valve_stale_analysis(self):
+        """ Staleness valve of the quiet mode - returns True when it closed
+        the phase. Two limits (both refreshed by every o#/ workspace event
+        via analysis_touch/progress): the LOADING phase gives up waiting
+        for the sweep's Started quickly (LOADING_STALE_MS), the confirmed
+        sweep waits longer (quiet gaps between progress batches are
+        normal). With no such event within the limit, the phase is dropped:
+        an older/hung server must never leave the panel stuck on 'analysis
+        is running' - NOR keep hiding (counting, not storing) its messages
+        just because the page is not being watched. The report lines are
+        logged while the phase is still open (kept: TYPE_OMNISHARP), then
+        analysis_finish()'s notification schedules the normal view's full
+        re-render. """
+        st = self.store
+        an = st.analysis if st is not None else None
+        if an is None:
+            return False
+        stale_limit = (ANALYSIS_STALE_MS if an.get('sweep')
+                       else LOADING_STALE_MS)
+        if st.analysis_stale_ms() <= stale_limit:
+            return False
+        if an.get('sweep'):
+            st.log_str(
+                _('background analysis status stopped arriving - '
+                  'resuming the log view (the server may still be '
+                  'busy); messages hidden so far: ') +
+                (st.analysis_hidden_str() or _('none')),
+                type_=TYPE_OMNISHARP, severity=SEVERITY_WRN)
+        elif an['hidden_total']:
+            # silent for small workspaces (nothing was hidden);
+            # when the load flood WAS hidden, report it once
+            st.log_str(
+                _('workspace load finished without a background '
+                  'analysis sweep; hidden while loading: ') +
+                st.analysis_hidden_str(),
+                type_=TYPE_OMNISHARP, severity=SEVERITY_INFO)
+        st.analysis_finish()
+        return True
 
     def _page_shown(self):
         """ Is the LSP page the active bottom-panel page? """
@@ -1046,16 +1075,23 @@ class LspPanel:
                          image=self._severity_ims[SEVERITY_INFO],
                          tag=self._decor_tag)
 
-        # keep the Diagnostics cell LIVE for the focused file: its block is
+        # truthful cells while the stream is paused: recompute the
+        # context's counts from the model (the KEPT messages only - the
+        # hidden flood is reported on the page's 'hidden' line, it must
+        # not stay in the cells as stale pre-analysis numbers). Includes
+        # the Diagnostics cell, LIVE for the focused file: its block is
         # one small list - recomputing it is O(its diagnostics), nothing
-        # like the flood, and it is the one number the waiting user watches
-        if self.uri is not None:
-            block = st.file_diags.get(self.uri, ())
-            sevs = {}
-            for m in block:
-                sevs[m.severity] = sevs.get(m.severity, 0) + 1
-            self._counts[TYPE_DIAG] = len(block)
-            self._diag_sevs = sevs
+        # like the flood. The kept set is small BY DESIGN (the flood is
+        # what _hide_in_analysis skips), so this stays cheap per refresh.
+        counts = {}
+        diag_sevs = {}
+        for m in self._context_msgs():
+            counts[m.type] = counts.get(m.type, 0) + 1
+            counts[m.severity] = counts.get(m.severity, 0) + 1
+            if m.type == TYPE_DIAG:
+                diag_sevs[m.severity] = diag_sevs.get(m.severity, 0) + 1
+        self._counts = counts
+        self._diag_sevs = diag_sevs
 
         self._fix_memo_after_render()
 
@@ -1591,6 +1627,16 @@ def _notify_change(store, uri):
     panel = LspPanel.get(create=False)
     if panel is not None:
         panel._on_store_change(store, uri)
+
+
+def _notify_tick():
+    """ Schedule the panel's coalesced render tick without touching any
+    model/view state - used by LogStore.analysis_note_hidden so that a
+    flood of HIDDEN messages still keeps the tick (and with it the
+    quiet-mode staleness valve) running. """
+    panel = LspPanel.get(create=False)
+    if panel is not None:
+        panel._schedule()
 
 
 def _unregister(store):
