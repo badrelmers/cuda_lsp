@@ -42,6 +42,36 @@ Rendering is COALESCED: every model change schedules one UI tick
   switch; scrolling up pauses auto-scrolling - re-renders (diagnostics
   replacement, ring eviction, page re-show) NEVER force the scroll.
 
+BACKGROUND-ANALYSIS QUIET MODE (the 'log flood' of big workspaces):
+  while a server loads a big workspace and runs its workspace-wide
+  background analysis (OmniSharp: the o#/projectadded/restore events of
+  the load phase, then o#/backgrounddiagnosticstatus Started..Finished
+  of the sweep - thousands of messages on a 100+ project solution:
+  logMessage per project step, per-file publishDiagnostics + the Spy
+  raw-JSON twin of both), the store enters 'analysis' state (omnisharp.py
+  drives it via analysis_touch/_start/_progress/_finish):
+  * VIEW: the panel shows one compact PROGRESS PAGE instead of the stream
+    (analysis is running, done/total files, elapsed, hidden totals, the
+    last few KEPT events) - O(1) per refresh, re-armed at
+    ANALYSIS_TICK_MS; the Diagnostics cell stays LIVE for the focused
+    file. On finish, the normal view is fully re-rendered from the model.
+  * MODEL: the two flood categories are NOT stored, only counted -
+    info/log-level window/logMessage and SERVER-LEVEL Spy traffic (the
+    raw twin of the same stream). Kept: errors/warnings (lost evidence
+    otherwise), OmniSharp event lines (the meaningful history), per-file
+    Spy as one compact bodyless line (keeps every analyzed file listed
+    in the instance picker at ~zero cost), stderr, Messages, Unhandled.
+    The finish line reports what was hidden; the full untruncated stream
+    stays available in the 'spy_file' option dump. This is the model of
+    VS Code (window/logMessage goes into a level-filtered LogOutputChannel,
+    never a live-rendered panel) and Neovim (log_level filters
+    window/logMessage, logs go to a file) - progress belongs to the status
+    bar, not to a rendered log view.
+  * Safety: no o#/ workspace event for LOADING_STALE_MS (load phase) /
+    ANALYSIS_STALE_MS (confirmed sweep) auto-resumes the normal view (an
+    older/hung server must never freeze the panel); any fresh o#/ event
+    re-arms the quiet mode.
+
 UI-thread only: stores are fed from process_queues()/DiagnosticsMan/
   omnisharp handlers, which all run in the app thread. The reader/writer
   threads of a server go through queues and never touch this module.
@@ -49,8 +79,9 @@ UI-thread only: stores are fed from process_queues()/DiagnosticsMan/
 
 import os
 import re
+import time
 import heapq
-from collections import namedtuple
+from collections import namedtuple, deque
 from itertools import count
 from operator import itemgetter
 
@@ -159,6 +190,11 @@ class LogStore:
         self.file_diags = {}    # uri -> [LogMsg] (block, replaced atomically)
         self.diag_filenames = {}  # uri -> path (dbl-click jump)
         self.extra_types = set()  # every message type ever logged (filter bar)
+        # background-analysis quiet mode: dict while the server runs a
+        # workspace-wide background analysis (OmniSharp
+        # o#/backgrounddiagnosticstatus Started..Finished). See the module
+        # docstring - None = normal mode.
+        self.analysis = None
 
     @property
     def name(self):
@@ -183,6 +219,14 @@ class LogStore:
         """ Append one message. 'uri' tags it to one document (per-file
         scope); None = server-level. Cheap (one append + cap eviction); the
         panel renders later, coalesced. Never touches the UI here.
+
+        While a background analysis runs (self.analysis), the two flood
+        categories are NOT stored, only counted (VS Code/Neovim model: log
+        streams below warning level are dropped by the log level, the user
+        watches the status bar progress instead): info/log-level
+        window/logMessage and server-level Spy traffic. Errors, warnings,
+        OmniSharp events, per-file traffic and stderr are kept - they are
+        low-volume and are what the user actually needs after the analysis.
         """
         if not self.live:
             return
@@ -192,6 +236,12 @@ class LogStore:
             text += '\n'
         if not isinstance(type_, str):
             type_ = str(type_)
+
+        if self.analysis is not None and self._hide_in_analysis(type_,
+                                                                severity,
+                                                                uri):
+            self.analysis_note_hidden(type_)
+            return
 
         msg = LogMsg(next(self._seq), text, type_, severity)
         if uri is None:
@@ -207,8 +257,152 @@ class LogStore:
             evicted = True
         lst.append(msg)
 
+        if self.analysis is not None and uri is None:
+            # kept server-level event: echo it in the progress view's tail
+            # (short text - one line, no bodies)
+            tail = text.strip()
+            if len(tail) > 200:
+                tail = tail[:197] + '...'
+            self.analysis['tail'].append(tail)
+
         new_type = self._note_type(type_)
         _notify_msg(self, msg, uri, evicted, new_type)
+
+    def _hide_in_analysis(self, type_, severity, uri):
+        """ Should this message be HIDDEN (counted, not stored) while a
+        background analysis runs? The rule mirrors what other editors do
+        with server log streams (level filtering):
+        * TYPE_LOG below warning severity - the main flood form: OmniSharp
+          logs every project load/analysis step as window/logMessage at
+          info/log level; hundreds to thousands per big workspace;
+        * TYPE_SPY of server-level traffic - the raw JSON twin of the same
+          stream (and of the o#/... events), i.e. the flood again, bigger.
+        Everything else is KEPT (rendering is what the progress view pauses,
+        not collection): errors/warnings would be lost evidence otherwise,
+        per-file Spy lines keep the analyzed files listed in the instance
+        picker, and the compact OmniSharp event lines are the meaningful
+        history of what was analyzed.
+        """
+        if type_ == TYPE_LOG and severity not in (SEVERITY_ERR, SEVERITY_WRN):
+            return True
+        if type_ == TYPE_SPY and uri is None:
+            return True
+        return False
+
+    # -- background analysis quiet mode ----------------------------------
+
+    def analysis_start(self, total=0, projects=0, sweep=True):
+        """ A workspace-wide background analysis began: either the SWEEP
+        itself (OmniSharp o#/backgrounddiagnosticstatus Status==0; sweep=
+        True, with file/project numbers) - or the LOADING phase was opened
+        earlier by analysis_touch() (first o#/projectadded / restore event)
+        and this call UPGRADES it to the sweep. An already-open phase keeps
+        its hidden counters: the load flood and the sweep flood are ONE
+        quiet period for the user, and the finish line must report them
+        together. Until analysis_finish(): the panel's view of this
+        instance is replaced by a compact progress page, while the flood
+        categories are only counted (see _hide_in_analysis). """
+        now = time.monotonic() * 1000
+        if self.analysis is not None:
+            an = self.analysis
+            an['sweep'] = an['sweep'] or bool(sweep)
+            if isinstance(total, int):
+                an['total'] = total
+                an['remaining'] = total
+            if isinstance(projects, int):
+                an['projects'] = projects
+            an['last_event_ms'] = now
+            _notify_change(self, None)
+            return
+        self.analysis = {
+            'sweep': bool(sweep),
+            'total': total if isinstance(total, int) else 0,
+            'remaining': total if isinstance(total, int) else 0,
+            'projects': projects if isinstance(projects, int) else 0,
+            'started_ms': now,
+            'last_event_ms': now,
+            'hidden': {},      # message type -> count (the hidden flood)
+            'hidden_total': 0,
+            'tail': deque(maxlen=ANALYSIS_TAIL),  # kept server-level texts
+        }
+        _notify_change(self, None)
+
+    def analysis_touch(self, projects=None):
+        """ A workspace (RE)LOAD began: the first o#/projectadded /
+        o#/packagerestore* event. Opens the quiet mode in its LOADING
+        phase (no sweep numbers yet - the progress page says 'projects
+        loading') if it was closed; refreshes the staleness clock if it was
+        already open (a mid-sweep project change must not reset the hidden
+        counters). OmniSharp loads ALL projects - and floods a logMessage
+        per step - BEFORE the background-diagnostic sweep even starts, so
+        the quiet mode cannot wait for the sweep's Started event. """
+        if self.analysis is None:
+            self.analysis_start(projects=projects if projects else 0,
+                                sweep=False)
+            return
+        an = self.analysis
+        if isinstance(projects, int):
+            an['projects'] = projects
+        an['last_event_ms'] = time.monotonic() * 1000
+        _notify_change(self, None)
+
+    def analysis_progress(self, remaining, total=None, projects=None):
+        """ Progress update (o#/backgrounddiagnosticstatus Status==1):
+        refresh the numbers only - the panel re-renders its progress page
+        coalesced, never per event. A progress event also proves a sweep
+        is running (marks the phase as sweep). """
+        an = self.analysis
+        if an is None:
+            return
+        if isinstance(remaining, int):
+            an['remaining'] = remaining
+        if isinstance(total, int):
+            an['total'] = total
+        if isinstance(projects, int):
+            an['projects'] = projects
+        an['sweep'] = True
+        an['last_event_ms'] = time.monotonic() * 1000
+        _notify_change(self, None)
+
+    def analysis_finish(self):
+        """ The analysis finished (Status==2) - or the phase is dropped
+        (stale/expiry): back to the normal log view. The hidden totals are
+        reported by the CALLER (omnisharp.py appends them to the 'analysis
+        finished' line) BEFORE this runs, while self.analysis still lives.
+        """
+        if self.analysis is None:
+            return
+        self.analysis = None
+        _notify_change(self, None)
+
+    def analysis_stale_ms(self):
+        """ ms since the last analysis status event, 0 when not analyzing. """
+        an = self.analysis
+        if an is None:
+            return 0
+        return time.monotonic() * 1000 - an['last_event_ms']
+
+    def analysis_note_hidden(self, type_):
+        """ Count one message hidden by the analysis gating (used by
+        log_str, and directly by language._on_spy_message which skips
+        server-level spy traffic BEFORE serializing its body). """
+        an = self.analysis
+        if an is None:
+            return False
+        an['hidden'][type_] = an['hidden'].get(type_, 0) + 1
+        an['hidden_total'] += 1
+        return True
+
+    def analysis_hidden_str(self):
+        """ '5231 message(s) (Logs 3498, Spy 1733)' for the finish line;
+        '' when nothing was hidden (small workspaces - nothing to explain).
+        """
+        an = self.analysis
+        if an is None or not an['hidden_total']:
+            return ''
+        parts = ', '.join(f'{PANEL_CAPTIONS.get(k, k)} {n}'
+                          for k, n in sorted(an['hidden'].items()))
+        return f"{an['hidden_total']} {_('message(s)')} ({parts})"
 
     def log(self, params):
         """ window/showMessage / window/logMessage params. """
@@ -282,6 +476,13 @@ class LogStore:
         return [uri for uri, _ in sorted(latest.items(),
                                          key=lambda kv: kv[1], reverse=True)]
 
+    def file_msg_count(self, uri):
+        """ Messages kept for ONE document (per-file Spy + its diagnostics
+        block) - the instance picker shows it next to the file name, so a
+        file's activity is visible WITHOUT opening/rendering its log.
+        """
+        return len(self.file_spy.get(uri, ())) + len(self.file_diags.get(uri, ()))
+
     def clear(self):
         """ User 'Clear': drop everything of this instance. """
         if not self.live:
@@ -319,6 +520,24 @@ DIAG_LINE_COLOR = 0x14A2E0
 
 PANEL_NAME = 'LSP'   # the single bottom-panel page caption
 
+# background-analysis quiet mode (see LogStore.analysis): how long the
+# progress view stays up without ANY analysis status event before the panel
+# gives up waiting and resumes the normal log view (a hung/older server must
+# never leave the panel stuck on 'analysis is running'). Two valves: the
+# workspace-LOADING phase (opened by the first o#/projectadded/restore
+# event, no sweep numbers yet) closes after LOADING_STALE_MS; the confirmed
+# SWEEP phase (o#/backgrounddiagnosticstatus Started..Finished) after
+# ANALYSIS_STALE_MS (longer: a big sweep can be quiet between progress
+# batches)
+LOADING_STALE_MS = 30_000
+ANALYSIS_STALE_MS = 90_000
+# refresh period of the progress view while an analysis runs (re-armed
+# one-shot ticks, so no extra timer machinery is needed)
+ANALYSIS_TICK_MS = 500
+# how many recently KEPT server-level messages the progress view echoes
+# (errors/warnings/OmniSharp events - visibility without the flood)
+ANALYSIS_TAIL = 4
+
 
 class LspPanel:
     """ The single LSP log panel (bottom panel, one icon). See module
@@ -340,6 +559,9 @@ class LspPanel:
     # EVERY eviction would cost a full pass per message in a steady stream
     # (cap reached) - tolerate a few stale top lines, rebuild in bulk
     FULL_ON_EVICTIONS = 64
+    # background analysis quiet mode (see LogStore.analysis): the view
+    # refresh period while the progress page is up
+    PROGRESS_TICK_MS = ANALYSIS_TICK_MS
 
     _colors = None
     _instance = None
@@ -583,10 +805,11 @@ class LspPanel:
 
     # -- coalesced UI tick ----------------------------------------------------
 
-    def _schedule(self):
+    def _schedule(self, ms=None):
         if not self._timer_on:
             self._timer_on = True
-            timer_proc(TIMER_START_ONE, self._on_tick, self.TICK_MS)
+            timer_proc(TIMER_START_ONE, self._on_tick,
+                       ms if ms is not None else self.TICK_MS)
 
     def _on_tick(self, tag='', info=''):
         self._timer_on = False
@@ -603,6 +826,51 @@ class LspPanel:
             self._sb_dirty = False
             self._update_sb()
 
+        if self._in_analysis():
+            # background analysis quiet mode: the whole message stream is
+            # REPLACED by one small progress page (set_text_all of ~10 lines
+            # - O(1) per refresh, independent of the flood's volume); the
+            # pending queue is included in the model, rendered by the full
+            # re-render which analysis_finish() schedules. Re-armed at
+            # PROGRESS_TICK_MS so the elapsed time/progress stay live even
+            # between status events.
+            st = self.store
+            an = st.analysis
+            stale_ms = st.analysis_stale_ms()
+            # two valves (both refreshed by every o#/ workspace event via
+            # analysis_touch/progress): the loading phase gives up waiting
+            # for the sweep's Started quickly, the confirmed sweep waits
+            # longer (quiet gaps between progress batches are normal)
+            stale_limit = (ANALYSIS_STALE_MS if an.get('sweep')
+                           else LOADING_STALE_MS)
+            if stale_ms > stale_limit:
+                # safety valve: resume the normal view instead of a frozen
+                # 'analysis is running' page forever (hung server, or a
+                # load which finished without any background-analysis
+                # sweep - older OmniSharp)
+                if an.get('sweep'):
+                    st.log_str(
+                        _('background analysis status stopped arriving - '
+                          'resuming the log view (the server may still be '
+                          'busy); messages hidden so far: ') +
+                        (st.analysis_hidden_str() or _('none')),
+                        type_=TYPE_OMNISHARP, severity=SEVERITY_WRN)
+                elif an['hidden_total']:
+                    # silent for small workspaces (nothing was hidden);
+                    # when the load flood WAS hidden, report it once
+                    st.log_str(
+                        _('workspace load finished without a background '
+                          'analysis sweep; hidden while loading: ') +
+                        st.analysis_hidden_str(),
+                        type_=TYPE_OMNISHARP, severity=SEVERITY_INFO)
+                st.analysis_finish()
+            else:
+                self._render_progress()
+                self._update_counts()
+                self._update_badge()
+                self._schedule(self.PROGRESS_TICK_MS)
+                return
+
         if self._need_full:
             self._render_full()
         elif self._pending:
@@ -610,6 +878,13 @@ class LspPanel:
 
         self._update_counts()
         self._update_badge()
+
+    def _in_analysis(self):
+        """ Is the SHOWN store currently in background-analysis quiet mode?
+        (Only the context store matters: another tab's server analyzing
+        must not blank THIS view.) """
+        st = self.store
+        return st is not None and st.analysis is not None
 
     def _page_shown(self):
         """ Is the LSP page the active bottom-panel page? """
@@ -710,6 +985,79 @@ class LspPanel:
         self._fix_memo_after_render()
         if follow:
             self._goto_end()
+
+    def _render_progress(self):
+        """ The background-analysis progress page - what the user asked for
+        the big-workspace flood: 'the analysis is running, wait' WITH the
+        numbers (VS Code shows the same in its status bar), instead of
+        rendering thousands of messages nobody reads. Everything the page
+        shows is O(1) to compute: the analysis dict's counters, the elapsed
+        clock, the last few KEPT server-level texts (an at-most-4 tail). """
+        st = self.store
+        an = st.analysis
+        self._need_full = False
+        self._evictions = 0
+        # the whole model is rendered by the full re-render which
+        # analysis_finish() schedules; anything still pending is included
+        # in the model - dropping it here is what keeps this path O(1)
+        self._pending.clear()
+        self._placeholder = False
+
+        total = an['total']
+        done = max(total - an['remaining'], 0)
+        pct = (100 * done // total) if total else 0
+        secs = int((time.monotonic() * 1000 - an['started_ms']) / 1000)
+
+        lines = [
+            _('Background analysis is running - the log view is paused '
+              'until it finishes'),
+            '',
+            f"{_('Instance')}: {st.display_name}",
+        ]
+        if an.get('sweep'):
+            lines.append(
+                f"{_('Progress')}: {done}/{total} {_('file(s)')} ({pct}%), "
+                f"{an['projects']} {_('project(s)')}, "
+                f"{_('elapsed')} {secs // 60:02d}:{secs % 60:02d}")
+        else:
+            # loading phase: no sweep numbers yet, projects are still being
+            # loaded (the first o#/projectadded / restore event opened this)
+            lines.append(
+                f"{_('Loading workspace')}: {an['projects']} "
+                f"{_('project(s)')}, "
+                f"{_('elapsed')} {secs // 60:02d}:{secs % 60:02d}")
+        if an['hidden_total']:
+            lines.append(_('Hidden while analyzing') + ': ' +
+                         st.analysis_hidden_str())
+        lines.append('')
+        lines.append(_('Errors, warnings and server events are still '
+                       'collected and shown when the analysis finishes; '
+                       'progress is also in the status bar, analyzed files '
+                       'are listed in the instance picker (click the '
+                       'instance cell above).'))
+        if an['tail']:
+            lines.append('')
+            lines.append(_('Recent events:'))
+            lines.extend('  ' + t for t in an['tail'])
+
+        self._memo.set_text_all('\n'.join(lines) + '\n')
+        self._memo.decor(DECOR_DELETE_BY_TAG, tag=self._decor_tag)
+        self._memo.decor(DECOR_SET, line=0,
+                         image=self._severity_ims[SEVERITY_INFO],
+                         tag=self._decor_tag)
+
+        # keep the Diagnostics cell LIVE for the focused file: its block is
+        # one small list - recomputing it is O(its diagnostics), nothing
+        # like the flood, and it is the one number the waiting user watches
+        if self.uri is not None:
+            block = st.file_diags.get(self.uri, ())
+            sevs = {}
+            for m in block:
+                sevs[m.severity] = sevs.get(m.severity, 0) + 1
+            self._counts[TYPE_DIAG] = len(block)
+            self._diag_sevs = sevs
+
+        self._fix_memo_after_render()
 
     def _render_placeholder(self):
         self._placeholder = True
@@ -1075,8 +1423,12 @@ class LspPanel:
             names.append(store.display_name)
             entries.append((store, None))
             uris = store.log_files()
-            for uri, cap in zip(uris, self._file_captions(uris)):
-                names.append('    ' + cap)
+            for uri, cap, n in zip(uris, self._file_captions(uris),
+                                   (store.file_msg_count(u) for u in uris)):
+                # per-file message total next to the name: the file's
+                # activity is visible WITHOUT opening/rendering its log
+                # ('file.cs [12]' - 12 kept messages of that file)
+                names.append(f'    {cap}  [{n}]')
                 entries.append((store, uri))
 
         ind = dlg_menu(DMENU_LIST_ALT, names,

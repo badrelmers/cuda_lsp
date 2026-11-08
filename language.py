@@ -955,6 +955,18 @@ class Language:
         document uri it belongs to (per-file scope). Registered on the
         sansio client via Client(spy=...), which calls it for every complete
         message - before/independently of message parsing. Never raises.
+
+        BACKGROUND-ANALYSIS QUIET MODE: while the store is in its analysis
+        phase (a workspace-wide sweep is running - thousands of messages on
+        a big solution), the raw-JSON twin of the flood is tamed BEFORE the
+        serialization, which is the whole point: json.dumps of every
+        publishDiagnostics/logMessage body is the flood's biggest CPU cost.
+        Server-level traffic (uri == None: logMessage, o#/... events, every
+        response) is skipped entirely and only counted in the analysis'
+        hidden totals; per-file traffic (publishDiagnostics etc.) keeps a
+        compact BODYLESS line so the file stays listed in the instance
+        picker at ~zero cost. SPY_FILE (the 'spy_file' option) still gets
+        the FULL untruncated stream - the debug escape hatch.
         """
         try:
             # 1. Determine type and direction
@@ -979,11 +991,28 @@ class Language:
                 name = method or '?'
 
             # 3. Serialize ONCE; the panel gets the truncated body, the
-            # optional SPY_FILE gets the full one (persistent handle)
-            body = json.dumps(content, ensure_ascii=False)
+            # optional SPY_FILE gets the full one (persistent handle).
+            # During the analysis phase the dumps is SKIPPED unless SPY_FILE
+            # needs it (see the docstring).
+            an = getattr(self.plog, 'analysis', None)
+            body = None
+            if SPY_FILE or an is None:
+                body = json.dumps(content, ensure_ascii=False)
 
             if SPY_FILE:
                 self._spy_file_write(way, kind, name, body)
+
+            if an is not None:
+                uri = self._spy_msg_uri(content)
+                if uri is None:
+                    # server-level raw traffic: the flood's twin - counted,
+                    # not stored (LogStore._hide_in_analysis would drop it
+                    # anyway; skipping it here also skips the dumps above)
+                    self.plog.analysis_note_hidden(TYPE_SPY)
+                    return
+                # per-file traffic: compact line, no body - the file must
+                # stay listed in the instance picker without paying for it
+                body = _('[body hidden: background analysis is running]')
 
             if SPY_MSG_LIMIT > 0 and len(body) > SPY_MSG_LIMIT:
                 body = body[:SPY_MSG_LIMIT] + f' [TRUNCATED... total: {len(body)}]'

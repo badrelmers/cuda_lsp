@@ -286,10 +286,14 @@ showing the page) forces the scroll back down. Switching the context
 Cells in the panel's top bar (left to right):
 - instance cell - name of the shown server instance (fixed width; 'name
   (folder)' for per-folder instances of single-root servers like OmniSharp);
-  click for a dropdown of ALL running instances of ALL servers, click an
-  entry to PIN the panel to that ONE server instance: only its logs are
-  shown - its server-level messages plus all its files (logs of other
-  servers are never mixed in) - until the next tab switch; the first entry
+  click for a dropdown of ALL running instances of ALL servers with their
+  files NESTED under them, each file showing its kept message count
+  ('Program.cs [12]' - 12 messages of that file: Spy + diagnostics), so
+  the activity of every analyzed file is visible without opening it;
+  click an entry to PIN the panel to that ONE server instance: only its
+  logs are shown - its server-level messages plus all its files (logs of
+  other servers are never mixed in) - until the next tab switch; the first
+  entry
   '(follow focused tab)' cancels the pin immediately; a pinned instance is
   marked with a trailing ' *' in the cell; ' [N]' at the end of the text
   (shown while several instances run) is the number of running instances;
@@ -316,6 +320,49 @@ Cells in the panel's top bar (left to right):
 The log view is an editor and gets a log lexer for colors: the
 user-installable 'Logfiles' lexer when present, else CudaText's built-in
 lite lexer 'Log files ^'.
+
+Background analysis quiet mode (big workspaces)
+------------------------------------------------
+When a server loads a BIG workspace and then sweeps it with its background
+analysis (OmniSharp on a many-project solution: 'o#/projectadded' per
+project, one 'window/logMessage' per loading step, 'publishDiagnostics'
+per analyzed file - thousands of messages for the 1733-file folder you
+reported), the panel does NOT render that flood. Instead, while the
+load/analysis runs, the whole log view is replaced by a compact PROGRESS
+PAGE: "Background analysis is running", done/total file(s) with the
+percentage ("921/1733 file(s) (53%)"), elapsed time, how many messages
+were hidden so far, and the last few kept server events (project added,
+NuGet restore...). The status bar keeps showing the live progress (as
+before), and the Diagnostics cell stays LIVE for the focused file.
+When the analysis finishes, ONE summary line is logged:
+'background analysis finished: 1733 file(s) in 110 project(s)
+[AutoTune.csproj, ... (+106 more)]; 5231 message(s) (Logs 3498, Spy 1733)
+hidden' - and the normal log view of the focused file comes back, showing
+everything that was KEPT meanwhile:
+- errors and warnings are ALWAYS kept and shown (lost evidence would be
+  worse than any flood);
+- OmniSharp 'o#/...' event lines are kept (the meaningful history of what
+  was analyzed);
+- per-file Spy lines are kept as one compact bodyless line, so EVERY
+  analyzed file stays listed in the instance picker (pick a file there to
+  see it - the picker also shows each file's message count, e.g.
+  'Program.cs [12]');
+- hidden are only the two flood categories: info/log-level
+  'window/logMessage' lines and SERVER-level Spy traffic (the raw JSON
+  twin of the same stream). They are counted, not stored - no CPU for
+  rendering, no RAM for bodies, but the totals are reported (visibility
+  without flood).
+This mirrors what other editors do: VS Code routes 'window/logMessage'
+into a level-filtered log channel (messages below the level are dropped
+outright, nothing is live-rendered) and shows analysis progress in the
+status bar; Neovim filters 'window/logMessage' by 'log_level' and writes
+logs to a file, never to a rendered panel. The full untruncated stream
+remains available at any time via the "spy_file" option (a dump file).
+Safety valves: if no OmniSharp workspace event arrives for 30 s (load
+phase) / 90 s (confirmed sweep) - an older or hung server - the panel
+resumes the normal log view by itself; any fresh 'o#/...' event re-opens
+the quiet mode. Servers which send no 'o#/...' events (every non-OmniSharp
+server) are never affected: the quiet mode cannot even open for them.
 
 Every server instance has its own message store; nothing is ever mixed.
 The panel's context is always re-derived from the focused tab (also

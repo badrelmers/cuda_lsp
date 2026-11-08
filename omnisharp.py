@@ -22,7 +22,11 @@ o#/backgrounddiagnosticstatus
      NumberFilesTotal, NumberFilesRemaining} - the payload carries only
      counts; the 'Finished' panel line appends the tracked project names
      (from the o#/projectadded/removed events) in [brackets], so the user
-     sees WHAT was analyzed, not just how much
+     sees WHAT was analyzed, not just how much. This event pair drives the
+     store's background-analysis quiet mode: while Started..Finished runs,
+     the panel shows a progress page instead of the message stream and the
+     flood categories (info/log-level logMessage, server-level Spy) are
+     counted, not stored - see panel.py (LogStore.analysis)
     o#/projectdiagnosticstatus  (obsolete shim, twin of the above)
         {Type, Status: 0=Started|1=Ready, ProjectFilePath} - quirk: OmniSharp
         puts the percent string '(NN %)' into ProjectFilePath, not a path
@@ -78,6 +82,9 @@ import os
 import re
 
 from cudatext import msg_status
+
+from cudax_lib import get_translation
+_ = get_translation(__file__)  # I18N
 
 from .panel import TYPE_OMNISHARP, SEVERITY_ERR, SEVERITY_INFO, SEVERITY_WRN
 from .util import collapse_path, uri_to_path
@@ -200,6 +207,10 @@ def on_project_added(session, params):
     info = params.get('MsBuildProject')
     if _is_dict(info) and info.get('Path'):
         _track_project(session, info)
+    # a workspace load (re)started: open/refresh the quiet mode's LOADING
+    # phase - OmniSharp floods its per-project loading logMessages BEFORE
+    # the background-analysis sweep's Started event arrives
+    session.plog.analysis_touch(projects=len(_tracked_projects(session)))
     _project_event(session, params, 'added')
 
 
@@ -207,6 +218,7 @@ def on_project_changed(session, params):
     info = params.get('MsBuildProject')
     if _is_dict(info) and info.get('Path'):
         _track_project(session, info)
+    session.plog.analysis_touch(projects=len(_tracked_projects(session)))
     _project_event(session, params, 'changed')
     # VS Code: server.onProjectChange -> _validateAllPipe - the project's
     # compilation context changed, open documents need fresh diagnostics
@@ -219,6 +231,7 @@ def on_project_removed(session, params):
     info = params.get('MsBuildProject')
     if _is_dict(info) and info.get('Path'):
         _untrack_project(session, info)
+    session.plog.analysis_touch(projects=len(_tracked_projects(session)))
     _project_event(session, params, 'removed')
 
 
@@ -310,28 +323,58 @@ def _workspace_summary(session):
 
 
 def on_background_diagnostic_status(session, params):
+    """ OmniSharp's workspace-wide sweep (o#/backgrounddiagnosticstatus):
+    Status 0=Started, 1=Progress, 2=Finished. THE big-workspace flood
+    driver - one Started/Finished pair wraps thousands of messages
+    (logMessage per project step, publishDiagnostics per file, and their
+    Spy twins). It drives the store's background-analysis quiet mode
+    (panel.LogStore.analysis): while the sweep runs, the panel shows a
+    compact progress page and the flood categories are counted, not
+    stored/rendered - the finish line reports what was hidden. This is
+    the VS Code model: progress goes to the status bar, log streams below
+    warning level are dropped, the output channel is not live-rendered.
+    """
     status = params.get('Status')
     if not isinstance(status, int):
         return
     total = params.get('NumberFilesTotal') or 0
     remaining = params.get('NumberFilesRemaining') or 0
     projects = params.get('NumberProjects') or 0
+    plog = session.plog
 
     if status == 2:    # Finished
+        # OmniSharp's NumberProjects is unreliable for solution folders
+        # (it reports the .sln as ONE 'project'); the tracked
+        # o#/projectadded events are the ground truth - and they are what
+        # the bracket list shows, so the count must match the list
+        tracked = _tracked_projects(session)
+        n_projects = len(tracked) if tracked else projects
         summary = _workspace_summary(session)
-        _status(session, f'analysis finished ({total} file(s), {projects} project(s))')
+        # hidden totals BEFORE analysis_finish() drops the phase dict
+        hidden = plog.analysis_hidden_str()
+        if hidden:
+            hidden = '; ' + hidden + ' ' + _('hidden')
         _log(session,
              f'background analysis finished: {_fmt_count(total, "file")} in '
-             f'{_fmt_count(projects, "project")} [{summary}]',
+             f'{_fmt_count(n_projects, "project")} [{summary}]{hidden}',
              SEVERITY_INFO)
+        plog.analysis_finish()
+        _status(session, f'analysis finished ({total} file(s), {n_projects} project(s))')
         # VS Code: _onBackgroundAnalysis (Finished && NumberFilesRemaining
         # === 0) -> _validateAllPipe - after the background pass anything
         # still without diagnostics evidence was dropped/never registered
         if remaining == 0:
             _kick_all(session, 'background analysis finished')
     elif status == 0:  # Started
+        _log(session,
+             f'background analysis started: {_fmt_count(total, "file")} in '
+             f'{_fmt_count(projects, "project")} - log view paused while it '
+             f'runs (progress in the status bar)',
+             SEVERITY_INFO)
+        plog.analysis_start(total, projects, sweep=True)
         _status(session, f'analysis started: {total} file(s) in {projects} project(s)')
     else:              # 1 = Progress (updates are high-volume: status bar only)
+        plog.analysis_progress(remaining, total, projects)
         done = max(total - remaining, 0)
         pct = (100 * done // total) if total else 100
         _status(session, f'analyzing: {done}/{total} file(s) ({pct}%)')
@@ -384,11 +427,15 @@ def on_error(session, params):
 
 def on_package_restore_started(session, params):
     _restoring_delta(session, +1)   # VS Code Advisor: block validation
+    # a workspace load is in progress (restores come with project loading,
+    # before the sweep's Started): keep the quiet mode's clock fresh
+    session.plog.analysis_touch()
     _status(session, f'restoring NuGet packages: {_basename(params.get("FileName"))}')
 
 
 def on_package_restore_finished(session, params):
     restoring = _restoring_delta(session, -1)
+    session.plog.analysis_touch()
     fname = _basename(params.get('FileName'))
     if params.get('Succeeded'):
         _log(session, f'NuGet packages restored: {fname}', SEVERITY_INFO)
