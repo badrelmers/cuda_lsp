@@ -17,8 +17,13 @@ MODEL (LogStore) - one per server INSTANCE (Language):
   number; the view merges by it (heapq.merge of pre-sorted lists).
 
 VIEW (LspPanel) - a single bottom-panel page "LSP" (one icon), created lazily
-  when the first server starts. It follows the FOCUSED editor tab: the
-  context (store, uri) is set ONLY by Command.sync_panel() - lsp.py owns the
+  when the first server starts. It follows the ACTIVE editor tab - the
+  editor holding keyboard focus, ELSE the most recently opened/activated
+  visible tab (VS Code's 'active editor' notion: keyboard focus can sit
+  on a side panel, e.g. the project-manager tree re-focusing itself
+  right after opening a file, with no on_focus/on_tab_change fired for
+  the new tab): the context (store, uri) is set ONLY by
+  Command.sync_panel() - lsp.py owns the
   "focused tab -> server instance" resolution, nobody else touches panel
   internals. The visible messages are the focused file's diagnostics + spy
   traffic + the server-level messages of the focused file's server instance.
@@ -1404,6 +1409,13 @@ class LspPanel:
         self._need_full = True
         self._pending.clear()
         self._schedule()
+        # re-derive the CONTEXT too (coalesced): the ACTIVE tab may have
+        # changed while the page was hidden without any focus event
+        # (project-manager open) - the previous render could still be a
+        # stale placeholder. A manual picker pin still wins (sync_panel
+        # returns early while picked). This is the recovery path that
+        # made 'close the panel and reopen it' work around the bug.
+        self._request_heal()
 
     def on_cell_click(self, info):
         if info == CELL_INSTANCE:

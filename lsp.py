@@ -299,6 +299,12 @@ class Command:
         self._sesh_eds = []
         self._langs = {} # langid -> Language
         self._book = None
+        # ACTIVE EDITOR model (VS Code's notion): the most recently
+        # opened/activated/focused VISIBLE tab - the panel context's
+        # fallback when keyboard focus sits on a side panel (the project
+        # manager re-focuses its own tree right after opening a file).
+        # See _note_active_ed / _focused_ed.
+        self._last_active_ed = None
 
         self._load_config()
 
@@ -399,6 +405,21 @@ class Command:
         if opt_manual_didopen  or  not is_ed_visible(ed_self):
             return
 
+        # PANEL CONTEXT must follow the just-opened VISIBLE tab EVEN
+        # WHEN NO FOCUS EVENT FIRES: the project manager opens the file
+        # and immediately re-focuses its own tree ('avoid stealing focus
+        # by editor' - cuda_project_man.do_open_current_file), so neither
+        # on_focus nor on_tab_change runs - the panel used to stay on
+        # 'No LSP server for this file' while the server analyzed the
+        # just-opened file (error markers drawn, messages stored, nothing
+        # rendered) until the user re-focused an editor. Note the tab
+        # FIRST: the context self-heals (store registration / first
+        # message / on_lang_inited / panel re-show) resolve through the
+        # same tracker while the instance or the panel itself is still
+        # being created.
+        self._note_active_ed(ed_self)
+        self.sync_panel(ed_self)
+
         doc = self.book.get_doc(ed_self) # get existing
 
         lex = ed_self.get_prop(PROP_LEXER_FILE)
@@ -433,6 +454,7 @@ class Command:
                     lang.request_semantic_tokens(doc)
 
     def on_focus(self, ed_self):
+        self._note_active_ed(ed_self)
         doc = self.book.get_doc(ed_self)
         if doc and doc.lang and doc.lang.tree_enabled:
             doc.lang.update_tree(doc)
@@ -476,18 +498,29 @@ class Command:
             doc.lang.on_save_pre(doc)
 
     def on_close(self, ed_self):
+        self._retrack_after_close(ed_self)
         doc = self.book.get_doc(ed_self)
         if doc:
             pass;       LOG and print('on_close: '+doc.uri)
             if doc.lang:
                 doc.lang.on_close(doc)
             self.book.on_close(ed_self) # deletes doc
-            # the tab lost its server binding: if it was the focused one,
-            # the panel must not keep showing that server's content
-            self.sync_panel()
+        # the tab lost its server binding: if it was the ACTIVE one, the
+        # panel must not keep showing that server's content. Runs for
+        # EVERY close (also non-LSP tabs): when the closed tab was the
+        # tracked active editor, _retrack_after_close already moved the
+        # tracker to the newly activated neighbour tab - with no
+        # on_tab_change for programmatic activation, this sync is what
+        # makes the panel follow it. A no-op when nothing changed.
+        self.sync_panel()
 
     #NOTE: also gets called when document first activated
     def on_lexer(self, ed_self):
+        # activation of a document fires on_lexer even when NO focus
+        # event does (project-manager open): one more chance to follow
+        # the activated tab
+        self._note_active_ed(ed_self)
+        self.sync_panel(ed_self)
         doc = self.book.get_doc(ed_self)
         if doc:
             newlex = ed_self.get_prop(PROP_LEXER_FILE)
@@ -633,22 +666,82 @@ class Command:
                 return folders
         return out
 
+    def _note_active_ed(self, ed_self):
+        """ Remember the most recently OPENED / ACTIVATED / FOCUSED
+        visible tab as the ACTIVE EDITOR (see _focused_ed). Called at
+        every editor-naming event entry (on_open / on_focus /
+        on_tab_change / on_lexer) so the fallback is set even while the
+        panel does not exist yet (the first server start's registration
+        self-heal resolves through it). Background tabs are never
+        noted: is_ed_visible() fails them. """
+        if ed_self is None:
+            return
+        try:
+            if is_ed_visible(ed_self):
+                self._last_active_ed = ed_self
+        except Exception:
+            pass
+
+    def _retrack_after_close(self, ed_self):
+        """ The closed tab may be the tracked ACTIVE EDITOR: CudaText
+        then activates a NEIGHBOUR tab programmatically - with no
+        on_tab_change (that fires only for tab-header clicks) and, with
+        keyboard focus on a side panel, no on_focus either - so re-track
+        the group's now-active tab; the panel's next self-heal follows
+        it instead of pointing at a closed editor. """
+        if ed_self is None:
+            return
+        try:
+            if ed_self != getattr(self, '_last_active_ed', None):
+                return
+            self._last_active_ed = None
+            nxt = ed_group(ed_self.get_prop(PROP_INDEX_GROUP))
+            if nxt is not None and is_ed_visible(nxt):
+                self._last_active_ed = nxt
+        except Exception:
+            pass
+
     def _focused_ed(self):
         for group_ed in get_visible_eds():
             if group_ed.get_prop(PROP_FOCUSED):
                 return group_ed
+        # no editor holds KEYBOARD focus - it is on a side panel (the
+        # project-manager tree after it opened a file, the bottom panel
+        # itself, any dialog): fall back to the ACTIVE EDITOR - the most
+        # recently opened/activated/focused VISIBLE tab. Without this
+        # fallback every panel-context self-heal resolved NOTHING while
+        # the tree kept focus, and the panel stayed on a stale
+        # placeholder ('No LSP server for this file') although the
+        # server was analyzing the just-opened file.
+        led = getattr(self, '_last_active_ed', None)
+        if led is not None:
+            try:
+                if is_ed_visible(led):
+                    return led
+            except Exception:
+                pass
+            self._last_active_ed = None   # closed / no longer visible
         return None
 
     def sync_panel(self, ed_prefer=None):
-        """ Point the SINGLE LSP panel at the FOCUSED editor tab: it shows
-        the focused file's diagnostics + spy traffic + the server-level
-        messages of the focused file's server instance. Called on every tab
-        switch (with the switched-to editor as 'ed_prefer') and as a
-        self-heal (a store which registered / died / logged while not
-        shown). No server instance is created here - lazy creation belongs
-        to on_open/on_tab_change only. A manual instance-picker selection
-        is respected (the panel's 'picked' flag) until the next tab switch
-        clears it.
+        """ Point the SINGLE LSP panel at the ACTIVE editor tab: it shows
+        that tab's diagnostics + spy traffic + the server-level messages
+        of that tab's server instance. 'Active' = the editor holding
+        KEYBOARD FOCUS, else the most recently opened/activated/focused
+        VISIBLE tab (VS Code's 'active editor' notion): keyboard focus
+        can sit on a side panel - the project manager re-focuses its own
+        tree right after opening a file ('avoid stealing focus by
+        editor', cuda_project_man.do_open_current_file) - so the
+        just-opened tab fires NO on_focus and NO editor reports
+        PROP_FOCUSED; resolving by focus alone left the panel stuck on
+        'No LSP server for this file' while the server analyzed the file
+        (markers drawn, messages stored, nothing rendered). Called on
+        every open/focus/tab event (with that editor as 'ed_prefer') and
+        as a self-heal (a store which registered / died / logged while
+        not shown). No server instance is created here - lazy creation
+        belongs to on_open/on_tab_change only. A manual instance-picker
+        selection is respected (the panel's 'picked' flag) until the next
+        tab switch clears it.
         """
         panel = LspPanel.get(create=False)
         if panel is None:
@@ -657,12 +750,18 @@ class Command:
             return  # the panel is pinned to another instance's log
 
         ed_focus = None
-        if ed_prefer is not None and ed_prefer.get_prop(PROP_FOCUSED):
+        if ed_prefer is not None and (
+                ed_prefer.get_prop(PROP_FOCUSED) or is_ed_visible(ed_prefer)):
+            # the event NAMES the tab the user just opened/switched to:
+            # trust it even without keyboard focus (the project manager
+            # re-focuses its tree right after file_open, so PROP_FOCUSED
+            # can already be False again when the handler runs)
             ed_focus = ed_prefer
         if ed_focus is None:
             ed_focus = self._focused_ed()
         if ed_focus is None:
-            return  # no editor focused: keep the current context
+            return  # no active editor: keep the current context
+        self._note_active_ed(ed_focus)
 
         langs = self._tab_lang_candidates(ed_focus)
         store = None
@@ -673,6 +772,7 @@ class Command:
         panel.set_context(store, ed_uri(ed_focus))
 
     def on_tab_change(self, ed_self):
+        self._note_active_ed(ed_self)
         if SignaturesDialog.is_visible():
             SignaturesDialog.hide()
 

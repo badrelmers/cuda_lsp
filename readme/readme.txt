@@ -368,13 +368,21 @@ which send no 'o#/...' events (every non-OmniSharp server) are never
 affected: the quiet mode cannot even open for them.
 
 Every server instance has its own message store; nothing is ever mixed.
-The panel's context is always re-derived from the focused tab - on EVERY
-focus change: opening a file (a new tab), switching tabs, switching
+The panel's context is always re-derived from the ACTIVE editor tab -
+VS Code's notion of the active editor, independent of keyboard focus:
+the editor holding keyboard focus, else the most recently opened/
+activated visible tab. This covers EVERY way a tab becomes the one you
+are looking at: opening a file (File>Open, drag&drop, the project
+manager - which re-focuses its own tree after the open, firing NO focus
+event: the open itself syncs the panel), switching tabs, switching
 editor groups (CudaText fires its on_focus event for all of them;
 on_tab_change fires only for real tab switches - verified in the
-editor's own source), and self-correcting when a server instance finishes
-initializing and starts
-sending its analysis) - it can never get stuck on another tab's messages.
+editor's own source), and self-correcting when a server instance
+finishes initializing and starts sending its analysis, when any of its
+messages arrive, and when the panel page is re-shown (the
+close-and-reopen recovery, now automatic) - it can never get stuck on
+another tab's messages or on the 'No LSP server for this file'
+placeholder while a server is analyzing the file.
 Diagnostics entries show the exact column range of the problem - the raw
 zero-based positions the server reported, e.g. 'Line 131:
 [csharp,Hint:IDE0055]: Fix formatting (21-22)' (LSP's Diagnostic.range is
