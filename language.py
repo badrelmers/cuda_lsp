@@ -99,7 +99,17 @@ DEBUG_MESSAGES = False
 DBG = LOG
 LOG_NAME = 'LSP'
 
-DEBUG_DEV = True # enable spying of request/response messages in LSP panel ('Spy' category)
+# 'spy_messages' option (cuda_lsp.json, default False): log every
+# JSON-RPC message of every server into the panel's 'Spy' category.
+# This used to be hardcoded DEBUG_DEV=True, which attached the spy to
+# EVERY server and paid json.dumps() of the complete raw body of every
+# message (completion responses can be hundreds of KB) on every
+# keystroke, just to truncate it at SPY_MSG_LIMIT - pure waste when the
+# user never looks at the Spy category. Set by lsp.py at plugin start.
+# The 'spy_file' option is independent: when set, the FULL untruncated
+# stream is written to that file (the spy is then attached for it even
+# with 'spy_messages': false).
+SPY_MESSAGES = False
 # spy: max chars of a message body, longer bodies get truncated in the panel.
 # DEFAULT - overridden by the cuda_lsp.json option 'log_spy_msg_limit'
 # (set by lsp.py at plugin start; <= 0 = never truncate)
@@ -122,8 +132,14 @@ SNIP_ID = 'cuda_lsp__snip'
 
 TCP_CONNECT_TIMEOUT = 5     # sec
 MAX_FORMAT_ON_SAVE_WAIT = 1 # sec
+# TimerScheduler periods (ms): 10 ms while messages are flowing (every
+# send restarts the fast period), growing to 100 ms when idle. They used
+# to be 10/10 - min==max accidentally disabled the idle back-off, so
+# every server woke the process 100 times per second forever, even fully
+# idle; request/response latency is unaffected because each send
+# restarts the fast period.
 MIN_TIMER_TIME = 10     # ms
-MAX_TIMER_TIME = 10    # ms
+MAX_TIMER_TIME = 100    # ms
 # 'auto' resync_after_open: how long to wait after didOpen for evidence
 # that the server processed it (a publishDiagnostics for the file - any
 # content, even 0 entries) before sending the full-text didChange; server
@@ -142,6 +158,11 @@ GOTO_RESPONSE_TYPES = {
 # lsp.py for how this is used). Compared case-insensitively against
 # initialize's serverInfo.name.
 KNOWN_SINGLE_ROOT_SERVERS = {'omnisharp'}
+
+# request_positions cap: see Language._save_req_pos - a server which never
+# answers (or a canceled request) would otherwise leak entries all session
+REQUEST_POSITIONS_CAP = 64
+
 CALLABLE_COMPLETIONS = {
     lsp.CompletionItemKind.Method,
     lsp.CompletionItemKind.Function,
@@ -172,7 +193,6 @@ class Language:
     def __init__(self, cfg, cmds=None, lintstr='', underline_style=None):
         self._shutting_down = None  # scheduled shutdown when not yet initialized
         self.shutdown_start_time = None
-        if DEBUG_DEV: print(">>> DEBUG_DEV cfg:",cfg)
 
         self._last_complete = None
         self._cfg = cfg
@@ -186,7 +206,6 @@ class Language:
         self._server_cmd = cfg.get(CMD_OS_KEY)
         self._tcp_port = cfg.get('tcp_port') # None => use Popen
         self._work_dir = cfg.get('work_dir')
-        if DEBUG_DEV: print(">>> DEBUG_DEV _work_dir",self._work_dir)
         # "single_root" servers: they only read rootUri from 'initialize'
         # and ignore workspaceFolders / didChangeWorkspaceFolders entirely
         # (OmniSharp - see its source: the handlers are simply not
@@ -284,7 +303,7 @@ class Language:
                 callback=self._timer_callback,
                 mintime=MIN_TIMER_TIME,
                 maxtime=MAX_TIMER_TIME,
-                delta=10,
+                delta=5,
             )
 
         self.request_positions = {} # RequestPos
@@ -292,6 +311,10 @@ class Language:
         self.progresses = {} # token -> progress start message
 
         self._closed = False
+        # set by the reader thread when the server's stream ended WITHOUT
+        # a plugin-initiated shutdown (process crash / kill / TCP loss);
+        # _handle_server_gone() then removes the instance (see _read_loop)
+        self._server_gone = False
 
         # 'auto' resync state: uri -> (eddoc, due_at_ms). Populated by
         # _schedule_resync() after didOpen; emptied by evidence that the
@@ -362,8 +385,13 @@ class Language:
                 process_id=os.getpid(),
                 settings=expand_dict_dots(self._cfg["settings"]),
                 # attach the spy *at construction*, so even the very first
-                # 'initialize' request is spied
-                spy=(self._on_spy_message if DEBUG_DEV else None),
+                # 'initialize' request is spied - but ONLY when the user
+                # asked for it: 'spy_messages' (panel Spy category) or
+                # 'spy_file' (full raw stream to a file). The old hardcoded
+                # DEBUG_DEV=True attached it to EVERY server and paid
+                # json.dumps() of every message body for nothing.
+                spy=(self._on_spy_message
+                     if (SPY_MESSAGES or SPY_FILE) else None),
             )
             self._start_server()
         return self._client
@@ -437,8 +465,12 @@ class Language:
                       LOG_NAME, self.lang_str, self._tcp_port))
                 return
 
-            self._reader = self.sock.makefile('rwb')  # type: ignore
-            self._writer = self._reader
+            # TWO buffered file objects: one read by the reader thread, one
+            # written by the writer thread. The old single makefile('rwb')
+            # served BOTH sides - one object read and written concurrently
+            # is not thread-safe.
+            self._reader = self.sock.makefile('rb')  # type: ignore
+            self._writer = self.sock.makefile('wb')  # type: ignore
 
         def connect_via_stdin():
             print(_('{}: starting server - {}; root: {}').format(
@@ -546,8 +578,17 @@ class Language:
 
                 if header_bytes == b'':
                     pass;       LOG and print('NOTE: reader stopping')
-                    res = os.waitpid(-1, os.WNOHANG if not IS_WIN else 0) # Alexey's fix
-                    pass;       LOG and print(f'+ wait result: {res}')
+                    # Reap ONLY our own child. The old os.waitpid(-1, ...)
+                    # waited for and reaped ANY child of the whole CudaText
+                    # process - stealing exit statuses of OTHER plugins'
+                    # subprocesses (cuda_runner, formatters, anything they
+                    # spawn). Bounded, so a hung process cannot hang the
+                    # reader thread too.
+                    if self.process is not None:
+                        try:
+                            self.process.wait(timeout=3)
+                        except Exception:
+                            pass
                     break
 
                 try:
@@ -567,6 +608,20 @@ class Language:
         except Exception as ex:
             print(f'ReadLoopError: {LOG_NAME}: {self.lang_str} - {ex}')
         self._send_q.put_nowait(None) # stop send_loop()
+
+        # The server's stream ended. When that was NOT a plugin-initiated
+        # shutdown (exit()'s _closed, shutdown()'s shutdown_start_time /
+        # _shutting_down), the server DIED: crash, external kill, TCP
+        # loss. Flag it for the UI thread - a dead instance must not sit
+        # in Command._langs forever, silently eating every request
+        # ('crashed server = dead feature' until a manual 'Shutdown
+        # server'). _handle_server_gone() (called from process_queues on
+        # the UI thread) removes the instance; the next file open / tab
+        # switch starts a fresh server lazily.
+        if (not self._closed and self.shutdown_start_time is None
+                and self._shutting_down is None and not self._server_gone):
+            self._server_gone = True
+            self._console_q.put(('_server_gone', ''))
 
     def _send_loop(self):
         exception = None  # type: Optional[Exception]
@@ -621,7 +676,7 @@ class Language:
                             err_str = err_str[:limit] + '...'
                         msg_status(f'{LOG_NAME}: {self.lang_str}: unsupported msg: {err_str}')
                         pass;       LOG and self.plog.log_str(f'unsupported msg: {err}', type_='dbg', severity=SEVERITY_ERR)
-                        if DEBUG_DEV:
+                        if SPY_MESSAGES:
                             # make parsing errors visible in the spy stream too
                             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
                             self.plog.log_str(f'[{timestamp}] \u2588\u2588\u2588 RECV ERROR unsupported: {err}', type_=TYPE_SPY, severity=SEVERITY_ERR)
@@ -659,6 +714,11 @@ class Language:
             # panel re-renders coalesced - no flush() needed)
             while not self._console_q.empty():
                 type_, s = self._console_q.get()
+                if type_ == '_server_gone':
+                    # reader-thread marker: the server died unexpectedly
+                    # (see _read_loop / _handle_server_gone)
+                    self._handle_server_gone()
+                    continue
                 self.plog.log_str(s, type_=type_)
 
         except Exception as ex:
@@ -983,23 +1043,29 @@ class Language:
         return None
 
     def _on_spy_message(self, direction, content, method=None):
-        """ DEBUG_DEV message spy: log every JSON-RPC message (raw JSON, both
-        directions) to the LSP panel's 'Spy' category, tagged with the
-        document uri it belongs to (per-file scope). Registered on the
-        sansio client via Client(spy=...), which calls it for every complete
-        message - before/independently of message parsing. Never raises.
+        """ Message spy ('spy_messages' / 'spy_file' options): log every
+        JSON-RPC message (raw JSON, both directions) to the LSP panel's
+        'Spy' category, tagged with the document uri it belongs to
+        (per-file scope), and/or append the full untruncated stream to
+        SPY_FILE. Registered on the sansio client via Client(spy=...) -
+        only when at least one of the two options is on - which calls it
+        for every complete message, before/independently of message
+        parsing. Never raises.
 
-        BACKGROUND-ANALYSIS QUIET MODE: while the store is in its analysis
-        phase (a workspace-wide sweep is running - thousands of messages on
-        a big solution), the raw-JSON twin of the flood is tamed BEFORE the
-        serialization, which is the whole point: json.dumps of every
-        publishDiagnostics/logMessage body is the flood's biggest CPU cost.
-        Server-level traffic (uri == None: logMessage, o#/... events, every
-        response) is skipped entirely and only counted in the analysis'
-        hidden totals; per-file traffic (publishDiagnostics etc.) keeps a
-        compact BODYLESS line so the file stays listed in the instance
-        picker at ~zero cost. SPY_FILE (the 'spy_file' option) still gets
-        the FULL untruncated stream - the debug escape hatch.
+        With 'spy_messages': false (default) and 'spy_file' set, ONLY the
+        file is written: no dumps-then-truncate work for the panel at all.
+
+        BACKGROUND-ANALYSIS QUIET MODE (panel part only): while the store
+        is in its analysis phase (a workspace-wide sweep is running -
+        thousands of messages on a big solution), the raw-JSON twin of the
+        flood is tamed BEFORE the serialization, which is the whole point:
+        json.dumps of every publishDiagnostics/logMessage body is the
+        flood's biggest CPU cost. Server-level traffic (uri == None:
+        logMessage, o#/... events, every response) is skipped entirely and
+        only counted in the analysis' hidden totals; per-file traffic
+        (publishDiagnostics etc.) keeps a compact BODYLESS line so the
+        file stays listed in the instance picker at ~zero cost. SPY_FILE
+        still gets the FULL untruncated stream - the debug escape hatch.
         """
         try:
             # 1. Determine type and direction
@@ -1025,15 +1091,22 @@ class Language:
 
             # 3. Serialize ONCE; the panel gets the truncated body, the
             # optional SPY_FILE gets the full one (persistent handle).
-            # During the analysis phase the dumps is SKIPPED unless SPY_FILE
-            # needs it (see the docstring).
-            an = getattr(self.plog, 'analysis', None)
+            # The dumps is needed only when SPY_FILE wants it, or when the
+            # PANEL part runs and is not in its analysis phase (see the
+            # docstring) - with 'spy_messages' off and no 'spy_file' this
+            # callback is not attached at all, and even a runtime toggle
+            # pays nothing here.
+            an = (getattr(self.plog, 'analysis', None)
+                  if SPY_MESSAGES else None)
             body = None
-            if SPY_FILE or an is None:
+            if SPY_FILE or (SPY_MESSAGES and an is None):
                 body = json.dumps(content, ensure_ascii=False)
 
             if SPY_FILE:
                 self._spy_file_write(way, kind, name, body)
+
+            if not SPY_MESSAGES:
+                return   # panel 'Spy' category disabled - file part done
 
             if an is not None:
                 uri = self._spy_msg_uri(content)
@@ -2006,6 +2079,52 @@ class Language:
         self.client.workspace_symbol(query='')
 
 
+    def kill_process(self):
+        """ Kill the server process and reap it - ONLY our own child, never
+        os.waitpid(-1) (which reaps ANY child of the whole CudaText process,
+        stealing exit statuses of other plugins' subprocesses). Safe to
+        call repeatedly, and for TCP instances (no process). Used by
+        Command.on_exit for stragglers which ignored the graceful
+        shutdown: a server must not survive CudaText as an orphaned
+        process. """
+        if self.process is None:
+            return
+        try:
+            if self.process.poll() is None:
+                self.process.kill()
+        except Exception:
+            pass
+        try:
+            self.process.wait(timeout=1)   # reap our own child
+        except Exception:
+            pass
+
+    def _handle_server_gone(self):
+        """ The reader thread saw the server's stream end WITHOUT any
+        plugin-initiated shutdown and queued the '_server_gone' marker;
+        process_queues() calls this on the UI thread. The instance is
+        dead: reap/kill the process, tell the user, and ask
+        Command.on_server_died (via the plugin-command channel, like
+        on_lang_inited) to remove the instance and detach its documents -
+        their tabs then re-bind lazily (on_tab_change -> on_open ->
+        _get_lang starts a FRESH server, VS Code's auto-restart model).
+        """
+        if self._closed or not self._server_gone:
+            return
+        text = _('server exited unexpectedly; the instance is removed - it '
+                 'will be restarted on the next file open / tab switch')
+        print(f'{LOG_NAME}: {self.lang_str} - {text}')
+        msg_status(f'{LOG_NAME}: {self.lang_str} - {text}')
+        try:
+            self.plog.log_str(text, type_=TYPE_LOG, severity=SEVERITY_ERR)
+        except Exception:
+            pass
+        # nothing left to be graceful with: kill stragglers, reap our child
+        self.kill_process()
+        # deferred (CudaText queues plugin commands): Command.on_server_died
+        # removes the instance from _langs, detaches its docs, calls exit()
+        app_proc(PROC_EXEC_PLUGIN, 'cuda_lsp,on_server_died,'+self.name)
+
     def shutdown(self, *args, **vargs):
         pass;       LOG and print('-- lang - shutting down')
         if self.client.is_initialized:
@@ -2099,6 +2218,12 @@ class Language:
         _cursor = app_proc(PROC_GET_MOUSE_POS, '') # screen coords
         cursor_ed = ed.convert(CONVERT_SCREEN_TO_LOCAL, *_cursor)
         _req = RequestPos(h,  carets=carets,  target_pos_caret=target_pos_caret,  cursor_ed=cursor_ed)
+        # cap: entries are popped when a response arrives, but a server
+        # which never answers (or a canceled request) leaks them for the
+        # whole session. They are stale anyway (positions of long-gone
+        # carets) - drop the oldest beyond the cap.
+        while len(self.request_positions) >= REQUEST_POSITIONS_CAP:
+            self.request_positions.pop(next(iter(self.request_positions)))
         self.request_positions[id] = _req
 
 
@@ -2695,10 +2820,6 @@ class ServerConfig:
         # 'textDocument/didOpen' => 'didopen'
         supported_names = {reg.method.split('/')[-1].lower() for reg in self.capabs}
         res = {**cmds}
-        if DEBUG_DEV:
-            print(">>> DEBUG_DEV capabs",self.capabs)
-            print(">>> DEBUG_DEV supported_names",supported_names)
-            print(">>> DEBUG_DEV res",res)
         for name in cmds:
             # 'Type definition' => 'typedefinition'
             name_tmp = name.lower().replace(' ', '')

@@ -8,7 +8,10 @@ ver = sys.version_info
 if (ver.major, ver.minor) < (3, 8):
     msg = _('LSP: current Python version is not supported. '
             'Please upgrade to Python 3.8 or newer.')
-    callback = lambda *args, msg=msg, **vargs: msg_box(msg, MB_OK or MB_ICONWARNING)
+    # MB_OK + MB_ICONWARNING (the documented idiom): 'MB_OK or
+    # MB_ICONWARNING' relied on MB_OK being 0/falsy to evaluate to the
+    # icon at all - a fragile way to combine flags
+    callback = lambda *args, msg=msg, **vargs: msg_box(msg, MB_OK + MB_ICONWARNING)
     timer_proc(TIMER_START_ONE, callback, 1000)
 else:
     from .lsp import Command

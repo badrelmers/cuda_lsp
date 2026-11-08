@@ -2,7 +2,7 @@ import time
 from difflib import SequenceMatcher
 from cudatext import *
 from lsprotocol import types as lsp
-from .util import get_first, lex2langid, ed_uri, get_word
+from .util import get_first, lex2langid, ed_uri, forget_ed_uri, get_word
 import traceback
 import datetime
 
@@ -26,6 +26,9 @@ class DocBook:
     def on_close(self, ed):
         eddoc = self._get_doc(ed=ed)
         del self.docs[eddoc.uri]
+        # drop the closed untitled tab's dedupe record (real files never
+        # enter that map - see util.ed_uri)
+        forget_ed_uri(ed)
 
     def _get_doc(self, *args, ed=None, uri=None):
         assert not args, 'only call _get_doc() w/ named arguments'

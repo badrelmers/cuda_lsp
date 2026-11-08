@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -62,6 +63,11 @@ LINT_STYLE_MAP = {0:1, 1:4, 2: 2, 3:6}
 STATE = {} # like log-panel's filter state
 
 opt_spy_file = ''
+# 'spy_messages': log every JSON-RPC message into the panel 'Spy' category.
+# Default False - the old hardcoded debug flag attached the spy to EVERY
+# server and paid json.dumps() of every message body on every keystroke.
+# Independent of 'spy_file' (full untruncated raw stream to a file).
+opt_spy_messages = False
 
 # LSP log panel limits (see readme/options_description.md):
 # ring-buffer sizes in messages; 'log_spy_msg_limit' in chars per spy body.
@@ -841,6 +847,43 @@ class Command:
             # while the instance was initializing)
             self.sync_panel()
 
+    def on_server_died(self, name):
+        """ A server instance died unexpectedly (process crash / external
+        kill / TCP loss; Language._handle_server_gone flags it from the
+        reader thread and asks for this via the plugin-command channel).
+        Remove the dead instance and detach its documents: their tabs
+        re-bind lazily on the next open / tab change (on_tab_change ->
+        on_open -> _get_lang starts a FRESH server) - instead of the old
+        behavior where a crashed server stayed in _langs forever and the
+        feature silently died until a manual 'Shutdown server'.
+        'name' is the bare server config name - several instances
+        (per-folder) can share it, so only instances flagged dead are
+        removed. """
+        dead = []
+        seen = set()
+        for lang in self._langs.values():
+            if id(lang) in seen:
+                continue
+            seen.add(id(lang))
+            if lang.name == name and getattr(lang, '_server_gone', False):
+                dead.append(lang)
+
+        for lang in dead:
+            # remove every _langs key pointing at the dead instance
+            # (one instance can sit under several keys)
+            for key in [k for k, v in self._langs.items() if v is lang]:
+                del self._langs[key]
+            # detach its docs: the tabs re-bind to a fresh instance lazily
+            for doc in self.book.get_docs():
+                if doc.lang is lang:
+                    doc.update(lang=None)
+            # stop timers/queues, close the socket, forget the log store
+            lang.exit()
+
+        if dead:
+            # the focused tab may have been showing the dead instance
+            self.sync_panel()
+
     def on_state(self, ed_self, state):
         if state == APPSTATE_SESSION_LOAD_BEGIN: # started
             self.is_loading_sesh = True
@@ -987,8 +1030,6 @@ class Command:
                 SignaturesDialog.hide()
 
     def on_exit(self, *args, **vargs):
-        import json
-
         #### save state before exiting
         # the panel view state (filter/wrap toggles) is global - one entry
         panel = LspPanel.get(create=False)
@@ -1023,11 +1064,18 @@ class Command:
             if time.time() - _start > opt_servers_shutdown_max_time:
                 break
 
-        if not IS_WIN:
-            try:
-                os.waitpid(-1, os.WNOHANG) # -1 -- any child
-            except ChildProcessError:
-                pass
+        # stragglers: a server which ignored the graceful shutdown must
+        # NOT survive CudaText as an orphaned process - kill and reap OUR
+        # OWN children. (This used to be os.waitpid(-1, WNOHANG): -1 waits
+        # for/reaps ANY child of the whole CudaText process, stealing exit
+        # statuses of other plugins' subprocesses, e.g. cuda_runner's.)
+        seen = set()
+        for lang in list(self._langs.values()):
+            if id(lang) in seen:
+                continue
+            seen.add(id(lang))
+            lang.kill_process()
+        self._langs.clear()
 
 
     def _get_lang(self, ed_self, langid):
@@ -1422,6 +1470,7 @@ class Command:
         global opt_complete_from_text
         global opt_diagnostics_in_a_corner
         global opt_spy_file
+        global opt_spy_messages
         global opt_log_cap_server_msgs
         global opt_log_cap_file_spy
         global opt_log_spy_msg_limit
@@ -1478,6 +1527,8 @@ class Command:
             # language.SPY_FILE
             opt_spy_file = j.get('spy_file', '')
             language.SPY_FILE = opt_spy_file
+            opt_spy_messages = bool(j.get('spy_messages', opt_spy_messages))
+            language.SPY_MESSAGES = opt_spy_messages
 
             # LSP log panel limits (module globals are read at log time, so
             # runtime updates propagate to running instances immediately)
@@ -1601,6 +1652,7 @@ class Command:
             'use_markers':               opt_use_markers,
             'diagnostics_in_a_corner':   opt_diagnostics_in_a_corner,
             'spy_file':                  opt_spy_file,
+            'spy_messages':              opt_spy_messages,
             'log_cap_server_msgs':       opt_log_cap_server_msgs,
             'log_cap_file_spy':          opt_log_cap_file_spy,
             'log_spy_msg_limit':         opt_log_spy_msg_limit,
@@ -1627,10 +1679,7 @@ class Command:
         """ only use before exiting
         """
         for lang in self._langs.values():
-            try:
-                lang.process.kill()
-            except:
-                pass
+            lang.kill_process()
 
 
 

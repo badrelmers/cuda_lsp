@@ -5,6 +5,16 @@
     * 1 - first directory in project
     * 2 - project main-file's directory
 
+* spy_messages - enable the LSP panel's 'Spy' category: every JSON-RPC message of
+  every server (both directions) is logged into the panel, tagged with the document
+  it belongs to, bodies truncated at 'log_spy_msg_limit' chars. Default false - the
+  spy used to be hardcoded on, which serialized (json.dumps) the complete raw body
+  of every message (completion responses can be hundreds of KB) on every keystroke
+  for a category most users never open. Turn it on when debugging the protocol;
+  independent of 'spy_file' (setting spy_file alone still captures the full stream
+  into the file, without the panel category). While a background analysis runs,
+  the panel's spy flood is compacted/hidden anyway (see the quiet mode).
+
 * spy_file - full LSP message log file path (default is empty = off). When set, EVERY
   JSON-RPC message of every server (both directions, all servers) is appended to that
   file as one line with the complete untruncated JSON body (via a persistent

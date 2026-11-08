@@ -98,14 +98,47 @@ def path_to_uri(path):
     answers those with a DIFFERENTLY spelled uri, see canonical_uri). """
     return canonical_uri(pathlib.Path(path).as_uri())
 
+# untitled-tab uri dedupe: tab handle -> [title, assigned uri]. Two
+# unsaved tabs can carry the SAME title (session restore, split views,
+# plugin-made tabs): they must never share one LSP document identity -
+# DocBook is keyed by uri, so the second new_doc() would silently
+# OVERWRITE the first tab's doc, and _get_doc()'s uri fallback would
+# cross-match the sibling tabs. The '~2', '~3' suffix keeps the uris
+# distinct; records are keyed by tab handle (stable for the tab's
+# lifetime) and re-validated against the title on every call (a handle
+# reused after an untracked close must not inherit a stale uri).
+_UNTITLED_URIS = {}
+
 def ed_uri(ed):
     fn = ed.get_filename('*') # '*' get filepath for image/binary tabs too
     if fn:
         #return 'file://'+ed.get_filename()
         return path_to_uri(fn)
-    else:
-        return canonical_uri(
-            'file:///'+ed.get_prop(ct.PROP_TAB_TITLE).lstrip('*'))
+    # unsaved tab: 'file:///<tab title>' names no real file - percent-
+    # encoded by canonical_uri, and DEDUPED here (see _UNTITLED_URIS)
+    title = (ed.get_prop(ct.PROP_TAB_TITLE) or '?').lstrip('*')
+    h = ed.get_prop(ct.PROP_HANDLE_SELF)
+    rec = _UNTITLED_URIS.get(h)
+    if rec is not None and rec[0] == title:
+        return rec[1]
+    uri = canonical_uri('file:///' + title)
+    taken = {u for _t, u in _UNTITLED_URIS.values()}
+    n = 2
+    while uri in taken:
+        uri = canonical_uri('file:///{}~{}'.format(title, n))
+        n += 1
+    _UNTITLED_URIS[h] = (title, uri)
+    return uri
+
+def forget_ed_uri(ed):
+    """ The tab closed: drop its untitled-uri dedupe record (real files
+    never enter the map). Called by DocBook.on_close; a tab closed without
+    ever becoming an LSP document leaves a stale record at most - harmless,
+    the title check on lookup never matches a different title. """
+    try:
+        _UNTITLED_URIS.pop(ed.get_prop(ct.PROP_HANDLE_SELF), None)
+    except Exception:
+        pass
 
 def uri_to_path(uri):
 
