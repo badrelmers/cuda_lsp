@@ -1,0 +1,101 @@
+From f37390893f127b2ff7f38cb3b4a4ad08308f7c9d Mon Sep 17 00:00:00 2001
+From: pylsp-mypy fix <noreply@localhost>
+Date: Tue, 10 Nov 2026 07:59:04 +0000
+Subject: [PATCH] Fix Windows hang: pass stdin=DEVNULL to mypy/dmypy
+ subprocesses
+
+When pylsp runs over stdio, any child spawned with
+subprocess.run(..., capture_output=True) and no stdin= inherits pylsp's
+stdin - the pipe that carries the LSP protocol from the editor. While
+pylsp's reader thread has a blocking read pending on that pipe (i.e.
+whenever the server is idle), the child hangs at startup on Windows and
+only completes when the next client message arrives. Result: mypy
+diagnostics always lag one event behind and appear only after the next
+edit or save.
+
+mypy never reads stdin and dmypy detaches when it daemonizes, so nothing
+is lost by giving them DEVNULL. ruff is unaffected because it spawns its
+process with stdin=PIPE already.
+
+Reproduced on Windows: a parent holding a pipe with a blocked reader
+thread plus a child inheriting that pipe as stdin hangs indefinitely;
+with stdin=DEVNULL the same child finishes in ~0.1s.
+---
+ pylsp_mypy/backend.py | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/pylsp_mypy/backend.py b/pylsp_mypy/backend.py
+index 6e2047a..3fcd26c 100644
+--- a/pylsp_mypy/backend.py
++++ b/pylsp_mypy/backend.py
+@@ -52,8 +52,8 @@ class MypyCommandBackend(Backend):
+     def run(self, command: list[str], args: list[str]) -> tuple[str, str, int]:
+         log.info(f"executing mypy {args=} on PATH")
+         completed_process = subprocess.run(
+-            [*command, *args], capture_output=True, **windows_flag, encoding="utf-8"
+-        )
++            [*command, *args], capture_output=True, **windows_flag, encoding="utf-8",
++        stdin=subprocess.DEVNULL)
+         report = completed_process.stdout
+         errors = completed_process.stderr
+         exit_status = completed_process.returncode
+@@ -117,8 +117,8 @@ class DmypyCommandBackend(Backend):
+         # run to use existing daemon or restart if required
+         log.info(f"dmypy run {args=} on PATH")
+         completed_process = subprocess.run(
+-            [*command, *args], capture_output=True, **windows_flag, encoding="utf-8"
+-        )
++            [*command, *args], capture_output=True, **windows_flag, encoding="utf-8",
++        stdin=subprocess.DEVNULL)
+         report = completed_process.stdout
+         errors = completed_process.stderr
+         exit_status = completed_process.returncode
+@@ -138,7 +138,7 @@ class DmypyCommandBackend(Backend):
+             capture_output=True,
+             **windows_flag,
+             encoding="utf-8",
+-        )
++        stdin=subprocess.DEVNULL)
+         errors = completed_process.stderr
+         exit_status = completed_process.returncode
+         if exit_status != 0:
+@@ -150,7 +150,7 @@ class DmypyCommandBackend(Backend):
+                 capture_output=True,
+                 **windows_flag,
+                 encoding="utf-8",
+-            )
++            stdin=subprocess.DEVNULL)
+ 
+     def hover(self, command: list[str], args: list[str]) -> tuple[str, str, int]:
+         # Kill if hung
+@@ -158,8 +158,8 @@ class DmypyCommandBackend(Backend):
+ 
+         log.info(f"dmypy inspect {args=} on PATH")
+         completed_process = subprocess.run(
+-            [*command, *args], capture_output=True, **windows_flag, encoding="utf-8"
+-        )
++            [*command, *args], capture_output=True, **windows_flag, encoding="utf-8",
++        stdin=subprocess.DEVNULL)
+         report = completed_process.stdout
+         errors = completed_process.stderr
+         exit_status = completed_process.returncode
+@@ -171,7 +171,7 @@ class DmypyCommandBackend(Backend):
+             capture_output=True,
+             **windows_flag,
+             encoding="utf-8",
+-        )
++        stdin=subprocess.DEVNULL)
+         output, errors = completed_process.stdout, completed_process.stderr
+         exit_status = completed_process.returncode
+         if exit_status != 0:
+@@ -186,6 +186,6 @@ class DmypyCommandBackend(Backend):
+                 **windows_flag,
+                 encoding="utf-8",
+                 check=True,
+-            )
++            stdin=subprocess.DEVNULL)
+         else:
+             log.info(f"dmypy stopped on PATH: {output.strip()}")
+-- 
+2.47.3
+
