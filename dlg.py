@@ -66,7 +66,8 @@ class Hint:
 
         MarkupKind = lsp.MarkupKind
 
-        _cell_w, cell_h = ed.get_prop(PROP_CELL_SIZE)
+        _scale_UI_percent, _scale_font_percent = app_proc(PROC_CONFIG_SCALE_GET, '')
+        cell_h = BUTTON_H + int(4 * _scale_UI_percent * 0.01)  # ~ one md_view text line
         FORM_H = FORM_GAP*2 + ED_MAX_LINES*cell_h + BUTTON_H
 
         h = dlg_proc(0, DLG_CREATE)
@@ -98,28 +99,19 @@ class Hint:
                 })
         cls._h_sb = dlg_proc(h, DLG_CTL_HANDLE, index=cls._n_sb)
 
-        n = dlg_proc(h, DLG_CTL_ADD, 'editor')
+        n = dlg_proc(h, DLG_CTL_ADD, 'md_view')
         dlg_proc(h, DLG_CTL_PROP_SET, index=n, prop={
                 'align': ALIGN_CLIENT,
                 'sp_a': FORM_GAP,
                 'h': FORM_H,
                 'on_click_link': cls.on_click_link,
                 })
-        h_ed = dlg_proc(h, DLG_CTL_HANDLE, index=n)
-        # Editor.set_text_all() doesn't clutter edit history, so no unnecessary stuff is stored in RAM
-        edt = Editor(h_ed)
-
-        edt.set_prop(PROP_UNDO_LIMIT, 0)
-        edt.set_prop(PROP_GUTTER_ALL, False)
-        edt.set_prop(PROP_MINIMAP, False)
-        edt.set_prop(PROP_MICROMAP, False)
-        edt.set_prop(PROP_LAST_LINE_ON_TOP, False)
-        edt.set_prop(PROP_WRAP, WRAP_ON_WINDOW)
+        cls.n_md = n
 
         cls.theme_name = app_proc(PROC_THEME_UI_GET, '')
 
         dlg_proc(h, DLG_SCALE)
-        return h, edt
+        return h, None
         
     @classmethod
     def set_cursor_margin(cls, cursor_move_tolerance):
@@ -140,7 +132,7 @@ class Hint:
             if cls.h is not None: # theme changed
                 dlg_proc(cls.h, DLG_FREE)
 
-            cls.h, cls.ed = cls.init_form()
+            cls.h, _ = cls.init_form()
 
         cls.current_caret = caret # for 'Go to Definition'
         cls.cursor_pos = app_proc(PROC_GET_MOUSE_POS, '')
@@ -152,22 +144,11 @@ class Hint:
         if cursor_dist(_glob_cursor_start) > cls.cursor_margin:
             return
 
-        ### dialog Editor setup
-        cls.ed.set_prop(PROP_RO, False)
-        try:
-            if markupkind == lsp.MarkupKind.Markdown:
-                cls.ed.set_prop(PROP_LEXER_FILE, 'Markdown')
-                import html
-                text = html.unescape(text)
-                text = cls.unescape_bslash(text)
-            else:
-                cls.ed.set_prop(PROP_LEXER_FILE, None)
-
-            cls.ed.set_text_all(text)
-            cls.ed.set_prop(PROP_LINE_TOP, 0)
-            cls.ed.set_prop(PROP_SCROLL_HORZ_INFO, {'pos': 0})
-        finally:
-            cls.ed.set_prop(PROP_RO, True)
+        ### dialog md_view setup: control renders markdown itself,
+        ### colors/fonts are applied by app from current UI theme
+        dlg_proc(cls.h, DLG_CTL_PROP_SET, index=cls.n_md, prop={
+                'val': text,
+                })
 
         ### calculate dialog position and dimensions: x,y, h,w
         l,t,r,b = ed.get_prop(PROP_RECT_TEXT)
@@ -293,9 +274,6 @@ class Hint:
     @classmethod
     def hide(cls):
         if not cls.h:    return
-        # clear editor data and hide dialog
-        cls.ed.set_prop(PROP_RO, False)
-        cls.ed.set_text_all('')
         cls.current_caret = None
         dlg_proc(cls.h, DLG_HIDE)
 

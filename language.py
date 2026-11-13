@@ -76,13 +76,15 @@ def _dbg_asdict(obj):
 
 def hover_contents_str(contents):
     """ Render hover contents (lsp: MarkupContent | MarkedString | MarkedString[])
-    as a markdown-compatible string.
+    as a markdown string for the md_view control.
     """
-    def item_str(item): #SKIP
+    def item_str(item):
+        # MarkedString renders as a fenced code block, so the md_view
+        # control can apply syntax highlighting to it
         if isinstance(item, lsp.MarkedStringWithLanguage):
-            return f'[{item.language}]\n{item.value}'
+            return f'```{item.language}\n{item.value}\n```'
         elif isinstance(item, lsp.MarkupContent):
-            return f'[{item.kind}]\n{item.value}'
+            return item.value  # real markdown (kind 'markdown') or plain text
         return item if isinstance(item, str) else str(item) # str
 
     if isinstance(contents, list):
