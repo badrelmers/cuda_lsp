@@ -1,3 +1,15 @@
+2026.11.21 (by @badrelmers, round 1 with z.ai agent)
+- add: VS Code-style hover dialog for the LSP Hint (replacing the legacy
+  memo-tooltip): themed colors from the UI theme (EdTextBg/EdTextFont,
+  links from the theme's link color), a VS Code hover 'hidingDelay' hide
+  model (stays open while the mouse is over it or moving toward it, hides
+  ~300ms after the mouse leaves it and moves away), and an immediate hide
+  on Esc/typed keys/app deactivation
+- fix: hover responses rendered late - while any request was unanswered
+  the poll chain could go idle, so a response arriving after the poll
+  window waited for the next UI event (keystroke) before rendering; the
+  plugin now keeps polling the server connection until every pending
+  request is answered
 2026.11.21 (by @badrelmers)
 - change: migrated to the CudaText 1.240.0 APIs (issue #6669 follow-up): the Hint dialog's md_view no longer loads its markdown text through the control prop 'val' - prop "val" was removed from md_view by app 1.240.0; the control's int handle is cached once at form creation (dlg_proc DLG_CTL_HANDLE) and the text is set with md_proc(h_md, MD_SET_TEXT, text). The now-dead control index cache went away with it. 'texthint' and 'ex0' are also removed from md_view by the app - the plugin never used them (verified by grep), nothing to migrate
 - change: all calls of the deprecated app_idle() replaced with app_proc(PROC_IDLE, ...) (deprecated in app 1.236.0): SignaturesDialog.move_window's wrap-info pump loop (dlg.py), the format-on-save wait loop, the decompiled-source jump and the goto-position scroll fix (language.py)

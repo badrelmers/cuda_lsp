@@ -47,12 +47,13 @@
 
 * hover_dlg_max_lines - hover-dialog max lines number, default is 10.
 
+Hover dialog behavior (modeled on VS Code, `editor.hover.*` settings):
+
+* The hover has a thin 1px border and is resizable by dragging the grip in its bottom-right corner. The size you leave it at is remembered for the next hovers.
+* Once shown, the hover stays open while the mouse is over it, or moving TOWARD it - it only hides when the mouse moves away from it (after a ~300ms grace period, like VS Code's `editor.hover.hidingDelay`).
+* Immediate hides: Esc, any typed key, scrolling the editor, mouse click outside the hover, app losing focus.
+
 * hover_additional_commands - list of additional commands to show in the hover-dialog. Possible values:
-    * "definition"
-    * "references"
-    * "implementation"
-    * "declaration"
-    * "type definition"
 
 * hover_with_ctrl - if 'true', Ctrl-key must be pressed when you want to show the hover-dialog (by moving and stopping the mouse).
 

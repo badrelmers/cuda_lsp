@@ -16,7 +16,18 @@ BUTTON_H = 20
 ED_MAX_LINES = 10
 FORM_GAP = 4
 
-CURSOR_MOVE_TOLERANCE = 30
+### VSCode-derived hover timings (editorOptions.ts EditorHover defaults):
+###   delay:300  hidingDelay:300  sticky:true
+### 'hide_check_timer' models VSCode's _reactToEditorMouseMoveRunner:
+### while a sticky hover is visible, mouse-move reactions are deferred by
+### hidingDelay - the mouse gets a grace period to reach the hover before
+### any hide decision is made; if it ENTERS the hover, no hide fires at all.
+HOVER_SHOW_DELAY_MS = 300      # VSCode editor.hover.delay
+HOVER_HIDING_DELAY_MS = 300    # VSCode editor.hover.hidingDelay
+HOVER_CLOSER_TOLERANCE_PX = 4  # VSCode isMouseGettingCloser() tolerance
+HOVER_CORNER_GRIP = 16         # VSCode sash grab area, ~this size
+HOVER_MIN_W = 150              # VSCode minimumSize width
+HOVER_MIN_H = 60
 
 
 def mix_colors(c1, c2):
@@ -41,10 +52,22 @@ def is_mouse_in_form(h_dlg):
 
     return (0<=x<w and 0<=y<h)
 
-def cursor_dist(pos):
-    cursor_pos = app_proc(PROC_GET_MOUSE_POS, '')
-    dist_sqr = (pos[0]-cursor_pos[0])**2 + (pos[1]-cursor_pos[1])**2
-    return dist_sqr**0.5
+def mouse_in_form_local(h_dlg):
+    """ Mouse position in form-local coords, or None when form is hidden.
+    VSCode's isMousePositionWithinElement() equivalent. """
+    prop = dlg_proc(h_dlg, DLG_PROP_GET)
+    if not prop['vis']:
+        return None
+    x, y = app_proc(PROC_GET_MOUSE_POS, '')
+    x, y = dlg_proc(h_dlg, DLG_COORD_SCREEN_TO_LOCAL, index=x, index2=y)
+    return x, y
+
+def dist_to_form_sqr(x, y, w, h):
+    """ Squared distance from point (form-local) to form rectangle, 0 when
+    inside. VSCode's computeDistanceFromPointToRectangle() without sqrt. """
+    dx = max(0, -x, x - w + 1)
+    dy = max(0, -y, y - h + 1)
+    return dx*dx + dy*dy
 
 # cant invoke method on 'Hint' class
 def hint_callback(id_dlg, id_ctl, data='', info=''):
@@ -53,11 +76,25 @@ def hint_callback(id_dlg, id_ctl, data='', info=''):
 
 class Hint:
     """ Short-lived dialog with 'Editor', hidden when mouse leaves it
+
+    VSCode model (src/vs/editor/contrib/hover):
+    - sticky: hover stays open while the mouse is over it or GETTING CLOSER
+      to it (isMouseGettingCloser) - it never hides mid-travel toward it
+    - hidingDelay: after the mouse leaves, a grace period passes before any
+      hide decision; the first check fires after the full hidingDelay
+    - immediate hides: Esc key, mouse-down outside hover, editor scroll,
+      app deactivated
+    - resizable: corner grip; user's last size is remembered (_lastDimensions)
     """
     h = None
     theme_name = None
     current_caret = None
     re_unescape_bslash = None
+    # user's manual resize (VSCode ContentHoverWidget._lastDimensions)
+    user_w = 0
+    user_h = 0
+    resizing = False
+    closest_mouse_dist_sq = None
 
     @classmethod
     def init_form(cls):
@@ -74,6 +111,15 @@ class Hint:
 
         colors = app_proc(PROC_THEME_UI_DICT_GET, '')
         color_form_bg = colors['TabBorderActive']['color']
+        # THIN BORDER: 1px theme-colored edge (VSCode hover box-shadow look)
+        # - 'bevel' control, one on each of the 4 sides, aligned to form
+        #   edges, drawn OVER the client area (created last = on top)
+        cls.color_border = mix_colors(color_form_bg, 0x000000) # slightly darker than bg
+        try:
+            _colors2 = app_proc(PROC_THEME_UI_DICT_GET, '')
+            cls.color_border = _colors2['ListBorder']['color']
+        except Exception:
+            pass
         cls.color_btn_font = colors['ButtonFont']['color']
         cls.color_btn_back = colors['ButtonBgPassive']['color']
         cls.color_btn_font_disabled = colors['ButtonFontDisabled']['color']
@@ -83,8 +129,8 @@ class Hint:
                 'w': FORM_W + 2*FORM_GAP,
                 'border': DBORDER_NONE,
                 'color': color_form_bg,
-                # doesn't work well with embedded Editor -- using timer hide_check_timer()
-                #'on_mouse_exit': cls.dlgcolor_mouse_exit,
+                'keypreview': True,          # form-level on_key_down: Esc hides hover
+                'on_key_down': cls.form_key_down,
                 })
 
         cls._n_sb = dlg_proc(h, DLG_CTL_ADD, 'statusbar')
@@ -94,8 +140,6 @@ class Hint:
                 'sp_r': 1,
                 'sp_b': 1,
                 'h': BUTTON_H,
-                #'w': 128,
-                #'w_max': 128,
                 })
         cls._h_sb = dlg_proc(h, DLG_CTL_HANDLE, index=cls._n_sb)
 
@@ -108,6 +152,37 @@ class Hint:
                 })
         cls.h_md = dlg_proc(h, DLG_CTL_HANDLE, index=n)
 
+        ### RESIZABLE (VSCode resizableContentWidget): a corner grip
+        ### control in the bottom-right; mouse-down on it starts a drag
+        ### which resizes the form (and re-anchors statusbar/md_view).
+        ### Not DBORDER_SIZE - that draws an OS caption bar which looks
+        ### nothing like a hover.
+        grip = dlg_proc(h, DLG_CTL_ADD, 'panel')
+        dlg_proc(h, DLG_CTL_PROP_SET, index=grip, prop={
+                'name': 'grip',
+                'w': HOVER_CORNER_GRIP, 'h': HOVER_CORNER_GRIP,
+                'a_r': ('', ']'), 'a_b': ('', ']'),  # anchor right/bottom to form corner
+                'color': cls.color_border,
+                'on_mouse_down': cls.grip_mouse_down,
+                'on_mouse_move': cls.grip_mouse_move,
+                'on_mouse_up': cls.grip_mouse_up,
+                'on_mouse_enter': cls.grip_mouse_enter,
+                'on_mouse_exit': cls.grip_mouse_exit,
+                })
+        cls._n_grip = grip
+
+        ### thin border: 4 bevels on the form edges (drawn over content)
+        for side, props in (
+                ('t', {'align': ALIGN_TOP,    'h': 1}),
+                ('b', {'align': ALIGN_BOTTOM, 'h': 1}),
+                ('l', {'align': ALIGN_LEFT,   'w': 1}),
+                ('r', {'align': ALIGN_RIGHT,  'w': 1}),
+                ):
+            n = dlg_proc(h, DLG_CTL_ADD, 'bevel')
+            _p = {'name': 'brd_'+side, 'vis': True}
+            _p.update(props)
+            dlg_proc(h, DLG_CTL_PROP_SET, index=n, prop=_p)
+
         cls.theme_name = app_proc(PROC_THEME_UI_GET, '')
 
         dlg_proc(h, DLG_SCALE)
@@ -115,15 +190,14 @@ class Hint:
         
     @classmethod
     def set_cursor_margin(cls, cursor_move_tolerance):
-        _scale_UI_percent, _scale_font_percent = app_proc(PROC_CONFIG_SCALE_GET, '')
-        cls.cursor_margin = cursor_move_tolerance * _scale_UI_percent*0.01 # ~30px scaled
+        # kept for API compatibility (lsp.py may call) - VSCode model has no
+        # cursor-move-from-anchor tolerance: stickiness is handled by
+        # is_mouse_getting_closer() in hide_check_timer()
+        pass
 
     # language - from deprecated 'MarkedString'
     @classmethod
     def show(cls, text, caret, cursor_loc_start, markupkind=None, language=None, caret_cmds=None):
-
-        #if not ed.get_prop(PROP_FOCUSED):
-        #    return # show Hint only if editor is focused (and not autocompletion dialog)
 
         if not text:
             return
@@ -135,14 +209,11 @@ class Hint:
             cls.h, _ = cls.init_form()
 
         cls.current_caret = caret # for 'Go to Definition'
-        cls.cursor_pos = app_proc(PROC_GET_MOUSE_POS, '')
-        cls.tolerance = CURSOR_MOVE_TOLERANCE
-        cls.set_cursor_margin(cls.tolerance)
-
-        ### dont show dialog if cursor moved from request-position
-        _glob_cursor_start = ed.convert(CONVERT_LOCAL_TO_SCREEN, *cursor_loc_start)
-        if cursor_dist(_glob_cursor_start) > cls.cursor_margin:
-            return
+        # VSCode RenderedContentHover.initialMousePosX/Y + closestMouseDistance:
+        # remember where the mouse was when hover appeared; hide logic then
+        # only cares whether the mouse is getting CLOSER to the hover or not.
+        cls.closest_mouse_dist_sq = None
+        cls.resizing = False
 
         ### dialog md_view setup: control renders markdown itself,
         ### colors/fonts are applied by app from current UI theme;
@@ -164,6 +235,13 @@ class Hint:
         _scale_UI_percent, _scale_font_percent = app_proc(PROC_CONFIG_SCALE_GET, '')
         h = min(FORM_H * _scale_UI_percent // 100, space_h)
         w = min(FORM_W * _scale_UI_percent // 100, ed_size_x)
+
+        ### honor user's manual resize (VSCode _lastDimensions): a resized
+        ### hover re-appears with the size the user left it at
+        if cls.user_w:
+            w = cls.user_w
+        if cls.user_h:
+            h = max(cls.user_h, HOVER_MIN_H) if space_h > HOVER_MIN_H else h
 
         x = caret_loc_px[0] - int(w*0.5) # center over caret
         if x < l: # dont fit on left
@@ -189,9 +267,35 @@ class Hint:
         if caret_cmds:
             cls.fill_cmds(caret_cmds, min(FORM_W, ed_size_x))
 
-        # first - large delay, after - smaller
-        timer_proc(TIMER_START_ONE, Hint.hide_check_timer, 750, tag='initial')
+        ### VSCode timing model (hoverOperation + contentHoverController):
+        ### hide decisions are deferred by the hidingDelay grace period -
+        ### the mouse can travel to the hover without it being dismissed.
+        ### Implementation: one repeating 250ms check, armed AFTER a single
+        ### first tick at HOVER_HIDING_DELAY_MS (timer_proc restarts a
+        ### running callback, so TIMER_START_ONE reschedules any leftover).
+        timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+        timer_proc(TIMER_START_ONE, Hint.hide_check_timer, HOVER_HIDING_DELAY_MS, tag='first')
         dlg_proc(cls.h, DLG_SHOW_NONMODAL)
+
+    @classmethod
+    def is_mouse_getting_closer(cls):
+        """ VSCode ContentHoverWidget.isMouseGettingCloser(): compare current
+        mouse-to-form distance with the closest distance seen so far; when
+        the mouse moves farther than closest+tolerance (squared px), it is
+        going away - only then the hover may hide. """
+        pos = mouse_in_form_local(cls.h)
+        if pos is None:
+            return False
+        prop = dlg_proc(cls.h, DLG_PROP_GET)
+        dist_sq = dist_to_form_sqr(pos[0], pos[1], prop['w'], prop['h'])
+        if cls.closest_mouse_dist_sq is None:
+            cls.closest_mouse_dist_sq = dist_sq
+            return True
+        if dist_sq > cls.closest_mouse_dist_sq + (HOVER_CLOSER_TOLERANCE_PX ** 2) * 2:
+            # mouse is getting farther away
+            return False
+        cls.closest_mouse_dist_sq = min(cls.closest_mouse_dist_sq, dist_sq)
+        return True
 
     @classmethod
     def fill_cmds(cls, cmds, width):
@@ -228,6 +332,73 @@ class Hint:
         if data:
             apx.safe_open_url(data)
 
+    ### --- form/key events ------------------------------------------------
+
+    @classmethod
+    def form_key_down(cls, id_dlg, id_ctl, data='', info=''):
+        """ VSCode _onKeyDown: Esc hides the hover; other keys pass through.
+        Return False to block the key. """
+        if id_ctl == 27: # VK_ESCAPE
+            if cls.is_visible():
+                cls.hide()
+                ed.focus()
+                return False
+        return None
+
+    ### --- resize grip (VSCode resizableContentWidget sash) ---------------
+
+    @classmethod
+    def grip_mouse_down(cls, id_dlg, id_ctl, data='', info=''):
+        if not isinstance(data, dict):
+            cls.resizing = False
+            return
+        # remember form size + mouse screen pos at drag start
+        prop = dlg_proc(cls.h, DLG_PROP_GET)
+        cls._rs_w = prop['w']
+        cls._rs_h = prop['h']
+        cls._rs_x, cls._rs_y = app_proc(PROC_GET_MOUSE_POS, '')
+        cls.resizing = True
+        # suspend the hide-check while dragging (VSCode _isContentWidgetResizing)
+        timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+        # focus stays with editor; grip keeps receiving on_mouse_move since
+        # the button is held
+        return False
+
+    @classmethod
+    def grip_mouse_move(cls, id_dlg, id_ctl, data='', info=''):
+        if not getattr(cls, 'resizing', False) or not isinstance(data, dict):
+            return
+        mx, my = app_proc(PROC_GET_MOUSE_POS, '')
+        dw = mx - cls._rs_x
+        dh = my - cls._rs_y
+        w = max(HOVER_MIN_W, cls._rs_w + dw)
+        h = max(HOVER_MIN_H, cls._rs_h + dh)
+        dlg_proc(cls.h, DLG_PROP_SET, prop={
+                'w': w,
+                'h': h,
+                })
+        cls.user_w = w      # VSCode _lastDimensions persistence
+        cls.user_h = h
+
+    @classmethod
+    def grip_mouse_up(cls, id_dlg, id_ctl, data='', info=''):
+        if getattr(cls, 'resizing', False):
+            cls.resizing = False
+            # re-arm the hide-check for the new geometry
+            cls.closest_mouse_dist_sq = None
+            timer_proc(TIMER_START, Hint.hide_check_timer, 250, tag='')
+        return None
+
+    @classmethod
+    def grip_mouse_enter(cls, id_dlg, id_ctl, data='', info=''):
+        # cursor over grip: pause hide-check so user can grab it calmly
+        timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+
+    @classmethod
+    def grip_mouse_exit(cls, id_dlg, id_ctl, data='', info=''):
+        if not getattr(cls, 'resizing', False):
+            timer_proc(TIMER_START, Hint.hide_check_timer, 250, tag='')
+
     @classmethod
     def set_max_lines(cls, nlines):
         global ED_MAX_LINES
@@ -237,42 +408,45 @@ class Hint:
     @classmethod
     def hide_check_timer(cls, tag='', info=''):
         global app_active
-        
-        # hide if not over dialog  and  cursor moved at least ~15px
+
+        if not cls.is_visible():
+            # dialog closed already (autocompletion, Esc, app deactivate)
+            timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+            return
+
+        ### VSCode contentHoverController._onEditorMouseLeave /
+        ### _onEditorMouseMove: hide ONLY when all of these are false:
+        ###   - app is active
+        ###   - mouse is INSIDE the hover (sticky)
+        ###   - mouse is GETTING CLOSER to the hover (isMouseGettingCloser)
+        ###   - user is dragging the resize grip
+        ###   - mouse button is held down (e.g. selecting hover text)
         left_button_down = 'L' in app_proc(PROC_GET_KEYSTATE, '')
-        
-        # give the user possibility to return cursor to Hint window
-        # decrease by 50 every time to a minimum of CURSOR_MOVE_TOLERANCE value
-        cls.tolerance = max(CURSOR_MOVE_TOLERANCE, cls.tolerance-50)
-        if left_button_down:
-            cls.tolerance = 500
-        # reset when value gets to 300
-        if cls.tolerance == 300:
-            cls.tolerance = CURSOR_MOVE_TOLERANCE # 30
-        # update cursor_margin
-        if cls.cursor_margin != cls.tolerance:
-            cls.set_cursor_margin(cls.tolerance)
-        
-        if not cls.is_visible(): #stop the timer if dialog was already closed (could be closed by autocompletion)
-            timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
-        elif app_active \
-             and not is_mouse_in_form(cls.h) \
-             and cursor_dist(cls.cursor_pos) > cls.cursor_margin \
-             and not left_button_down:
-            timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
 
-            cls.hide()
-            ed.focus()
-            #print('ed.focus in hide_check_timer()')
+        inside = is_mouse_in_form(cls.h)
+        if not inside:
+            closer = cls.is_mouse_getting_closer()
         else:
-            cls.cursor_pos = app_proc(PROC_GET_MOUSE_POS, '')                
+            # inside: reset the closest-distance tracker so a later leave
+            # restarts comparison from the actual rect distance
+            cls.closest_mouse_dist_sq = 0
+            closer = True
 
-        if tag == 'initial': # give some time to move mouse to dialog
+        if app_active and (inside or (closer and not left_button_down)) \
+           and not cls.resizing:
+            # keep open; re-arm the repeating check (timer_proc restarts
+            # a running callback with the given interval)
             timer_proc(TIMER_START, Hint.hide_check_timer, 250, tag='')
+            return
+
+        timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+        cls.hide()
+        ed.focus()
 
     @classmethod
     def hide(cls):
         if not cls.h:    return
+        if cls.resizing:  return
         cls.current_caret = None
         dlg_proc(cls.h, DLG_HIDE)
 

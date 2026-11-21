@@ -581,7 +581,10 @@ class Command:
         # require Control pressed
         if opt_hover_with_ctrl and (app_proc(PROC_GET_KEYSTATE, '') != 'c'):
             return
-        if Hint.is_under_cursor()  or  Hint.is_visible():      return
+        # VSCode _shouldKeepCurrentHover: never replace a hover the mouse
+        # is currently inside / interacting with (resizing, reading)
+        if Hint.is_under_cursor() or Hint.resizing:
+            return
 
         doc = self.book.get_doc(ed_self)
         #if ed_self.get_prop(PROP_FOCUSED):
@@ -605,6 +608,11 @@ class Command:
                 doc.lang.diagnostics_man.on_caret_slow(ed_self)
             
     def on_scroll(self, ed_self):
+        # VSCode _onEditorScrollChanged: any scroll hides the hover at once
+        # (its anchor position scrolled away, content would be stale)
+        if Hint.is_visible():
+            timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+            Hint.hide()
         if SignaturesDialog.is_visible():
             SignaturesDialog.hide()
 
@@ -1032,6 +1040,10 @@ class Command:
         elif key in (38,40) and 'c' not in state and 's' not in state and 'a' not in state:
             if SignaturesDialog.is_visible():
                 SignaturesDialog.hide()
+        # VSCode _onKeyDown: ANY non-modifier keypress dismisses a visible
+        # hover (user started typing) - modifier-only chords stay ignored
+        elif Hint.is_visible() and not state:
+            Hint.hide()
 
     def on_exit(self, *args, **vargs):
         #### save state before exiting
