@@ -110,9 +110,13 @@ directory. So the project's folders can even live in different places on disk,
 and the server is told about all of them. When you open or close a project, or
 switch between projects, running servers adapt: servers which support folder
 change notifications get them live, others are restarted with the new root.
-In short: 'work_dir' is useful only when you don't use the Project Manager,
-e.g. when all your projects live inside one big folder and you want a fixed
-root for the server regardless of the opened file.
+The SAME happens for the folders of the tree in its no-project states: the
+folder opened with "Open folder", and folders added with "Add folder..." while
+no project is open (kept in memory by the Project Manager) - they are workspace
+folders too, with no project file involved.
+In short: 'work_dir' is useful only when you don't use the Project Manager at
+all, e.g. when all your projects live inside one big folder and you want a
+fixed root for the server regardless of the opened file.
 
 Force "single-root" handling for a server (per-folder instances):
   "single_root": true

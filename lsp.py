@@ -206,7 +206,7 @@ def _projman():
 
 
 def get_workspace_roots(ed_file=None):
-    """ Workspace folders of the opened CudaText project (see readme:
+    """ Workspace folders of the Project Manager tree (see readme:
     "work_dir" / Project Manager).
 
     Returns (root, folders):
@@ -214,19 +214,23 @@ def get_workspace_roots(ed_file=None):
                 folder CONTAINING ed_file (deepest match wins), else the first
                 value of opt_root_dir_source that exists (0 - dir of the
                 '.cuda-proj' file, 1 - first folder node, 2 - main-file dir).
-      folders - ALL top-level folder nodes of the project (order kept, dupes
+      folders - ALL top-level folder nodes of the tree (order kept, dupes
                 and non-dirs dropped) - they all go to the server as LSP
                 workspaceFolders, so a project may combine folders from
                 different places on disk.
-    Both are empty when no project is opened.
+    The tree has roots in EVERY state, not only with an opened project:
+    the folder of "Open folder" and folders added with "Add folder..."
+    while no project is open are listed in 'nodes' too. Do NOT gate this
+    on global_project_info['filename'] - that key is empty in the
+    folder-only states while 'nodes' still carries their folders (and
+    the Project Manager fires APPSTATE_PROJECT_NODE_ADD/_DEL for them
+    like for any project node change).
     """
     pm = _projman()
     if pm is None:
         return None, []
 
     info = pm.global_project_info
-    if not info.get('filename'):    # no project opened
-        return None, []
 
     folders = []
     for node in info.get('nodes') or []:
