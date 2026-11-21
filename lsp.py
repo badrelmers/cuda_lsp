@@ -447,7 +447,7 @@ class Command:
             print(ex)
             return
 
-        pass;       LOG and print(f'on_open: lex, langid, filename:{lex, langid, ed_self.get_filename()} =>> lang:{lang.name if lang else "none"}')
+        pass;       LOG and print(f'on_open: lex, langid, filename:{lex, langid, ed_self.get_prop(PROP_FN)} =>> lang:{lang.name if lang else "none"}')
 
         # if have server for this lexer
         if lang:
@@ -647,7 +647,7 @@ class Command:
         langid = lex2langid(ed_self.get_prop(PROP_LEXER_FILE))
         if langid is None:
             return []
-        fn = ed_self.get_filename()
+        fn = ed_self.get_prop(PROP_FN)
         norm = os.path.normcase(os.path.normpath(fn)) if fn else None
 
         out = []
@@ -1096,7 +1096,7 @@ class Command:
         instance of the file's folder when one exists (multi-instance
         fallback), else a fresh instance is created with the best root.
         """
-        proj_root, proj_dirs = get_workspace_roots(ed_self.get_filename())
+        proj_root, proj_dirs = get_workspace_roots(ed_self.get_prop(PROP_FN))
 
         # existing instances which match this document BY CAPABILITY. That
         # is not enough to pick one: a server's documentSelector patterns
@@ -1179,7 +1179,7 @@ class Command:
            project folder);
         5. None - the caller creates the misc instance.
         """
-        fn = ed_self.get_filename()
+        fn = ed_self.get_prop(PROP_FN)
         norm = os.path.normcase(os.path.normpath(fn)) if fn else None
 
         misc = None
@@ -1256,7 +1256,7 @@ class Command:
         falls back to the 'misc' instance (single instance over all
         folders: the file gets syntax-only diagnostics there, like in the
         pre-multiroot plugin, instead of no server at all). """
-        fn = ed_self.get_filename()
+        fn = ed_self.get_prop(PROP_FN)
         folder = None
         if fn:
             norm = os.path.normcase(os.path.normpath(fn))
@@ -1440,7 +1440,7 @@ class Command:
 
         _langid = lex2langid(ed_self.get_prop(PROP_LEXER_FILE))
         lang = self._get_lang(ed_self, _langid) # uses dynamic server registrationed
-        pass;       LOG and print(f'manual didopen: lex, langid, filename:{_langid, ed_self.get_filename()} =>> lang:{lang.name if lang else "none"}')
+        pass;       LOG and print(f'manual didopen: lex, langid, filename:{_langid, ed_self.get_prop(PROP_FN)} =>> lang:{lang.name if lang else "none"}')
 
         self.book.new_doc(ed_self)
         doc = self.book.get_doc(ed_self)

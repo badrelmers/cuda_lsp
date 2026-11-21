@@ -1526,7 +1526,7 @@ class Language:
             try:
                 while time.time() < end_time:
                     if req_id in self.request_positions:
-                        app_idle(wait=True)
+                        app_proc(PROC_IDLE, True)
                     else:
                         break
                 else:
@@ -1872,7 +1872,7 @@ class Language:
         target_line = max(0, targetrange.start.line - 3)
         target_caret = (targetrange.start.character, targetrange.start.line)
         ed.set_caret(*target_caret)
-        app_idle(True)  # Ensure scroll and focus
+        app_proc(PROC_IDLE, True)  # Ensure scroll and focus
         ed.set_prop(PROP_LINE_TOP, target_line)
         
     def do_goto(self, items, dlg_caption, skip_dlg=False, reqpos=None):
@@ -1906,7 +1906,7 @@ class Language:
                 cur_line = ed.get_carets()[0][1]
                 focused = 0
                 for i,name in enumerate(names):
-                    if name[1] == cur_line+1 and name[0][0]+os.path.sep+name[0][1] == ed.get_filename():
+                    if name[1] == cur_line+1 and name[0][0]+os.path.sep+name[0][1] == ed.get_prop(PROP_FN):
                         focused = i
                         break
 
@@ -1967,7 +1967,7 @@ class Language:
             # check whether we are in unsaved tab
             fn = os.path.split(targetpath)[1]
             tab_title = ed.get_prop(PROP_TAB_TITLE).lstrip('*')
-            if ed.get_filename() == '' and fn == tab_title:
+            if ed.get_prop(PROP_FN) == '' and fn == tab_title:
                 ed.set_caret(*target_caret)
                 ed.set_prop(PROP_LINE_TOP, target_line)
             else:
@@ -1993,7 +1993,7 @@ class Language:
                                                                                 carets=[target_caret])
         except ImportError:
             file_open(targetpath)
-            app_idle(True) # fixes editor not scrolled to caret
+            app_proc(PROC_IDLE, True) # fixes editor not scrolled to caret
             ed.set_caret(*target_caret) # goto specified position start
             ed.set_prop(PROP_LINE_TOP, target_line)
 
@@ -2811,7 +2811,7 @@ class ServerConfig:
 
         pattern = f.get('pattern')
         if pattern is not None:
-            if not globmatch(ed_self.get_filename() or "", pattern, flags=GLOBSTAR | BRACE):
+            if not globmatch(ed_self.get_prop(PROP_FN) or "", pattern, flags=GLOBSTAR | BRACE):
                 return False
 
         # checking because C# gives empty selector: just by scheme -- scheme is ignored

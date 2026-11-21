@@ -106,7 +106,7 @@ class Hint:
                 'h': FORM_H,
                 'on_click_link': cls.on_click_link,
                 })
-        cls.n_md = n
+        cls.h_md = dlg_proc(h, DLG_CTL_HANDLE, index=n)
 
         cls.theme_name = app_proc(PROC_THEME_UI_GET, '')
 
@@ -145,10 +145,9 @@ class Hint:
             return
 
         ### dialog md_view setup: control renders markdown itself,
-        ### colors/fonts are applied by app from current UI theme
-        dlg_proc(cls.h, DLG_CTL_PROP_SET, index=cls.n_md, prop={
-                'val': text,
-                })
+        ### colors/fonts are applied by app from current UI theme;
+        ### text is loaded via md_proc() (prop "val" is removed)
+        md_proc(cls.h_md, MD_SET_TEXT, text)
 
         ### calculate dialog position and dimensions: x,y, h,w
         l,t,r,b = ed.get_prop(PROP_RECT_TEXT)
@@ -335,7 +334,7 @@ class SignaturesDialog:
 
             wrapped_lines = 0
             while True:
-                app_idle()
+                app_proc(PROC_IDLE, False)
                 if cls.wrap_info_loaded:
                     wrap_info = cls.memo.get_wrapinfo()
                     wrapped_lines = max(1, len(wrap_info))
