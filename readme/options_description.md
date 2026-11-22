@@ -50,8 +50,10 @@
 Hover dialog behavior (modeled on VS Code, `editor.hover.*` settings):
 
 * The hover has a thin 1px border and is resizable by dragging the grip in its bottom-right corner. The size you leave it at is remembered for the next hovers.
-* Once shown, the hover stays open while the mouse is over it, or moving TOWARD it - it only hides when the mouse moves away from it (after a ~300ms grace period, like VS Code's `editor.hover.hidingDelay`).
-* Immediate hides: Esc, any typed key, scrolling the editor, mouse click outside the hover, app losing focus.
+* Once shown, the hover stays open while the mouse is over it, or moving TOWARD it - it only hides when the mouse leaves it and then moves away from it (after a ~300ms grace period, like VS Code's `editor.hover.hidingDelay`). Resting the mouse without entering it never closes the hover by itself.
+* Immediate hides: Esc, typed keys, app losing focus. (Note: unlike VS Code, scrolling the editor does not instantly hide the hover - CudaText reports scroll events in cases where the editor did not actually scroll, which previously made the hover vanish right after appearing; the hover dismisses through the same mouse-leave path instead.)
+* While an autocompletion list is visible, resting the mouse does not request hovers (the mouse is aiming at the list).
+* A pending hover request is canceled when you rest the mouse elsewhere, so a slow server cannot overwrite the hover you are reading now with one for an old position.
 
 * hover_additional_commands - list of additional commands to show in the hover-dialog. Possible values:
 

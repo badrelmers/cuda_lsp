@@ -578,18 +578,40 @@ class Command:
 
     def on_mouse_stop(self, ed_self, x, y):
         if not opt_enable_mouse_hover:      return
-        # require Control pressed
-        if opt_hover_with_ctrl and (app_proc(PROC_GET_KEYSTATE, '') != 'c'):
+        # require Control pressed - 'c' IN the state string, not == 'c':
+        # 'cs'/'ca' (Ctrl held with Shift/Alt) must still summon the hover;
+        # the exact-equality check made Ctrl-hover flaky (pressing Shift a
+        # hair too early/late silently cancelled the request)
+        if opt_hover_with_ctrl and ('c' not in app_proc(PROC_GET_KEYSTATE, '')):
             return
         # VSCode _shouldKeepCurrentHover: never replace a hover the mouse
         # is currently inside / interacting with (resizing, reading)
         if Hint.is_under_cursor() or Hint.resizing:
             return
+        # autocompletion list up: the mouse resting on the editor is
+        # probably aiming at IT, not requesting a hover (issue #6329:
+        # hover popping while scrolling the suggestion list)
+        if app_proc(PROC_GET_AUTOCOMPLETION_INVOKE, 0):
+            return
 
         doc = self.book.get_doc(ed_self)
         #if ed_self.get_prop(PROP_FOCUSED):
         caret = ed_self.convert(CONVERT_PIXELS_TO_CARET, x, y, "")
+        if caret is None:
+            return
+        # cancel any still-pending hover request from an earlier rest
+        # position: a slow server would otherwise deliver it late and
+        # overwrite the hover for the position the user reads NOW
+        self.cancel_pending_hover(ed_self)
         self.call_hover(ed_self, caret)
+
+    def cancel_pending_hover(self, ed_self):
+        """ Drop not-yet-answered hover requests of the given editor so a
+        late response can't replace the hover shown for a newer position
+        (VSCode hoverOperation.cancel on every new anchor). """
+        doc = self.book.get_doc(ed_self)
+        if doc and doc.lang:
+            doc.lang.cancel_pending_hovers()
 
     #@command
     def on_func_hint(self, ed_self):
@@ -608,11 +630,15 @@ class Command:
                 doc.lang.diagnostics_man.on_caret_slow(ed_self)
             
     def on_scroll(self, ed_self):
-        # VSCode _onEditorScrollChanged: any scroll hides the hover at once
-        # (its anchor position scrolled away, content would be stale)
-        if Hint.is_visible():
-            timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
-            Hint.hide()
+        # NOTE: deliberately NOT hiding Hint here. VSCode hides the hover
+        # on real editor scrolling, but CudaText fires on_scroll in cases
+        # where the editor did not actually scroll (e.g. showing a child
+        # dialog over the editor can emit it), which made the hover
+        # vanish an instant after it appeared - the exact bug reported in
+        # Alexey-T/CudaText#6329. The hide model in dlg.py (mouse-leave +
+        # getting-closer + hidingDelay) handles dismissal; scrolling far
+        # enough moves the mouse off the hover rect, which dismisses it
+        # through that path anyway.
         if SignaturesDialog.is_visible():
             SignaturesDialog.hide()
 
@@ -1040,9 +1066,11 @@ class Command:
         elif key in (38,40) and 'c' not in state and 's' not in state and 'a' not in state:
             if SignaturesDialog.is_visible():
                 SignaturesDialog.hide()
-        # VSCode _onKeyDown: ANY non-modifier keypress dismisses a visible
-        # hover (user started typing) - modifier-only chords stay ignored
-        elif Hint.is_visible() and not state:
+        # VSCode _onKeyDown: a non-modifier keypress dismisses a visible
+        # hover (user started typing). Modifier keys alone (Ctrl/Shift/Alt
+        # 'c'/'s'/'a' in state) never hide it - the user may be pressing
+        # Ctrl to *summon* the hover (hover_with_ctrl).
+        elif Hint.is_visible() and not (key in (17,16,18) or state):
             Hint.hide()
 
     def on_exit(self, *args, **vargs):

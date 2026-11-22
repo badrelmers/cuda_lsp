@@ -18,10 +18,20 @@ FORM_GAP = 4
 
 ### VSCode-derived hover timings (editorOptions.ts EditorHover defaults):
 ###   delay:300  hidingDelay:300  sticky:true
-### 'hide_check_timer' models VSCode's _reactToEditorMouseMoveRunner:
-### while a sticky hover is visible, mouse-move reactions are deferred by
-### hidingDelay - the mouse gets a grace period to reach the hover before
-### any hide decision is made; if it ENTERS the hover, no hide fires at all.
+### Hide model = VSCode contentHoverController exactly:
+###   - the hover hides ONLY from a reaction to the mouse LEAVING the hover
+###     (or leaving the editor): while the mouse is inside it, nothing is
+###     scheduled at all;
+###   - on leave, a hidingDelay(300ms) timer starts; when it fires, the
+###     mouse position is checked with isMouseGettingCloser() - moving
+###     toward the hover re-arms nothing (it stays), moving away hides;
+###   - while the mouse never entered the hover yet, VSCode gives the
+###     SAME grace period (isContentHoverWidgetVisible && sticky ->
+###     schedule(hidingDelay)) before judging the mouse position.
+### NO polling while the hover is simply visible and the mouse rests - a
+### poll can fire right after show() (mouse still near the anchor) and
+### micro-jitter beyond the 4px tolerance then kills the hover an instant
+### after it appeared. Events drive everything (Alexey-T/CudaText#6329).
 HOVER_SHOW_DELAY_MS = 300      # VSCode editor.hover.delay
 HOVER_HIDING_DELAY_MS = 300    # VSCode editor.hover.hidingDelay
 HOVER_CLOSER_TOLERANCE_PX = 4  # VSCode isMouseGettingCloser() tolerance
@@ -82,8 +92,10 @@ class Hint:
       to it (isMouseGettingCloser) - it never hides mid-travel toward it
     - hidingDelay: after the mouse leaves, a grace period passes before any
       hide decision; the first check fires after the full hidingDelay
-    - immediate hides: Esc key, mouse-down outside hover, editor scroll,
-      app deactivated
+    - event-driven, never polled: hiding is armed ONLY by show() (mouse
+      never entered yet) or by the form's on_mouse_exit - while the mouse
+      rests inside the hover, nothing is scheduled at all
+    - immediate hides: Esc key, typed keys, app deactivated
     - resizable: corner grip; user's last size is remembered (_lastDimensions)
     """
     h = None
@@ -95,6 +107,8 @@ class Hint:
     user_h = 0
     resizing = False
     closest_mouse_dist_sq = None
+    # mouse screen pos when the hover appeared (VSCode initialMousePosX/Y)
+    initial_mouse_pos = None
 
     @classmethod
     def init_form(cls):
@@ -131,6 +145,11 @@ class Hint:
                 'color': color_form_bg,
                 'keypreview': True,          # form-level on_key_down: Esc hides hover
                 'on_key_down': cls.form_key_down,
+                # VSCode contentHoverWidget 'mouseleave' listener: leaving
+                # the hover schedules the hidingDelay check - the ONLY
+                # trigger for an automatic hide while the mouse rests.
+                'on_mouse_enter': cls.form_mouse_enter,
+                'on_mouse_exit': cls.form_mouse_exit,
                 })
 
         cls._n_sb = dlg_proc(h, DLG_CTL_ADD, 'statusbar')
@@ -267,13 +286,23 @@ class Hint:
         if caret_cmds:
             cls.fill_cmds(caret_cmds, min(FORM_W, ed_size_x))
 
-        ### VSCode timing model (hoverOperation + contentHoverController):
-        ### hide decisions are deferred by the hidingDelay grace period -
-        ### the mouse can travel to the hover without it being dismissed.
-        ### Implementation: one repeating 250ms check, armed AFTER a single
-        ### first tick at HOVER_HIDING_DELAY_MS (timer_proc restarts a
-        ### running callback, so TIMER_START_ONE reschedules any leftover).
+        ### Hide model (VSCode contentHoverController):
+        ### - while the mouse is INSIDE the hover: nothing is scheduled,
+        ###   form_mouse_exit() is the only thing that arms the timer;
+        ### - the mouse has NOT entered the hover yet: one hidingDelay
+        ###   check is armed - if the mouse is still moving toward the
+        ###   hover (is_mouse_getting_closer) it stays and the check is
+        ###   re-armed, giving another full grace period (exactly
+        ###   _shouldRescheduleHoverComputation + runner.schedule);
+        ### - NO repeating poll while the mouse simply rests: a poll tick
+        ###   landing right after show() (mouse still near the anchor)
+        ###   with jitter > 4px killed the hover an instant after it
+        ###   appeared (Alexey-T/CudaText#6329).
         timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+        # baseline: closest distance is measured from where the mouse was
+        # when the hover appeared (VSCode initialMousePosX/Y) - NOT from a
+        # later poll position, which would poison the comparison
+        cls.initial_mouse_pos = app_proc(PROC_GET_MOUSE_POS, '')
         timer_proc(TIMER_START_ONE, Hint.hide_check_timer, HOVER_HIDING_DELAY_MS, tag='first')
         dlg_proc(cls.h, DLG_SHOW_NONMODAL)
 
@@ -289,7 +318,19 @@ class Hint:
         prop = dlg_proc(cls.h, DLG_PROP_GET)
         dist_sq = dist_to_form_sqr(pos[0], pos[1], prop['w'], prop['h'])
         if cls.closest_mouse_dist_sq is None:
-            cls.closest_mouse_dist_sq = dist_sq
+            # first measurement after show(): baseline = distance from the
+            # mouse position at show() time (VSCode initialMousePos) to the
+            # form - the mouse may ALREADY have traveled toward the hover,
+            # and that must count as "closer", never as "farther"
+            ini = cls.initial_mouse_pos
+            if ini:
+                ix, iy = dlg_proc(cls.h, DLG_COORD_SCREEN_TO_LOCAL,
+                                  index=ini[0], index2=ini[1])
+                cls.closest_mouse_dist_sq = dist_to_form_sqr(ix, iy, prop['w'], prop['h'])
+            else:
+                cls.closest_mouse_dist_sq = dist_sq
+            if cls.closest_mouse_dist_sq > dist_sq:
+                cls.closest_mouse_dist_sq = dist_sq
             return True
         if dist_sq > cls.closest_mouse_dist_sq + (HOVER_CLOSER_TOLERANCE_PX ** 2) * 2:
             # mouse is getting farther away
@@ -333,6 +374,26 @@ class Hint:
             apx.safe_open_url(data)
 
     ### --- form/key events ------------------------------------------------
+
+    @classmethod
+    def form_mouse_enter(cls, id_dlg, id_ctl, data='', info=''):
+        """ Mouse entered the hover (VSCode: isMouseOnContentHoverWidget ->
+        _shouldKeepCurrentHover -> runner.cancel()). Nothing may be armed;
+        an exit event re-arms the check. """
+        cls.closest_mouse_dist_sq = 0
+        timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+
+    @classmethod
+    def form_mouse_exit(cls, id_dlg, id_ctl, data='', info=''):
+        """ Mouse left the hover (VSCode contentHoverWidget 'mouseleave' ->
+        _onMouseLeave -> runner.schedule(hidingDelay)): after the grace
+        period, hide unless the mouse is getting closer to the hover. """
+        if not cls.is_visible():
+            return
+        if cls.resizing:
+            return
+        timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+        timer_proc(TIMER_START_ONE, Hint.hide_check_timer, HOVER_HIDING_DELAY_MS, tag='leave')
 
     @classmethod
     def form_key_down(cls, id_dlg, id_ctl, data='', info=''):
@@ -396,8 +457,8 @@ class Hint:
 
     @classmethod
     def grip_mouse_exit(cls, id_dlg, id_ctl, data='', info=''):
-        if not getattr(cls, 'resizing', False):
-            timer_proc(TIMER_START, Hint.hide_check_timer, 250, tag='')
+        # leaving the grip = leaving the form; same hidingDelay check
+        cls.form_mouse_exit(id_dlg, id_ctl, data, info)
 
     @classmethod
     def set_max_lines(cls, nlines):
@@ -407,6 +468,10 @@ class Hint:
 
     @classmethod
     def hide_check_timer(cls, tag='', info=''):
+        """ The scheduled hide reaction (VSCode _reactToEditorMouseMoveRunner
+        firing after hidingDelay). NOT a poll: it runs only when armed by
+        show() (mouse never entered the hover yet) or by form_mouse_exit
+        (mouse just left the hover). """
         global app_active
 
         if not cls.is_visible():
@@ -414,29 +479,36 @@ class Hint:
             timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
             return
 
-        ### VSCode contentHoverController._onEditorMouseLeave /
-        ### _onEditorMouseMove: hide ONLY when all of these are false:
+        ### VSCode contentHoverController._reactToEditorMouseMove: hide
+        ### ONLY when all of these are false:
         ###   - app is active
-        ###   - mouse is INSIDE the hover (sticky)
+        ###   - mouse is INSIDE the hover (sticky; runner was canceled)
         ###   - mouse is GETTING CLOSER to the hover (isMouseGettingCloser)
         ###   - user is dragging the resize grip
         ###   - mouse button is held down (e.g. selecting hover text)
+        if not app_active:
+            timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+            cls.hide()
+            return
+
         left_button_down = 'L' in app_proc(PROC_GET_KEYSTATE, '')
 
         inside = is_mouse_in_form(cls.h)
         if not inside:
             closer = cls.is_mouse_getting_closer()
         else:
-            # inside: reset the closest-distance tracker so a later leave
-            # restarts comparison from the actual rect distance
+            # mouse re-entered before the check fired: keep it, disarm
+            # (an exit event re-arms)
             cls.closest_mouse_dist_sq = 0
-            closer = True
+            timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+            return
 
-        if app_active and (inside or (closer and not left_button_down)) \
-           and not cls.resizing:
-            # keep open; re-arm the repeating check (timer_proc restarts
-            # a running callback with the given interval)
-            timer_proc(TIMER_START, Hint.hide_check_timer, 250, tag='')
+        if app_active and closer and not left_button_down and not cls.resizing:
+            # VSCode _shouldRescheduleHoverComputation: mouse is still
+            # heading toward the hover - keep it and grant ANOTHER full
+            # hidingDelay grace period before judging again
+            timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+            timer_proc(TIMER_START_ONE, Hint.hide_check_timer, HOVER_HIDING_DELAY_MS, tag='again')
             return
 
         timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')

@@ -1,3 +1,24 @@
+2026.11.21 (by @badrelmers, round 2 with z.ai agent)
+- fix: Ctrl-hover was flaky - the old check compared the key state to the
+  exact string 'c', so Ctrl held together with Shift or Alt ('cs'/'ca')
+  silently cancelled the hover request; the check is now a substring test
+- fix: a hover request left unanswered (slow server) could deliver late
+  and overwrite the hover shown for the position the user reads NOW -
+  resting the mouse elsewhere cancels the pending request first (VS Code
+  hoverOperation.cancel on every new anchor; language.py tracks the
+  pending hover ids)
+- fix: the hover popped while the mouse was resting over the autocompletion
+  list - a resting mouse over the editor is aiming at the list (issue
+  #6329); the hover request is skipped while the suggestion list is up
+- fix: hover vanished an instant after appearing (issue #6329): VSCode
+  hides the hover on real editor scrolling, but CudaText fires on_scroll
+  in cases where the editor did not actually scroll (e.g. showing a child
+  dialog over the editor) - the hide-on-scroll was removed (dismissal
+  stays with the mouse-leave model); the hide model now uses enter/leave
+  events only, exactly VSCode's contentHoverController (nothing
+  scheduled while the mouse is inside the hover; on leave a
+  hidingDelay(300ms) timer fires and isMouseGettingCloser() decides -
+  moving toward the hover keeps it, moving away hides it)
 2026.11.21 (by @badrelmers, round 1 with z.ai agent)
 - add: VS Code-style hover dialog for the LSP Hint (replacing the legacy
   memo-tooltip): themed colors from the UI theme (EdTextBg/EdTextFont,

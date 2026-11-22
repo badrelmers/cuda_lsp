@@ -309,6 +309,7 @@ class Language:
             )
 
         self.request_positions = {} # RequestPos
+        self._pending_hover_ids = [] # unanswered hover request ids (see cancel_pending_hovers)
         self.diagnostics_man = DiagnosticsMan(lintstr, underline_style, self.plog)
         self.progresses = {} # token -> progress start message
 
@@ -781,6 +782,11 @@ class Language:
         elif msgtype is lsp.HoverResponse:
             if msg.id in self.request_positions:
                 _reqpos = self.request_positions.pop(msg.id)
+                # answered: no longer cancelable as a stale hover request
+                try:
+                    self._pending_hover_ids.remove(msg.id)
+                except ValueError:
+                    pass
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     contents = msg.result.contents if msg.result is not None else None
                     first_item = contents[0] if isinstance(contents, list) and len(contents) > 0 else contents
@@ -1849,6 +1855,18 @@ class Language:
         id, pos = self._action_by_name(METHOD_HOVER, eddoc, caret)
         if id is not None:
             self._save_req_pos(id=id, eddoc=eddoc, target_pos_caret=pos)
+            # register as the live hover request (see cancel_pending_hovers)
+            self._pending_hover_ids.append(id)
+
+    def cancel_pending_hovers(self):
+        """ Drop unanswered hover requests (VSCode hoverOperation.cancel on
+        a new anchor): a slow server delivering them late would overwrite
+        the hover shown for the position the user reads NOW. Called before
+        each new mouse-hover request; answered ids were already popped
+        from request_positions, so only truly-pending ones get dropped. """
+        for _id in self._pending_hover_ids:
+            self.request_positions.pop(_id, None)
+        self._pending_hover_ids.clear()
 
     def _handle_metadata(self, result, targetrange, reqpos, dlg_caption):
         """Callback to handle OmniSharp o#/metadata response and display source."""
