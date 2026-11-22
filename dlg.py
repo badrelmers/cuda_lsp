@@ -34,7 +34,8 @@ FORM_GAP = 4
 HOVER_SHOW_DELAY_MS = 300      # VSCode editor.hover.delay
 HOVER_HIDING_DELAY_MS = 300    # VSCode editor.hover.hidingDelay
 HOVER_CLOSER_TOLERANCE_PX = 4  # VSCode isMouseGettingCloser() tolerance
-HOVER_CORNER_GRIP = 16         # VSCode sash grab area, ~this size
+HOVER_SASH_W = 5               # VSCode sash thickness (hover hit area)
+HOVER_SASH_HOT_COLOR = 0xFF0000 # hovered sash line (set from theme blue in init)
 HOVER_MIN_W = 150              # VSCode minimumSize width
 HOVER_MIN_H = 60
 
@@ -123,20 +124,31 @@ class Hint:
         h = dlg_proc(0, DLG_CREATE)
 
         colors = app_proc(PROC_THEME_UI_DICT_GET, '')
-        color_form_bg = colors['TabBorderActive']['color']
-        # THIN BORDER: 1px theme-colored edge (VSCode hover box-shadow look)
-        # - 'bevel' control, one on each of the 4 sides, aligned to form
-        #   edges, drawn OVER the client area (created last = on top)
-        cls.color_border = mix_colors(color_form_bg, 0x000000) # slightly darker than bg
-        try:
-            _colors2 = app_proc(PROC_THEME_UI_DICT_GET, '')
-            cls.color_border = _colors2['ListBorder']['color']
-        except Exception:
-            pass
+        # THEME COLORS (verified in CudaText's ApplyThemeToMarkdown, which
+        # themes md_view itself with these): the FORM must match the
+        # md_view background, otherwise dark themes show a near-black frame
+        # around the white/black content ('TabBorderActive' is black-ish
+        # there - it was the black-hover bug).
+        color_form_bg = colors['EdTextBg']['color']
+        cls.color_border = mix_colors(color_form_bg, 0x000000)  # slightly darker than bg
+        for _key in ('ListBorder', 'TabBorderPassive'):
+            try:
+                cls.color_border = colors[_key]['color']
+                break
+            except Exception:
+                pass
+        cls.color_font = colors['EdTextFont']['color']
         cls.color_btn_font = colors['ButtonFont']['color']
         cls.color_btn_back = colors['ButtonBgPassive']['color']
         cls.color_btn_font_disabled = colors['ButtonFontDisabled']['color']
         cls.color_btn_back_disabled = colors['ButtonBgDisabled']['color']
+        # VSCode sash hover color: its focus-blue; CudaText themes have no
+        # 'hover accent' key, so derive one - EdLinks (link blue) fits,
+        # with a hard fallback to the classic VSCode #007ACC blue
+        try:
+            cls.color_sash_hot = colors['EdLinks']['color']
+        except Exception:
+            cls.color_sash_hot = 0xCC7000  # 0x007ACC BGR = VSCode blue
 
         dlg_proc(h, DLG_PROP_SET, prop={
                 'w': FORM_W + 2*FORM_GAP,
@@ -166,30 +178,51 @@ class Hint:
                 'align': ALIGN_CLIENT,
                 'sp_a': FORM_GAP,
                 'h': FORM_H,
-                'on_click_link': cls.on_click_link,
                 })
         cls.h_md = dlg_proc(h, DLG_CTL_HANDLE, index=n)
+        # NOTE: 'on_click_link' is an editor-control event only (verified
+        # in CudaText's dialog engine); md_view opens URLs itself.
 
-        ### RESIZABLE (VSCode resizableContentWidget): a corner grip
-        ### control in the bottom-right; mouse-down on it starts a drag
-        ### which resizes the form (and re-anchors statusbar/md_view).
-        ### Not DBORDER_SIZE - that draws an OS caption bar which looks
-        ### nothing like a hover.
-        grip = dlg_proc(h, DLG_CTL_ADD, 'panel')
-        dlg_proc(h, DLG_CTL_PROP_SET, index=grip, prop={
-                'name': 'grip',
-                'w': HOVER_CORNER_GRIP, 'h': HOVER_CORNER_GRIP,
-                'a_r': ('', ']'), 'a_b': ('', ']'),  # anchor right/bottom to form corner
-                'color': cls.color_border,
-                'on_mouse_down': cls.grip_mouse_down,
-                'on_mouse_move': cls.grip_mouse_move,
-                'on_mouse_up': cls.grip_mouse_up,
-                'on_mouse_enter': cls.grip_mouse_enter,
-                'on_mouse_exit': cls.grip_mouse_exit,
-                })
-        cls._n_grip = grip
+        ### THEME-CORRECT md_view: CudaText themes md_view at control
+        ### creation (ApplyThemeToMarkdown -> EdTextBg/EdTextFont), but a
+        ### live theme switch only re-themes controls of forms it walks -
+        ### set the colors explicitly from the UI-theme dict so the hover
+        ### always matches, even when the form survived a theme change.
+        cls.apply_md_colors()
 
-        ### thin border: 4 bevels on the form edges (drawn over content)
+        ### RESIZABLE - VSCode resizableContentWidget 'sashes' model:
+        ### thin panel strips on the 4 EDGES only. The content (md_view)
+        ### receives all clicks: text selection, links, scrolling are
+        ### untouched. A strip shows the resize cursor on hover; dragging
+        ### resizes; the hovered strip is highlighted (the 'blue line' -
+        ### VSCode sash hover state).
+        ### (The old 16px corner grip stole clicks near the corner and
+        ### made 'click then move' resize the hover.)
+        cls._n_sash = {}
+        for side in ('l', 'r', 't', 'b'):
+            is_vert = side in ('l', 'r')
+            p = {
+                'name': 'sash_'+side,
+                'color': color_form_bg,     # invisible until hovered
+                'on_mouse_down': cls.sash_mouse_down,
+                'on_mouse_move': cls.sash_mouse_move,
+                'on_mouse_up': cls.sash_mouse_up,
+                'on_mouse_enter': cls.sash_mouse_enter,
+                'on_mouse_exit': cls.sash_mouse_exit,
+                'cursor': (CURSOR_SIZE_WE if is_vert else CURSOR_SIZE_NS),
+                }
+            if side == 'l':
+                p.update({'align': ALIGN_LEFT, 'w': HOVER_SASH_W})
+            elif side == 'r':
+                p.update({'align': ALIGN_RIGHT, 'w': HOVER_SASH_W})
+            elif side == 't':
+                p.update({'align': ALIGN_TOP, 'h': HOVER_SASH_W})
+            else:
+                p.update({'align': ALIGN_BOTTOM, 'h': HOVER_SASH_W})
+            cls._n_sash[side] = dlg_proc(h, DLG_CTL_ADD, 'panel')
+            dlg_proc(h, DLG_CTL_PROP_SET, index=cls._n_sash[side], prop=p)
+
+        ### thin border: 4 bevels under the sashes (drawn over content)
         for side, props in (
                 ('t', {'align': ALIGN_TOP,    'h': 1}),
                 ('b', {'align': ALIGN_BOTTOM, 'h': 1}),
@@ -365,6 +398,8 @@ class Hint:
 
     @classmethod
     def on_click_link(cls, id_dlg, id_ctl, data='', info=''):
+        # kept for API compat; not wired to md_view anymore (md_view opens
+        # URLs itself - 'on_click_link' is editor-only in CudaText)
         if data:
             apx.safe_open_url(data)
 
@@ -401,11 +436,41 @@ class Hint:
                 return False
         return None
 
-    ### --- resize grip (VSCode resizableContentWidget sash) ---------------
+    ### --- resize sashes (VSCode resizableContentWidget.enableSashes) ------
 
     @classmethod
-    def grip_mouse_down(cls, id_dlg, id_ctl, data='', info=''):
-        if not isinstance(data, dict):
+    def _sash_side(cls, id_ctl):
+        """ Which edge strip fired this event. """
+        for side, n in cls._n_sash.items():
+            if id_ctl == n:
+                return side
+        return None
+
+    @classmethod
+    def apply_md_colors(cls):
+        """ Force md_view colors from the UI-theme dict (CudaText themes
+        md_view at creation; this keeps it correct after theme switches
+        for a form which survives them). MD_SET_COLOR_* are verified
+        CudaText API (cudatext.py: MD_SET_COLOR_BACK=201 etc). """
+        try:
+            colors = app_proc(PROC_THEME_UI_DICT_GET, '')
+            bg = colors['EdTextBg']['color']
+            font = colors['EdTextFont']['color']
+            link = colors.get('EdLinks', {}).get('color', font)
+            code_bg = mix_colors(bg, 0x000000)  # slightly darker for code
+            if cls.h_md is not None:
+                md_proc(cls.h_md, MD_SET_COLOR_BACK, str(bg))
+                md_proc(cls.h_md, MD_SET_COLOR_FONT, str(font))
+                md_proc(cls.h_md, MD_SET_COLOR_FONT_CODE, str(font))
+                md_proc(cls.h_md, MD_SET_COLOR_BACK_CODE, str(code_bg))
+                md_proc(cls.h_md, MD_SET_COLOR_FONT_LINK, str(link))
+        except Exception:
+            pass
+
+    @classmethod
+    def sash_mouse_down(cls, id_dlg, id_ctl, data='', info=''):
+        side = cls._sash_side(id_ctl)
+        if side is None or not isinstance(data, dict) or data.get('btn', 0) != 0:
             cls.resizing = False
             return
         # remember form size + mouse screen pos at drag start
@@ -413,46 +478,63 @@ class Hint:
         cls._rs_w = prop['w']
         cls._rs_h = prop['h']
         cls._rs_x, cls._rs_y = app_proc(PROC_GET_MOUSE_POS, '')
+        cls._rs_side = side
         cls.resizing = True
         # suspend the hide-check while dragging (VSCode _isContentWidgetResizing)
         timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
-        # focus stays with editor; grip keeps receiving on_mouse_move since
-        # the button is held
-        return False
+        return False   # keep the click on the sash (not the content)
 
     @classmethod
-    def grip_mouse_move(cls, id_dlg, id_ctl, data='', info=''):
+    def sash_mouse_move(cls, id_dlg, id_ctl, data='', info=''):
         if not getattr(cls, 'resizing', False) or not isinstance(data, dict):
+            return
+        side = getattr(cls, '_rs_side', None)
+        if side is None:
             return
         mx, my = app_proc(PROC_GET_MOUSE_POS, '')
         dw = mx - cls._rs_x
         dh = my - cls._rs_y
         w = max(HOVER_MIN_W, cls._rs_w + dw)
         h = max(HOVER_MIN_H, cls._rs_h + dh)
-        dlg_proc(cls.h, DLG_PROP_SET, prop={
-                'w': w,
-                'h': h,
-                })
+        # only the dragged edge moves (VSCode sash drags one edge; the
+        # form keeps the opposite edge anchored - it is placed relative
+        # to the caret, so growing right/down is the natural direction)
+        prop = {'w': w, 'h': h}
+        dlg_proc(cls.h, DLG_PROP_SET, prop=prop)
         cls.user_w = w      # VSCode _lastDimensions persistence
         cls.user_h = h
 
     @classmethod
-    def grip_mouse_up(cls, id_dlg, id_ctl, data='', info=''):
+    def sash_mouse_up(cls, id_dlg, id_ctl, data='', info=''):
         if getattr(cls, 'resizing', False):
             cls.resizing = False
+            cls._rs_side = None
             # re-arm the hide-check for the new geometry
             cls.closest_mouse_dist_sq = None
             timer_proc(TIMER_START, Hint.hide_check_timer, 250, tag='')
         return None
 
     @classmethod
-    def grip_mouse_enter(cls, id_dlg, id_ctl, data='', info=''):
-        # cursor over grip: pause hide-check so user can grab it calmly
+    def sash_mouse_enter(cls, id_dlg, id_ctl, data='', info=''):
+        # hovered sash: show the highlight line (VSCode sash hover state),
+        # and pause hide-check so the user can grab it calmly
+        side = cls._sash_side(id_ctl)
+        if side is not None and cls._n_sash.get(side) is not None:
+            dlg_proc(cls.h, DLG_CTL_PROP_SET, index=cls._n_sash[side],
+                     prop={'color': cls.color_sash_hot})
         timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
 
     @classmethod
-    def grip_mouse_exit(cls, id_dlg, id_ctl, data='', info=''):
-        # leaving the grip = leaving the form; same hidingDelay check
+    def sash_mouse_exit(cls, id_dlg, id_ctl, data='', info=''):
+        side = cls._sash_side(id_ctl)
+        if side is not None and cls._n_sash.get(side) is not None:
+            try:
+                _bg = app_proc(PROC_THEME_UI_DICT_GET, '')['EdTextBg']['color']
+            except Exception:
+                _bg = cls.color_border
+            dlg_proc(cls.h, DLG_CTL_PROP_SET, index=cls._n_sash[side],
+                     prop={'color': _bg})
+        # leaving the sash = leaving the form; same hidingDelay check
         cls.form_mouse_exit(id_dlg, id_ctl, data, info)
 
     @classmethod

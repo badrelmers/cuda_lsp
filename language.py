@@ -728,6 +728,18 @@ class Language:
             if _got_messages:
                 self._timer.restart()
 
+            # KEEPALIVE while requests are unanswered (this is the 3-4s
+            # hover latency): TimerScheduler stops re-arming itself at
+            # maxtime(100ms) ~1s after the last restart, so a hover
+            # response arriving later sat in _read_q with NOTHING
+            # polling for it - until the next keystroke/other send
+            # happened to revive the chain. While ANY request is pending
+            # (hover/definition/...), the chain must stay alive so
+            # responses render the moment they arrive (VSCode's request
+            # is a promise - always listened to immediately).
+            if not _got_messages and self.request_positions:
+                self._timer.restart()
+
             # send Queue
             send_buf = self.client.send()
             if send_buf:

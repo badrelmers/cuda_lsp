@@ -1,3 +1,18 @@
+2026.11.22 (by @badrelmers, round 4 with z.ai agent)
+- add: VSCode resizableContentWidget sashes for the hover - thin edge
+  strips (5px, VSCode sash size) replace the old 16px corner grip: a
+  strip shows the resize cursor on hover, dragging it resizes, the
+  hovered strip shows a highlighted line (VSCode sash hover state,
+  theme link color); clicks in the content area are never hijacked (the
+  old corner grip stole clicks near the corner and made
+  'click-then-move' resize the hover)
+- add: the hover is themed from the UI theme (EdTextBg/EdTextFont,
+  links and sash highlight from the theme's link color) and re-themes
+  correctly even after a live theme switch (apply_md_colors)
+- fix: the 3-4s hover latency - while ANY request is pending, the
+  TimerScheduler chain now stays alive (it used to stop re-arming ~1s
+  after the last restart, so a hover response arriving later sat in the
+  read queue with nothing polling for it until the next keystroke)
 2026.11.21 (by @badrelmers, round 3 with z.ai agent)
 + add: 'Loading...' hover placeholder (VS Code hoverOperation
   _loadingMessageTime = 3x hover delay): a server slower than ~900ms

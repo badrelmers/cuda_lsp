@@ -49,7 +49,9 @@
 
 Hover dialog behavior (modeled on VS Code, `editor.hover.*` settings):
 
-* The hover has a thin 1px border and is resizable by dragging the grip in its bottom-right corner. The size you leave it at is remembered for the next hovers.
+* The hover follows the editor's theme: background/text from the current UI theme (`EdTextBg`/`EdTextFont`), links and resize highlights from the theme's link color.
+* The hover is resizable by dragging its EDGES only (like VS Code's hover sashes): hovering an edge shows a highlighted line and a resize cursor; dragging it resizes. Clicks and drags in the content area are never hijacked - text selection, links and scrolling work as usual. The size you leave it at is remembered for the next hovers.
+* Hover responses render as soon as the server sends them: while any request is unanswered, the plugin keeps polling the server connection, so a hover arriving late still shows immediately (previously the poll chain went idle and late responses waited for the next keystroke - the 3-4 second delays).
 * Once shown, the hover stays open while the mouse is over it, or moving TOWARD it - it only hides when the mouse leaves it and then moves away from it (after a ~300ms grace period, like VS Code's `editor.hover.hidingDelay`). Resting the mouse without entering it never closes the hover by itself.
 * If the server needs longer than ~900ms (3x the 300ms delay, VS Code's `_loadingMessageTime`) to answer a hover request, a small `Loading...` hover shows at the symbol; the real content replaces it the moment the response arrives.
 * Immediate hides: Esc, typed keys, app losing focus. (Note: unlike VS Code, scrolling the editor does not instantly hide the hover - CudaText reports scroll events in cases where the editor did not actually scroll, which previously made the hover vanish right after appearing; the hover dismisses through the same mouse-leave path instead.)
