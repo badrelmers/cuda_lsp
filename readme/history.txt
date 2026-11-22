@@ -1,3 +1,14 @@
+2026.11.22 (by @badrelmers, round 7 with z.ai agent)
+- fix (CRITICAL, the request storm): the hover re-fired forever with the
+  mouse parked - the dwell timer fired the request and then reset its own
+  t0 to None, but the mouse had NOT moved, so the next 100ms tick re-armed
+  t0, waited the dwell again and fired AGAIN: ~3 textDocument/hover
+  requests per second to the server with the mouse parked on one symbol,
+  and every response re-showed the hover -> the reported flashing (show,
+  hide, show, ... forever). New latch: a rest position fires exactly ONE
+  request; the latch is released only when the mouse MOVES to a new
+  position (VSCode fires hover from a mouse-move 'rest' detection - one
+  anchor, one request; there is no repeat timer at all)
 2026.11.22 (by @badrelmers, round 6 with z.ai agent)
 - fix (CRITICAL crash): AttributeError "'str' object has no attribute
   '_dwell_screen_xy'" from _timer_proc_callback_proxy every 100ms -

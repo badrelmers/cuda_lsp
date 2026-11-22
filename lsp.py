@@ -95,8 +95,9 @@ opt_cudatext_in_py_env = False
 # (timer_proc's proxy calls the callback with NO 'self': the dwell timer
 # is a @staticmethod and reaches the plugin through _command_instance)
 _command_instance = None
-_command_instance_dwell_xy = [None]    # last polled screen mouse pos
-_command_instance_dwell_t0 = [None]    # when the mouse stopped moving
+_command_instance_dwell_xy = [None]     # last polled screen mouse pos
+_command_instance_dwell_t0 = [None]     # when the mouse stopped moving
+_command_instance_dwell_fired = [False]  # latch: this rest position already fired
 opt_lint_type = 'dc'
 opt_lint_underline_style = 2  # solid 0, dotted 1, dashes 2, wave 3
 opt_enable_code_tree = False
@@ -633,15 +634,26 @@ class Command:
 
         mx, my = app_proc(PROC_GET_MOUSE_POS, '')
 
-        # moved since the last poll? reset the dwell anchor
+        # moved since the last poll? reset the dwell anchor AND release
+        # the fired-latch: a NEW rest position may fire a new request
         _moved = True
         if (mx, my) == _command_instance_dwell_xy[0]:
             _moved = False
         else:
             _command_instance_dwell_xy[0] = (mx, my)
             _command_instance_dwell_t0[0] = None  # restart dwell timing
+            _command_instance_dwell_fired[0] = False
 
         if _moved:
+            return
+
+        # already fired for THIS rest position: the mouse must move (to a
+        # new position) before another hover request can fire. Without
+        # this latch the same resting mouse re-armed t0 and re-fired the
+        # request every dwell interval - a request storm (~3/s) with the
+        # mouse parked, and the response re-showing the hover made it
+        # flash (show, hide, show, ...) forever.
+        if _command_instance_dwell_fired[0]:
             return
 
         if _command_instance_dwell_t0[0] is None:
@@ -675,8 +687,9 @@ class Command:
         # overwrite the hover for the position the user reads NOW
         _cmd.cancel_pending_hover(ed)
         _cmd.call_hover(ed, caret)
-        # one request per dwell; the next one needs a fresh move
-        _command_instance_dwell_t0[0] = None
+        # LATCH: this rest position has fired; hold it until the mouse
+        # moves to a new position (the branch above releases it)
+        _command_instance_dwell_fired[0] = True
 
     def cancel_pending_hover(self, ed_self):
         """ Drop not-yet-answered hover requests of the given editor so a
