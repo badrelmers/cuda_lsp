@@ -588,11 +588,6 @@ class Command:
         # is currently inside / interacting with (resizing, reading)
         if Hint.is_under_cursor() or Hint.resizing:
             return
-        # autocompletion list up: the mouse resting on the editor is
-        # probably aiming at IT, not requesting a hover (issue #6329:
-        # hover popping while scrolling the suggestion list)
-        if app_proc(PROC_GET_AUTOCOMPLETION_INVOKE, 0):
-            return
 
         doc = self.book.get_doc(ed_self)
         #if ed_self.get_prop(PROP_FOCUSED):

@@ -1,3 +1,23 @@
+2026.11.21 (by @badrelmers, round 3 with z.ai agent)
++ add: 'Loading...' hover placeholder (VS Code hoverOperation
+  _loadingMessageTime = 3x hover delay): a server slower than ~900ms
+  shows a small 'Loading...' hover at the symbol; the real content
+  replaces it the moment the response arrives
+- fix: hovers 'sometimes showed, sometimes not' - the reader-timer
+  callback stopped re-arming itself once its period reached maxtime, so
+  a server answer arriving while the poll chain was dead (slow hover/
+  definition response after an idle moment) sat in the queue until the
+  next outgoing message; receiving messages now revives the chain
+- fix: the hide-check chain was fragile if the form's mouse enter/exit
+  events never fire on some CudaText builds - the chain is now
+  self-healing (each keep decision re-arms the next check), and the
+  isMouseGettingCloser baseline is seeded with the CURRENT distance,
+  never the show-time position (the form often appears AT the resting
+  mouse - a zero baseline made any move read as 'farther' and killed
+  the hover on the first check)
+- fix: an app-active flag consulted by the hide chain only updates on
+  activate/deactivate events; with stale state the hover misbehaved -
+  the chain no longer depends on it
 2026.11.21 (by @badrelmers, round 2 with z.ai agent)
 - fix: Ctrl-hover was flaky - the old check compared the key state to the
   exact string 'c', so Ctrl held together with Shift or Alt ('cs'/'ca')

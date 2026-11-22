@@ -18,20 +18,19 @@ FORM_GAP = 4
 
 ### VSCode-derived hover timings (editorOptions.ts EditorHover defaults):
 ###   delay:300  hidingDelay:300  sticky:true
-### Hide model = VSCode contentHoverController exactly:
-###   - the hover hides ONLY from a reaction to the mouse LEAVING the hover
-###     (or leaving the editor): while the mouse is inside it, nothing is
-###     scheduled at all;
-###   - on leave, a hidingDelay(300ms) timer starts; when it fires, the
-###     mouse position is checked with isMouseGettingCloser() - moving
-###     toward the hover re-arms nothing (it stays), moving away hides;
-###   - while the mouse never entered the hover yet, VSCode gives the
-###     SAME grace period (isContentHoverWidgetVisible && sticky ->
-###     schedule(hidingDelay)) before judging the mouse position.
-### NO polling while the hover is simply visible and the mouse rests - a
-### poll can fire right after show() (mouse still near the anchor) and
-### micro-jitter beyond the 4px tolerance then kills the hover an instant
-### after it appeared. Events drive everything (Alexey-T/CudaText#6329).
+### Hide model (VSCode contentHoverController + contentHoverWidget):
+###   - hide decisions are made ONLY on the hidingDelay(300ms) schedule,
+###     never instantly from a poll;
+###   - every check uses isMouseGettingCloser() with the baseline captured
+###     at show() time (initialMousePos) - the mouse moving toward the
+###     hover keeps it open and grants another grace period;
+###   - the mouse INSIDE the hover keeps it open unconditionally;
+###   - schedule chain: show() arms one check; the check that says "keep"
+###     re-arms the next one (event-driven AND self-healing: it works even
+###     if the form's on_mouse_enter/exit events never fire on some
+###     CudaText builds - the chain alone implements the whole model);
+###   - form on_mouse_enter cancels the chain (cheap), on_mouse_exit
+###     re-arms it after the full hidingDelay (VSCode 'mouseleave').
 HOVER_SHOW_DELAY_MS = 300      # VSCode editor.hover.delay
 HOVER_HIDING_DELAY_MS = 300    # VSCode editor.hover.hidingDelay
 HOVER_CLOSER_TOLERANCE_PX = 4  # VSCode isMouseGettingCloser() tolerance
@@ -318,19 +317,15 @@ class Hint:
         prop = dlg_proc(cls.h, DLG_PROP_GET)
         dist_sq = dist_to_form_sqr(pos[0], pos[1], prop['w'], prop['h'])
         if cls.closest_mouse_dist_sq is None:
-            # first measurement after show(): baseline = distance from the
-            # mouse position at show() time (VSCode initialMousePos) to the
-            # form - the mouse may ALREADY have traveled toward the hover,
-            # and that must count as "closer", never as "farther"
-            ini = cls.initial_mouse_pos
-            if ini:
-                ix, iy = dlg_proc(cls.h, DLG_COORD_SCREEN_TO_LOCAL,
-                                  index=ini[0], index2=ini[1])
-                cls.closest_mouse_dist_sq = dist_to_form_sqr(ix, iy, prop['w'], prop['h'])
-            else:
-                cls.closest_mouse_dist_sq = dist_sq
-            if cls.closest_mouse_dist_sq > dist_sq:
-                cls.closest_mouse_dist_sq = dist_sq
+            # first measurement after show(): seed the baseline with the
+            # CURRENT distance (VSCode's first isMouseGettingCloser call
+            # also just records and returns 'not closer' - a hide needs a
+            # LATER measurement proving the distance GREW). Never seed
+            # with the show-time position: the form often appears AT the
+            # resting mouse (hover anchors at the hovered word), which
+            # would give baseline 0 and make any move off the form read
+            # as 'farther' - the hover would die on the first check.
+            cls.closest_mouse_dist_sq = dist_sq
             return True
         if dist_sq > cls.closest_mouse_dist_sq + (HOVER_CLOSER_TOLERANCE_PX ** 2) * 2:
             # mouse is getting farther away
@@ -469,10 +464,16 @@ class Hint:
     @classmethod
     def hide_check_timer(cls, tag='', info=''):
         """ The scheduled hide reaction (VSCode _reactToEditorMouseMoveRunner
-        firing after hidingDelay). NOT a poll: it runs only when armed by
-        show() (mouse never entered the hover yet) or by form_mouse_exit
-        (mouse just left the hover). """
-        global app_active
+        firing after hidingDelay). Runs only when armed: by show() (mouse
+        never entered the hover yet), by form_mouse_exit (mouse just left),
+        or by the previous keep decision (self-healing chain). """
+        # NOTE: 'app_active' is deliberately NOT consulted here. It is a
+        # plugin-tracked flag that only updates on on_app_activate/
+        # deactivate; a missed activate (see lsp.on_app_activate) left it
+        # stuck False and made EVERY check hide the hover an instant after
+        # show - the exact 'shows then vanishes' bug. The real deactivate
+        # EVENT already hides the hover directly; a stale flag must never
+        # be allowed to hide it.
 
         if not cls.is_visible():
             # dialog closed already (autocompletion, Esc, app deactivate)
@@ -481,29 +482,23 @@ class Hint:
 
         ### VSCode contentHoverController._reactToEditorMouseMove: hide
         ### ONLY when all of these are false:
-        ###   - app is active
-        ###   - mouse is INSIDE the hover (sticky; runner was canceled)
+        ###   - mouse is INSIDE the hover (sticky)
         ###   - mouse is GETTING CLOSER to the hover (isMouseGettingCloser)
         ###   - user is dragging the resize grip
         ###   - mouse button is held down (e.g. selecting hover text)
-        if not app_active:
-            timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
-            cls.hide()
-            return
-
         left_button_down = 'L' in app_proc(PROC_GET_KEYSTATE, '')
 
-        inside = is_mouse_in_form(cls.h)
-        if not inside:
-            closer = cls.is_mouse_getting_closer()
-        else:
-            # mouse re-entered before the check fired: keep it, disarm
-            # (an exit event re-arms)
+        if is_mouse_in_form(cls.h):
+            # mouse is inside: keep open. The chain keeps re-arming
+            # (a slow loop; events may never fire on some CudaText builds,
+            # so the chain itself must implement 'sticky'), and the
+            # closest-baseline resets so a later exit is judged fresh.
             cls.closest_mouse_dist_sq = 0
             timer_proc(TIMER_STOP, Hint.hide_check_timer, 250, tag='')
+            timer_proc(TIMER_START_ONE, Hint.hide_check_timer, HOVER_HIDING_DELAY_MS, tag='inside')
             return
 
-        if app_active and closer and not left_button_down and not cls.resizing:
+        if cls.is_mouse_getting_closer() and not left_button_down and not cls.resizing:
             # VSCode _shouldRescheduleHoverComputation: mouse is still
             # heading toward the hover - keep it and grant ANOTHER full
             # hidingDelay grace period before judging again

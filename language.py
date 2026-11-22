@@ -165,6 +165,13 @@ KNOWN_SINGLE_ROOT_SERVERS = {'omnisharp'}
 # answers (or a canceled request) would otherwise leak entries all session
 REQUEST_POSITIONS_CAP = 64
 
+# VSCode hoverOperation._loadingMessageTime = 3 * editor.hover.delay (300):
+# a hover response slower than this shows a 'Loading...' placeholder
+# which the real response replaces (issue #6329: 'in vscode it shows a
+# small dialog saying loading, then once lsp response comes it updates')
+HOVER_LOADING_MESSAGE_MS = 900
+HOVER_LOADING_TEXT = 'Loading...'
+
 CALLABLE_COMPLETIONS = {
     lsp.CompletionItemKind.Method,
     lsp.CompletionItemKind.Function,
@@ -328,6 +335,9 @@ class Language:
         self._resync_timer_armed = False
         # strong ref: the timer must not hold the only reference
         self._resync_timer_cb = self._on_resync_timer
+        # strong ref for the hover 'Loading...' placeholder timer (same
+        # reason; VSCode _loadingMessageScheduler)
+        self._hover_loading_cb = self._hover_loading_timer
 
         # --- diagnostics-freshness evidence (VS Code's diagnosticsProvider
         # needs none - it PULLS codeCheck; an LSP client must infer). The
@@ -660,6 +670,7 @@ class Language:
                     self.exit(process_queues=False)
 
             # read Queue
+            _got_messages = False
             while not self._read_q.empty():
                 data = self._read_q.get()
 
@@ -701,11 +712,21 @@ class Language:
                     # Now handle the message - with separate error handling
                     try:
                         self._on_lsp_msg(msg)
+                        _got_messages = True
                     except Exception as err:
                         # Error during message processing
                         print(f'ERROR: LSP Message handler error: {LOG_NAME}: {self.lang_str} - {err}')
                         pass;       LOG and traceback.print_exc()
                         # Continue processing next message (don't break)
+
+            # receiving a message must revive the poll chain: the timer
+            # callback STOPS re-arming itself once the period reaches
+            # maxtime, so a server answer arriving when the chain is dead
+            # (slow hover/definition response after an idle moment) used
+            # to sit in _read_q until the next outgoing message restarted
+            # the chain - hovers 'sometimes showed, sometimes not'
+            if _got_messages:
+                self._timer.restart()
 
             # send Queue
             send_buf = self.client.send()
@@ -787,6 +808,9 @@ class Language:
                     self._pending_hover_ids.remove(msg.id)
                 except ValueError:
                     pass
+                # no 'Loading...' placeholder needed anymore (VSCode
+                # loadingMessageScheduler is canceled by any result)
+                timer_proc(TIMER_STOP, self._hover_loading_cb, 250, tag='')
                 if ed.get_prop(PROP_HANDLE_SELF) == _reqpos.h_ed:
                     contents = msg.result.contents if msg.result is not None else None
                     first_item = contents[0] if isinstance(contents, list) and len(contents) > 0 else contents
@@ -1850,13 +1874,45 @@ class Language:
             prev_token, prev_line, prev_x1 = token, line, x1
 
     def on_hover(self, eddoc, caret):
-        """ just sends request to server, dsiplaying stuff in 'dlg.py/Hint'
+        """ Sends the hover request (VSCode hoverOperation.start(Delayed)):
+        - the LSP request fires immediately (VSCode fires the async
+          computation at delay/2 - CudaText's mouse-stop dwell already
+          burned that delay, so no extra wait);
+        - a placeholder timer arms at 3*delay (VSCode _loadingMessageTime):
+          if the server hasn't answered by then, show a 'Loading...' hover
+          so the user sees *something* is happening (issue #6329: 'in vscode
+          it shows a small dialog saying loading');
+        - the response replaces the placeholder (see HoverResponse handler).
         """
+        self.cancel_pending_hovers()
         id, pos = self._action_by_name(METHOD_HOVER, eddoc, caret)
         if id is not None:
             self._save_req_pos(id=id, eddoc=eddoc, target_pos_caret=pos)
             # register as the live hover request (see cancel_pending_hovers)
             self._pending_hover_ids.append(id)
+            # VSCode _loadingMessageScheduler.schedule(3 * hoverTime):
+            # placeholder only when the response is genuinely late
+            timer_proc(TIMER_STOP, self._hover_loading_cb, 250, tag='')
+            timer_proc(TIMER_START_ONE, self._hover_loading_cb,
+                       HOVER_LOADING_MESSAGE_MS, tag='loading')
+    def _hover_loading_timer(self, tag='', info=''):
+        """ Fires when a hover response is late (VSCode WaitingForAsyncShowing
+        Loading): show the 'Loading...' placeholder if the answer still
+        hasn't arrived; the real response will replace it. """
+        if not self._pending_hover_ids:
+            return
+        # the newest pending hover request's position
+        _id = self._pending_hover_ids[-1]
+        reqpos = self.request_positions.get(_id)
+        if reqpos is None:
+            return
+        if Hint.is_visible():
+            return # real content is up already (e.g. replaced by a
+                   # previous request's answer) - nothing to do
+        Hint.show(_(HOVER_LOADING_TEXT),
+                  caret=reqpos.target_pos_caret,
+                  cursor_loc_start=reqpos.cursor_ed,
+                  markupkind=None)
 
     def cancel_pending_hovers(self):
         """ Drop unanswered hover requests (VSCode hoverOperation.cancel on
@@ -1867,6 +1923,8 @@ class Language:
         for _id in self._pending_hover_ids:
             self.request_positions.pop(_id, None)
         self._pending_hover_ids.clear()
+        # cancel the not-yet-fired 'Loading...' placeholder as well
+        timer_proc(TIMER_STOP, self._hover_loading_cb, 250, tag='')
 
     def _handle_metadata(self, result, targetrange, reqpos, dlg_caption):
         """Callback to handle OmniSharp o#/metadata response and display source."""
