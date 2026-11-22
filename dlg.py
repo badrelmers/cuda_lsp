@@ -197,15 +197,17 @@ class Hint:
         ### untouched. A strip shows the resize cursor on hover; dragging
         ### resizes; the hovered strip is highlighted (the 'blue line' -
         ### VSCode sash hover state).
-        ### LEFT and BOTTOM edges only: the hover is anchored at its
-        ### top-right to the caret, so growing left/down keeps the anchor
-        ### stable - dragging right/top would cover the code the user is
-        ### reading and drift away from the symbol.
+        ### RIGHT and BOTTOM edges only: the hover is anchored at its
+        ### top-RIGHT to the caret, so the RIGHT sash grows the width
+        ### rightward (w += dw) and the BOTTOM sash grows downward (h += dh)
+        ### - both away from the anchored caret code, keeping the anchor
+        ### stable; dragging left/top would drift over the code the user
+        ### is reading.
         ### (The old 16px corner grip stole clicks near the corner and
         ### made 'click then move' resize the hover.)
         cls._n_sash = {}
-        for side in ('l', 'b'):
-            is_vert = side == 'l'
+        for side in ('r', 'b'):
+            is_vert = side == 'r'
             p = {
                 'name': 'sash_'+side,
                 'color': color_form_bg,     # invisible until hovered
@@ -216,8 +218,8 @@ class Hint:
                 'on_mouse_exit': cls.sash_mouse_exit,
                 'cursor': (CURSOR_SIZE_WE if is_vert else CURSOR_SIZE_NS),
                 }
-            if side == 'l':
-                p.update({'align': ALIGN_LEFT, 'w': HOVER_SASH_W})
+            if side == 'r':
+                p.update({'align': ALIGN_RIGHT, 'w': HOVER_SASH_W})
             else:
                 p.update({'align': ALIGN_BOTTOM, 'h': HOVER_SASH_W})
             cls._n_sash[side] = dlg_proc(h, DLG_CTL_ADD, 'panel')
@@ -496,8 +498,9 @@ class Hint:
         dw = mx - cls._rs_x
         dh = my - cls._rs_y
         # VSCode sash: only the dragged edge moves. The hover is anchored
-        # at its top-right to the caret: the LEFT sash grows the width
-        # leftward (w -= dw), the BOTTOM sash grows downward (h += dh).
+        # at its top-RIGHT to the caret: the RIGHT sash grows the width
+        # rightward (w += dw), the BOTTOM sash grows downward (h += dh) -
+        # both grow away from the anchored caret.
         # Cap both to 90% of the editor viewport (VSCode
         # _availableVerticalSpaceAbove/Below clamp the hover to the
         # editor) - a hover larger than the editor would cover it whole.
@@ -505,8 +508,8 @@ class Hint:
         _max_w = int(_vw * HOVER_MAX_VIEWPORT_FRACTION)
         _max_h = int(_vh * HOVER_MAX_VIEWPORT_FRACTION)
         w = h = None
-        if side == 'l':
-            w = cls._rs_w - dw
+        if side == 'r':
+            w = cls._rs_w + dw
         else:
             h = cls._rs_h + dh
         if w is not None:

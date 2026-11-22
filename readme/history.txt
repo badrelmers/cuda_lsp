@@ -1,3 +1,11 @@
+2026.11.22 (by @badrelmers, round 8 with z.ai agent)
+- change (user correction): hover resize sashes are now RIGHT and BOTTOM
+  only (was left+bottom - the user had written 'left' by mistake and
+  meant 'right'); dragging the RIGHT sash grows the width rightward
+  (w += dw), away from the caret-anchored top-right corner; the 90%
+  editor-viewport cap and the bottom sash are unchanged
+- tests: sash suites updated to right+bottom (86 assertions green across
+  the three suites), new right-sash direction/cap regressions
 2026.11.22 (by @badrelmers, round 7 with z.ai agent)
 - fix (CRITICAL, the request storm): the hover re-fired forever with the
   mouse parked - the dwell timer fired the request and then reset its own
