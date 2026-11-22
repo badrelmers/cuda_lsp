@@ -38,6 +38,7 @@ HOVER_SASH_W = 5               # VSCode sash thickness (hover hit area)
 HOVER_SASH_HOT_COLOR = 0xFF0000 # hovered sash line (set from theme blue in init)
 HOVER_MIN_W = 150              # VSCode minimumSize width
 HOVER_MIN_H = 60
+HOVER_MAX_VIEWPORT_FRACTION = 0.9  # VSCode: hover <= 90% of editor viewport
 
 
 def mix_colors(c1, c2):
@@ -191,16 +192,20 @@ class Hint:
         cls.apply_md_colors()
 
         ### RESIZABLE - VSCode resizableContentWidget 'sashes' model:
-        ### thin panel strips on the 4 EDGES only. The content (md_view)
+        ### thin panel strips on edges only. The content (md_view)
         ### receives all clicks: text selection, links, scrolling are
         ### untouched. A strip shows the resize cursor on hover; dragging
         ### resizes; the hovered strip is highlighted (the 'blue line' -
         ### VSCode sash hover state).
+        ### LEFT and BOTTOM edges only: the hover is anchored at its
+        ### top-right to the caret, so growing left/down keeps the anchor
+        ### stable - dragging right/top would cover the code the user is
+        ### reading and drift away from the symbol.
         ### (The old 16px corner grip stole clicks near the corner and
         ### made 'click then move' resize the hover.)
         cls._n_sash = {}
-        for side in ('l', 'r', 't', 'b'):
-            is_vert = side in ('l', 'r')
+        for side in ('l', 'b'):
+            is_vert = side == 'l'
             p = {
                 'name': 'sash_'+side,
                 'color': color_form_bg,     # invisible until hovered
@@ -213,10 +218,6 @@ class Hint:
                 }
             if side == 'l':
                 p.update({'align': ALIGN_LEFT, 'w': HOVER_SASH_W})
-            elif side == 'r':
-                p.update({'align': ALIGN_RIGHT, 'w': HOVER_SASH_W})
-            elif side == 't':
-                p.update({'align': ALIGN_TOP, 'h': HOVER_SASH_W})
             else:
                 p.update({'align': ALIGN_BOTTOM, 'h': HOVER_SASH_W})
             cls._n_sash[side] = dlg_proc(h, DLG_CTL_ADD, 'panel')
@@ -494,15 +495,49 @@ class Hint:
         mx, my = app_proc(PROC_GET_MOUSE_POS, '')
         dw = mx - cls._rs_x
         dh = my - cls._rs_y
-        w = max(HOVER_MIN_W, cls._rs_w + dw)
-        h = max(HOVER_MIN_H, cls._rs_h + dh)
-        # only the dragged edge moves (VSCode sash drags one edge; the
-        # form keeps the opposite edge anchored - it is placed relative
-        # to the caret, so growing right/down is the natural direction)
+        # VSCode sash: only the dragged edge moves. The hover is anchored
+        # at its top-right to the caret: the LEFT sash grows the width
+        # leftward (w -= dw), the BOTTOM sash grows downward (h += dh).
+        # Cap both to 90% of the editor viewport (VSCode
+        # _availableVerticalSpaceAbove/Below clamp the hover to the
+        # editor) - a hover larger than the editor would cover it whole.
+        _vw, _vh = cls.editor_viewport_size()
+        _max_w = int(_vw * HOVER_MAX_VIEWPORT_FRACTION)
+        _max_h = int(_vh * HOVER_MAX_VIEWPORT_FRACTION)
+        w = h = None
+        if side == 'l':
+            w = cls._rs_w - dw
+        else:
+            h = cls._rs_h + dh
+        if w is not None:
+            w = max(HOVER_MIN_W, min(w, _max_w or HOVER_MIN_W))
+            h = cls._rs_h
+        else:
+            h = max(HOVER_MIN_H, min(h, _max_h or HOVER_MIN_H))
+            w = cls._rs_w
         prop = {'w': w, 'h': h}
         dlg_proc(cls.h, DLG_PROP_SET, prop=prop)
         cls.user_w = w      # VSCode _lastDimensions persistence
         cls.user_h = h
+
+    @classmethod
+    def editor_viewport_size(cls):
+        """ Size of the editor the hover is anchored to (VSCode clamps the
+        resizable hover against the editor viewport). Returns a fallback of
+        the monitor size when the editor is unavailable. """
+        try:
+            rect = ed.get_prop(PROP_RECT_CLIENT)
+            if rect and len(rect) == 4:
+                return max(50, rect[2] - rect[0]), max(50, rect[3] - rect[1])
+        except Exception:
+            pass
+        try:
+            m = app_proc(PROC_COORD_MONITOR, '')
+            if m and len(m) == 4:
+                return max(50, m[2] - m[0]), max(50, m[3] - m[1])
+        except Exception:
+            pass
+        return 800, 600
 
     @classmethod
     def sash_mouse_up(cls, id_dlg, id_ctl, data='', info=''):

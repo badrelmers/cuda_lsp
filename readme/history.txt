@@ -1,3 +1,24 @@
+2026.11.22 (by @badrelmers, round 5 with z.ai agent)
+- fix (CRITICAL, root-caused in CudaText's own Object Pascal source): the
+  3-4s hover delay was NOT the server - the request itself left the plugin
+  seconds late. on_mouse_stop is driven by the engine's TimerMouseStop
+  (Interval=1400ms, one-shot: formmain.pas disables itself in its own
+  handler), and its ONLY re-arm site is TimerAppIdleTimer (formmain.pas
+  ~2639) - a TIdleTimer, which the engine itself documents as 'not fired
+  when Ctrl/Alt/Shift are holded' (formmain.pas:10501). So the event fired
+  1.4s + idle-cadence late, and with hover_with_ctrl=true NEVER fired -
+  Ctrl-hover was structurally impossible. The plugin no longer relies on
+  on_mouse_stop: a plugin timer_proc TTimer (a plain TTimer, verified in
+  the engine source - fires regardless of held modifier keys) polls the
+  screen mouse at 100ms and fires the hover request when it has not moved
+  for 300ms (VSCode editor.hover.delay) over the editor's text area
+- fix: hover_with_ctrl=true made Ctrl-hover impossible (same root cause
+  as above - the dwell event never fired while Ctrl was held)
+- change: the hover resizes by its LEFT and BOTTOM edges only (the hover
+  is anchored at its top-right to the caret - growing left/down keeps the
+  anchor stable; the top/right sashes are gone), capped at 90% of the
+  editor viewport (VSCode clamps its hover to the editor viewport;
+  PROP_RECT_CLIENT with a PROC_COORD_MONITOR fallback)
 2026.11.22 (by @badrelmers, round 4 with z.ai agent)
 - add: VSCode resizableContentWidget sashes for the hover - thin edge
   strips (5px, VSCode sash size) replace the old 16px corner grip: a

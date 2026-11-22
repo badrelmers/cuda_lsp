@@ -16,6 +16,7 @@ _ = get_translation(__file__)  # I18N
 
 from . import dlg
 from .dlg import Hint, SignaturesDialog
+from .dlg import HOVER_SHOW_DELAY_MS as HOVER_DWELL_MS
 from . import panel
 from .panel import LspPanel, PANEL_NAME, set_pending_state
 from . import language
@@ -323,6 +324,13 @@ class Command:
         # dies/logs while not shown - no event-ordering assumptions left
         LspPanel.sync_hook = self.sync_panel
 
+        # mouse-dwell poll (100ms TTimer via timer_proc - a plain timer,
+        # unaffected by held Ctrl/Shift/Alt, unlike the engine's
+        # TIdleTimer-re-armed TimerMouseStop; see _mouse_dwell_timer)
+        self._dwell_screen_xy = None
+        self._dwell_screen_t0 = None
+        timer_proc(TIMER_START, Command._mouse_dwell_timer, 100, tag='')
+
         # hover dlg calls these with "caret" named param, caret is tuple(caretx, carety)
         self._hint_cmds = {
             _('Definition'):        self.call_definition,
@@ -577,28 +585,76 @@ class Command:
                 break
 
     def on_mouse_stop(self, ed_self, x, y):
-        if not opt_enable_mouse_hover:      return
-        # require Control pressed - 'c' IN the state string, not == 'c':
-        # 'cs'/'ca' (Ctrl held with Shift/Alt) must still summon the hover;
-        # the exact-equality check made Ctrl-hover flaky (pressing Shift a
-        # hair too early/late silently cancelled the request)
-        if opt_hover_with_ctrl and ('c' not in app_proc(PROC_GET_KEYSTATE, '')):
-            return
-        # VSCode _shouldKeepCurrentHover: never replace a hover the mouse
-        # is currently inside / interacting with (resizing, reading)
-        if Hint.is_under_cursor() or Hint.resizing:
+        # ENGINE dwell event - deliberately NOT used to request hovers:
+        # CudaText's TimerMouseStop waits 1400ms, disables itself, and is
+        # re-armed ONLY by the app's TIdleTimer - which the engine itself
+        # documents as 'not fired when Ctrl/Alt/Shift are holded'. Result:
+        # the event fired 1.4s + idle-interval late (the reported 3-4s
+        # hover delay), and with hover_with_ctrl=true NEVER fired - the
+        # Ctrl-hover could not work at all. The plugin's own timer_proc
+        # TTimer detects the dwell in 300ms regardless of held keys
+        # (see _mouse_dwell_timer); install.inf keeps the subscription so
+        # CudaText knows the plugin 'uses' this event (its enable logic).
+        pass
+
+    ### --- plugin-side mouse-dwell detection (VSCode hover.delay) -------
+    # Poll the screen mouse at 100ms; when it has not moved for
+    # HOVER_DWELL_MS (300ms - VSCode editor.hover.delay) over the
+    # focused editor, fire the hover request. Plain TTimer (timer_proc),
+    # so - unlike the engine's TIdleTimer-re-armed TimerMouseStop - it
+    # works while Ctrl/Shift/Alt are held.
+
+    def _mouse_dwell_timer(self, tag='', info=''):
+        """ 100ms poll: detect 'mouse stopped over the focused editor'. """
+        if not opt_enable_mouse_hover:
             return
 
-        doc = self.book.get_doc(ed_self)
-        #if ed_self.get_prop(PROP_FOCUSED):
-        caret = ed_self.convert(CONVERT_PIXELS_TO_CARET, x, y, "")
+        mx, my = app_proc(PROC_GET_MOUSE_POS, '')
+
+        # moved since the last poll? reset the dwell anchor
+        _moved = True
+        if (mx, my) == getattr(self, '_dwell_screen_xy', None):
+            _moved = False
+        else:
+            self._dwell_screen_xy = (mx, my)
+            self._dwell_screen_t0 = None  # restart dwell timing
+
+        if _moved:
+            return
+
+        if self._dwell_screen_t0 is None:
+            self._dwell_screen_t0 = time.time()
+            return
+        if time.time() - self._dwell_screen_t0 < HOVER_DWELL_MS / 1000:
+            return
+
+        # the mouse has been still for the dwell time: is it over the
+        # focused editor's TEXT area? ('ed' is CudaText's focused editor;
+        # the point must be inside PROP_RECT_TEXT - excludes gutter/
+        # minimap/ruler - and convert to a caret cleanly)
+        _ed_local = ed.convert(CONVERT_SCREEN_TO_LOCAL, mx, my)
+        if _ed_local is None:
+            return
+        _lx, _ly = _ed_local
+        _rect = ed.get_prop(PROP_RECT_TEXT) or (0, 0, 0, 0)
+        if not (_rect[0] <= _lx <= _rect[2] and _rect[1] <= _ly <= _rect[3]):
+            return
+        caret = ed.convert(CONVERT_PIXELS_TO_CARET, _lx, _ly, '')
         if caret is None:
+            return
+        # VSCode _shouldKeepCurrentHover: never replace a hover the
+        # mouse is currently inside / interacting with (resized/read)
+        if Hint.is_under_cursor() or Hint.resizing:
+            return
+        if opt_hover_with_ctrl and ('c' not in app_proc(PROC_GET_KEYSTATE, '')):
             return
         # cancel any still-pending hover request from an earlier rest
         # position: a slow server would otherwise deliver it late and
         # overwrite the hover for the position the user reads NOW
-        self.cancel_pending_hover(ed_self)
-        self.call_hover(ed_self, caret)
+        self.cancel_pending_hover(ed)
+        self.call_hover(ed, caret)
+        # one request per dwell; the next one needs a fresh move
+        self._dwell_screen_t0 = None
 
     def cancel_pending_hover(self, ed_self):
         """ Drop not-yet-answered hover requests of the given editor so a
