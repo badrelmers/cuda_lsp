@@ -16,7 +16,6 @@ _ = get_translation(__file__)  # I18N
 
 from . import dlg
 from .dlg import Hint, SignaturesDialog
-from .dlg import HOVER_SHOW_DELAY_MS as HOVER_DWELL_MS
 from . import panel
 from .panel import LspPanel, PANEL_NAME, set_pending_state
 from . import language
@@ -89,7 +88,15 @@ opt_hover_additional_commands = [
     "Type definition",
 ]
 opt_hover_with_ctrl = True
+opt_hover_dwell_ms = 300      # VSCode editor.hover.delay (mouse-rest before the hover request)
 opt_cudatext_in_py_env = False
+
+# module-level dwell state + the plugin instance for the timer callback
+# (timer_proc's proxy calls the callback with NO 'self': the dwell timer
+# is a @staticmethod and reaches the plugin through _command_instance)
+_command_instance = None
+_command_instance_dwell_xy = [None]    # last polled screen mouse pos
+_command_instance_dwell_t0 = [None]    # when the mouse stopped moving
 opt_lint_type = 'dc'
 opt_lint_underline_style = 2  # solid 0, dotted 1, dashes 2, wave 3
 opt_enable_code_tree = False
@@ -326,9 +333,13 @@ class Command:
 
         # mouse-dwell poll (100ms TTimer via timer_proc - a plain timer,
         # unaffected by held Ctrl/Shift/Alt, unlike the engine's
-        # TIdleTimer-re-armed TimerMouseStop; see _mouse_dwell_timer)
-        self._dwell_screen_xy = None
-        self._dwell_screen_t0 = None
+        # TIdleTimer-re-armed TimerMouseStop; see _mouse_dwell_timer).
+        # The callback is a @staticmethod with MODULE-level state: the
+        # engine's timer proxy calls cb(tag) with no 'self' (timer_proc
+        # registers str(callback) - an unbound method would receive the
+        # tag string as 'self').
+        global _command_instance
+        _command_instance = self
         timer_proc(TIMER_START, Command._mouse_dwell_timer, 100, tag='')
 
         # hover dlg calls these with "caret" named param, caret is tuple(caretx, carety)
@@ -599,33 +610,44 @@ class Command:
 
     ### --- plugin-side mouse-dwell detection (VSCode hover.delay) -------
     # Poll the screen mouse at 100ms; when it has not moved for
-    # HOVER_DWELL_MS (300ms - VSCode editor.hover.delay) over the
-    # focused editor, fire the hover request. Plain TTimer (timer_proc),
-    # so - unlike the engine's TIdleTimer-re-armed TimerMouseStop - it
-    # works while Ctrl/Shift/Alt are held.
+    # opt_hover_dwell_ms (default 300ms - VSCode editor.hover.delay)
+    # over the focused editor, fire the hover request. Plain TTimer
+    # (timer_proc), so - unlike the engine's TIdleTimer-re-armed
+    # TimerMouseStop - it works while Ctrl/Shift/Alt are held.
+    #
+    # MUST be a @staticmethod: timer_proc registers the callback by
+    # str(callback) and the engine proxy calls cb(tag) - for a plain
+    # function object the tag string would land in 'self' (the
+    # AttributeError: 'str' object has no attribute ... bug class).
 
-    def _mouse_dwell_timer(self, tag='', info=''):
+    @staticmethod
+    def _mouse_dwell_timer(tag='', info=''):
         """ 100ms poll: detect 'mouse stopped over the focused editor'. """
         if not opt_enable_mouse_hover:
+            return
+        # the single plugin instance of this module (Command() is created
+        # once by CudaText when loading the plugin)
+        _cmd = _command_instance
+        if _cmd is None:
             return
 
         mx, my = app_proc(PROC_GET_MOUSE_POS, '')
 
         # moved since the last poll? reset the dwell anchor
         _moved = True
-        if (mx, my) == getattr(self, '_dwell_screen_xy', None):
+        if (mx, my) == _command_instance_dwell_xy[0]:
             _moved = False
         else:
-            self._dwell_screen_xy = (mx, my)
-            self._dwell_screen_t0 = None  # restart dwell timing
+            _command_instance_dwell_xy[0] = (mx, my)
+            _command_instance_dwell_t0[0] = None  # restart dwell timing
 
         if _moved:
             return
 
-        if self._dwell_screen_t0 is None:
-            self._dwell_screen_t0 = time.time()
+        if _command_instance_dwell_t0[0] is None:
+            _command_instance_dwell_t0[0] = time.time()
             return
-        if time.time() - self._dwell_screen_t0 < HOVER_DWELL_MS / 1000:
+        if time.time() - _command_instance_dwell_t0[0] < opt_hover_dwell_ms / 1000:
             return
 
         # the mouse has been still for the dwell time: is it over the
@@ -651,10 +673,10 @@ class Command:
         # cancel any still-pending hover request from an earlier rest
         # position: a slow server would otherwise deliver it late and
         # overwrite the hover for the position the user reads NOW
-        self.cancel_pending_hover(ed)
-        self.call_hover(ed, caret)
+        _cmd.cancel_pending_hover(ed)
+        _cmd.call_hover(ed, caret)
         # one request per dwell; the next one needs a fresh move
-        self._dwell_screen_t0 = None
+        _command_instance_dwell_t0[0] = None
 
     def cancel_pending_hover(self, ed_self):
         """ Drop not-yet-answered hover requests of the given editor so a
@@ -1547,6 +1569,7 @@ class Command:
         global opt_hover_max_lines
         global opt_hover_additional_commands
         global opt_hover_with_ctrl
+        global opt_hover_dwell_ms
         global opt_cudatext_in_py_env
         global opt_lint_type
         global opt_lint_underline_style
@@ -1590,6 +1613,7 @@ class Command:
             opt_hover_max_lines = j.get('hover_dlg_max_lines', opt_hover_max_lines)
             opt_hover_additional_commands = j.get('hover_additional_commands', opt_hover_additional_commands)
             opt_hover_with_ctrl = j.get('hover_with_ctrl', opt_hover_with_ctrl)
+            opt_hover_dwell_ms = j.get('hover_dwell_ms', opt_hover_dwell_ms)
             opt_cudatext_in_py_env = j.get('cudatext_in_py_env', opt_cudatext_in_py_env)
             opt_lint_type = j.get('lint_type', opt_lint_type)
             opt_auto_append_bracket = j.get('auto_append_bracket', opt_auto_append_bracket)
@@ -1729,6 +1753,7 @@ class Command:
             'hover_dlg_max_lines':       opt_hover_max_lines,
             'hover_additional_commands': opt_hover_additional_commands,
             'hover_with_ctrl':           opt_hover_with_ctrl,
+            'hover_dwell_ms':            opt_hover_dwell_ms,
             'cudatext_in_py_env':        opt_cudatext_in_py_env,
             'lint_type':                 opt_lint_type,
             'lint_underline_style':      opt_lint_underline_style,

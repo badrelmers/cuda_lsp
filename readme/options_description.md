@@ -55,12 +55,14 @@ Hover dialog behavior (modeled on VS Code, `editor.hover.*` settings):
 * Hover responses render as soon as the server sends them: while any request is unanswered, the plugin keeps polling the server connection, so a hover arriving late still shows immediately.
 * Once shown, the hover stays open while the mouse is over it, or moving TOWARD it - it only hides when the mouse leaves it and then moves away from it (after a ~300ms grace period, like VS Code's `editor.hover.hidingDelay`). Resting the mouse without entering it never closes the hover by itself.
 * If the server needs longer than ~900ms (3x the 300ms delay, VS Code's `_loadingMessageTime`) to answer a hover request, a small `Loading...` hover shows at the symbol; the real content replaces it the moment the response arrives.
-* Immediate hides: Esc, typed keys, app losing focus. (Note: unlike VS Code, scrolling the editor does not instantly hide the hover - CudaText reports scroll events in cases where the editor did not actually scroll, which previously made the hover vanish right after appearing; the hover dismisses through the same mouse-leave path instead.)
+* Immediate hides: Esc, typed keys, app losing focus, mouse click outside the hover.
 * A pending hover request is canceled when you rest the mouse elsewhere, so a slow server cannot overwrite the hover you are reading now with one for an old position.
 
 * hover_additional_commands - list of additional commands to show in the hover-dialog. Possible values:
 
 * hover_with_ctrl - if 'true', Ctrl-key must be pressed when you want to show the hover-dialog (by moving and stopping the mouse).
+
+* hover_dwell_ms - how long the mouse must rest over the code before the hover request is sent, in milliseconds (default 300, like VS Code's `editor.hover.delay`).
 
 * cudatext_in_py_env - add CudaText API to Python server.
 

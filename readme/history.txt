@@ -1,3 +1,22 @@
+2026.11.22 (by @badrelmers, round 6 with z.ai agent)
+- fix (CRITICAL crash): AttributeError "'str' object has no attribute
+  '_dwell_screen_xy'" from _timer_proc_callback_proxy every 100ms -
+  timer_proc registers the callback by str(callback) and the engine's
+  proxy calls cb(tag) with NO self: the round-5 dwell timer was a plain
+  (unbound) method, so the tag STRING landed in 'self' and the first
+  self._dwell_screen_xy access crashed on every tick. The dwell timer is
+  now a @staticmethod with module-level state (_command_instance,
+  _command_instance_dwell_xy/_t0 - set from Command.__init__); verified
+  headless by calling the callback the way the engine proxy does
+- add: option 'hover_dwell_ms' (cuda_lsp.json, default 300 = VS Code
+  editor.hover.delay) - how long the mouse must rest before the hover
+  request; the dwell timer reads it on every tick, so config changes
+  apply immediately. Documented in readme/options_description.md
+- fix (docs): the readme still claimed 'scrolling the editor does not
+  instantly hide the hover' with the CudaText-on_scroll rationale - the
+  same wrong claim the round-2 discussion had corrected; removed (the
+  hide model stands on mouse-leave + hidingDelay alone; 'mouse click
+  outside the hover' restored to the immediate-hide list)
 2026.11.22 (by @badrelmers, round 5 with z.ai agent)
 - fix (CRITICAL, root-caused in CudaText's own Object Pascal source): the
   3-4s hover delay was NOT the server - the request itself left the plugin
